@@ -1,0 +1,24 @@
+{
+  "name": "agent",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --target bun --outfile ./dist/index.js --packages external --bundle",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.6",
+    "@mariozechner/pi-ai": "^0.73.1",
+    "@sinclair/typebox": "^0.34.52",
+    "@vt-agent/command-policy": "workspace:*",
+    "@vt-agent/explorer": "workspace:*"
+  }
+}

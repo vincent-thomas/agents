@@ -1,0 +1,22 @@
+{
+	"name": "@vt-agent/command-policy",
+	"private": true,
+	"version": "0.0.0",
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		}
+	},
+	"scripts": {
+		"build": "tsc",
+		"test": "node --test"
+	},
+	"dependencies": {
+		"@mariozechner/pi-coding-agent": "^0.73.1"
+	},
+	"devDependencies": {
+		"typescript": "^7.0.2"
+	}
+}

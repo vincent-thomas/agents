@@ -24,134 +24,134 @@ const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=.*$/;
  * single-char prefixes so they win the alternation.
  */
 export function splitCommandSegments(text: string): string[] {
-	const segments: string[] = [];
-	let current = "";
-	let quote: "'" | '"' | null = null;
-	let escape = false;
-	let skipRedirectionTarget = false;
-	// Nesting depth of $(...) and <(...) — when > 0, ) should not split.
-	let substStack: string[] = [];
+  const segments: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escape = false;
+  let skipRedirectionTarget = false;
+  // Nesting depth of $(...) and <(...) — when > 0, ) should not split.
+  let substStack: string[] = [];
 
-	function pushCurrent() {
-		segments.push(current);
-		current = "";
-	}
+  function pushCurrent() {
+    segments.push(current);
+    current = "";
+  }
 
-	for (let i = 0; i < text.length; i++) {
-		const ch = text[i];
-		const next = text[i + 1];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
 
-		if (skipRedirectionTarget) {
-			if (/\s/.test(ch)) continue;
-			// Consume the redirection target: an FD number/filename after `>`/`<`, or
-			// (after an FD-duplication `&`, e.g. `>&n`, `<&n`, `<&-`) the FD/filename following it.
-			if (ch === "&") i++;
-			while (i < text.length && !/[\s;|&()`<>{}]/.test(text[i])) i++;
-			i--;
-			skipRedirectionTarget = false;
-			continue;
-		}
+    if (skipRedirectionTarget) {
+      if (/\s/.test(ch)) continue;
+      // Consume the redirection target: an FD number/filename after `>`/`<`, or
+      // (after an FD-duplication `&`, e.g. `>&n`, `<&n`, `<&-`) the FD/filename following it.
+      if (ch === "&") i++;
+      while (i < text.length && !/[\s;|&()`<>{}]/.test(text[i])) i++;
+      i--;
+      skipRedirectionTarget = false;
+      continue;
+    }
 
-		if (escape) {
-			current += ch;
-			escape = false;
-			continue;
-		}
+    if (escape) {
+      current += ch;
+      escape = false;
+      continue;
+    }
 
-		if (ch === "\\") {
-			current += ch;
-			escape = true;
-			continue;
-		}
+    if (ch === "\\") {
+      current += ch;
+      escape = true;
+      continue;
+    }
 
-		if (quote) {
-			current += ch;
-			if (ch === quote) quote = null;
-			continue;
-		}
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
 
-		if (ch === "'" || ch === '"') {
-			current += ch;
-			quote = ch;
-			continue;
-		}
+    if (ch === "'" || ch === '"') {
+      current += ch;
+      quote = ch;
+      continue;
+    }
 
-		if (ch === ")" && substStack.length > 0) {
-			const subType = substStack.pop()!;
-			if (subType === "$") {
-				// Command substitution $(...) — extract the content as a segment.
-				pushCurrent();
-			}
-			// For process substitution <(...) and >(...), the content is an argument — don't push.
-			continue;
-		}
+    if (ch === ")" && substStack.length > 0) {
+      const subType = substStack.pop()!;
+      if (subType === "$") {
+        // Command substitution $(...) — extract the content as a segment.
+        pushCurrent();
+      }
+      // For process substitution <(...) and >(...), the content is an argument — don't push.
+      continue;
+    }
 
-		if ((ch === "&" && next === "&") || (ch === "|" && next === "|")) {
-			pushCurrent();
-			i++;
-			continue;
-		}
+    if ((ch === "&" && next === "&") || (ch === "|" && next === "|")) {
+      pushCurrent();
+      i++;
+      continue;
+    }
 
-		if (ch === "$" && next === "(") {
-			pushCurrent();
-			substStack.push("$");
-			i++;
-			continue;
-		}
+    if (ch === "$" && next === "(") {
+      pushCurrent();
+      substStack.push("$");
+      i++;
+      continue;
+    }
 
-		if (ch === "<" && next === "(") {
-			// Process substitution <(...) — not a redirect, treat as part of segment.
-			current += "<(";
-			substStack.push("<");
-			i++;
-			continue;
-		}
+    if (ch === "<" && next === "(") {
+      // Process substitution <(...) — not a redirect, treat as part of segment.
+      current += "<(";
+      substStack.push("<");
+      i++;
+      continue;
+    }
 
-		if (ch === ">" && next === "(") {
-			// Process substitution >(...) — not a redirect, treat as part of segment.
-			current += ">(";
-			substStack.push(">");
-			i++;
-			continue;
-		}
+    if (ch === ">" && next === "(") {
+      // Process substitution >(...) — not a redirect, treat as part of segment.
+      current += ">(";
+      substStack.push(">");
+      i++;
+      continue;
+    }
 
-		if (ch === "<" || ch === ">") {
-			// Strip trailing FD number before redirection
-			// (e.g., `2>` in `cmd 2>file`, `1>>` in `cmd 1>>file`)
-			current = current.replace(/(\s+)\d+$/, "$1");
-			pushCurrent();
-			if (next === "<" || next === ">") i++;
-			skipRedirectionTarget = true;
-			continue;
-		}
+    if (ch === "<" || ch === ">") {
+      // Strip trailing FD number before redirection
+      // (e.g., `2>` in `cmd 2>file`, `1>>` in `cmd 1>>file`)
+      current = current.replace(/(\s+)\d+$/, "$1");
+      pushCurrent();
+      if (next === "<" || next === ">") i++;
+      skipRedirectionTarget = true;
+      continue;
+    }
 
-		if (/[\n;|&()`{}]/.test(ch)) {
-			pushCurrent();
-			continue;
-		}
+    if (/[\n;|&()`{}]/.test(ch)) {
+      pushCurrent();
+      continue;
+    }
 
-		current += ch;
-	}
+    current += ch;
+  }
 
-	// If we ended while in a here-doc, the current buffer might be the closing
-	// delimiter without a trailing newline. Discard it so it doesn't leak.
-	segments.push(current);
+  // If we ended while in a here-doc, the current buffer might be the closing
+  // delimiter without a trailing newline. Discard it so it doesn't leak.
+  segments.push(current);
 
-	// The loop above treats a double-quoted span as fully opaque, which is
-	// right for splitting purposes (quotes suppress word-splitting) but wrong
-	// for detection purposes: a shell still expands $(...) and `...` *inside*
-	// double quotes, so a banned command can hide there and never appear as
-	// its own segment above — e.g. `echo "$(rm -rf /)"` would otherwise only
-	// ever surface `echo`. Run a second, additive pass per segment that pulls
-	// those hidden substitutions out as extra segments, without touching how
-	// the segment above already tokenizes (so it can't turn literal text that
-	// merely follows a substitution into a bogus extra "command").
-	const withHiddenSubstitutions: string[] = [];
-	for (const segment of segments) {
-		withHiddenSubstitutions.push(segment);
-		withHiddenSubstitutions.push(...quotedSubstitutionContents(segment));
-	}
-	return withHiddenSubstitutions;
+  // The loop above treats a double-quoted span as fully opaque, which is
+  // right for splitting purposes (quotes suppress word-splitting) but wrong
+  // for detection purposes: a shell still expands $(...) and `...` *inside*
+  // double quotes, so a banned command can hide there and never appear as
+  // its own segment above — e.g. `echo "$(rm -rf /)"` would otherwise only
+  // ever surface `echo`. Run a second, additive pass per segment that pulls
+  // those hidden substitutions out as extra segments, without touching how
+  // the segment above already tokenizes (so it can't turn literal text that
+  // merely follows a substitution into a bogus extra "command").
+  const withHiddenSubstitutions: string[] = [];
+  for (const segment of segments) {
+    withHiddenSubstitutions.push(segment);
+    withHiddenSubstitutions.push(...quotedSubstitutionContents(segment));
+  }
+  return withHiddenSubstitutions;
 }
 
 /**
@@ -163,57 +163,57 @@ export function splitCommandSegments(text: string): string[] {
  * splitCommandSegments}'s main pass already extracts those.
  */
 function quotedSubstitutionContents(segment: string): string[] {
-	const found: string[] = [];
-	let quote: "'" | '"' | null = null;
-	let escape = false;
+  const found: string[] = [];
+  let quote: "'" | '"' | null = null;
+  let escape = false;
 
-	for (let i = 0; i < segment.length; i++) {
-		const ch = segment[i];
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
 
-		if (escape) {
-			escape = false;
-			continue;
-		}
-		if (ch === "\\") {
-			escape = true;
-			continue;
-		}
-		if (quote === "'") {
-			if (ch === "'") quote = null;
-			continue;
-		}
-		if (quote === '"') {
-			if (ch === '"') {
-				quote = null;
-				continue;
-			}
-			if (ch === "$" && segment[i + 1] === "(") {
-				const close = findMatchingParen(segment, i + 2);
-				const inner = segment.slice(i + 2, close);
-				found.push(...splitCommandSegments(inner));
-				i = close;
-				continue;
-			}
-			if (ch === "`") {
-				// Naive: find the next backtick. Doesn't handle a nested backtick
-				// pair (legacy syntax that itself can't nest without escaping), but
-				// that's an existing, accepted limitation of backtick handling.
-				const close = segment.indexOf("`", i + 1);
-				if (close === -1) continue;
-				const inner = segment.slice(i + 1, close);
-				found.push(...splitCommandSegments(inner));
-				i = close;
-				continue;
-			}
-			continue;
-		}
-		if (ch === "'" || ch === '"') {
-			quote = ch;
-			continue;
-		}
-	}
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = null;
+        continue;
+      }
+      if (ch === "$" && segment[i + 1] === "(") {
+        const close = findMatchingParen(segment, i + 2);
+        const inner = segment.slice(i + 2, close);
+        found.push(...splitCommandSegments(inner));
+        i = close;
+        continue;
+      }
+      if (ch === "`") {
+        // Naive: find the next backtick. Doesn't handle a nested backtick
+        // pair (legacy syntax that itself can't nest without escaping), but
+        // that's an existing, accepted limitation of backtick handling.
+        const close = segment.indexOf("`", i + 1);
+        if (close === -1) continue;
+        const inner = segment.slice(i + 1, close);
+        found.push(...splitCommandSegments(inner));
+        i = close;
+        continue;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+  }
 
-	return found;
+  return found;
 }
 
 /**
@@ -223,34 +223,34 @@ function quotedSubstitutionContents(segment: string): string[] {
  * unterminated (unbalanced input — treat the rest of the string as the body).
  */
 function findMatchingParen(segment: string, start: number): number {
-	let depth = 1;
-	let quote: "'" | '"' | null = null;
-	let escape = false;
-	for (let i = start; i < segment.length; i++) {
-		const ch = segment[i];
-		if (escape) {
-			escape = false;
-			continue;
-		}
-		if (ch === "\\") {
-			escape = true;
-			continue;
-		}
-		if (quote) {
-			if (ch === quote) quote = null;
-			continue;
-		}
-		if (ch === "'" || ch === '"') {
-			quote = ch;
-			continue;
-		}
-		if (ch === "(") depth++;
-		if (ch === ")") {
-			depth--;
-			if (depth === 0) return i;
-		}
-	}
-	return segment.length;
+  let depth = 1;
+  let quote: "'" | '"' | null = null;
+  let escape = false;
+  for (let i = start; i < segment.length; i++) {
+    const ch = segment[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === "(") depth++;
+    if (ch === ")") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return segment.length;
 }
 
 /**
@@ -298,31 +298,31 @@ const NEEDS_ESCAPING = /[\s'"$`\\;&|<>(){}*?[\]!#~]/;
  * needs.
  */
 function resolveEscaping(tok: string): string | null {
-	let out = "";
-	let quote: "'" | '"' | null = null;
-	for (let i = 0; i < tok.length; i++) {
-		const ch = tok[i];
-		if (quote) {
-			if (ch === quote) {
-				quote = null;
-			} else {
-				out += ch;
-			}
-			continue;
-		}
-		if (ch === "'" || ch === '"') {
-			quote = ch;
-			continue;
-		}
-		if (ch === "\\") {
-			i++;
-			if (i >= tok.length) return null; // trailing, dangling backslash
-			out += tok[i];
-			continue;
-		}
-		out += ch;
-	}
-	return quote ? null : out; // unbalanced quote
+  let out = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < tok.length; i++) {
+    const ch = tok[i];
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        out += ch;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === "\\") {
+      i++;
+      if (i >= tok.length) return null; // trailing, dangling backslash
+      out += tok[i];
+      continue;
+    }
+    out += ch;
+  }
+  return quote ? null : out; // unbalanced quote
 }
 
 /**
@@ -332,7 +332,7 @@ function resolveEscaping(tok: string): string | null {
  * deliberately resolves through this elsewhere, so it's exempted here too.
  */
 function isAliasBustingBackslash(tok: string): boolean {
-	return /^\\[A-Za-z0-9_.\-/:+,@]+$/.test(tok);
+  return /^\\[A-Za-z0-9_.\-/:+,@]+$/.test(tok);
 }
 
 /**
@@ -358,8 +358,8 @@ function isAliasBustingBackslash(tok: string): boolean {
  * can be "pointlessly" escaped.
  */
 function isPointlessEscaping(tok: string): boolean {
-	if (isAliasBustingBackslash(tok)) return false;
-	return resolvePointlessEscaping(tok) !== null;
+  if (isAliasBustingBackslash(tok)) return false;
+  return resolvePointlessEscaping(tok) !== null;
 }
 
 /**
@@ -370,11 +370,11 @@ function isPointlessEscaping(tok: string): boolean {
  * or the resolved value still needs escaping.
  */
 function resolvePointlessEscaping(tok: string): string | null {
-	if (!/['"\\]/.test(tok)) return null;
-	const resolved = resolveEscaping(tok);
-	if (resolved === null || resolved.length === 0) return null;
-	if (NEEDS_ESCAPING.test(resolved)) return null;
-	return resolved;
+  if (!/['"\\]/.test(tok)) return null;
+  const resolved = resolveEscaping(tok);
+  if (resolved === null || resolved.length === 0) return null;
+  if (NEEDS_ESCAPING.test(resolved)) return null;
+  return resolved;
 }
 
 /**
@@ -386,12 +386,12 @@ function resolvePointlessEscaping(tok: string): string | null {
  * flag, leading or otherwise.
  */
 function isDisguisedFlag(tok: string): boolean {
-	return resolvePointlessEscaping(tok)?.startsWith("-") ?? false;
+  return resolvePointlessEscaping(tok)?.startsWith("-") ?? false;
 }
 
 /** True if any arg in `args` is a flag disguised via quoting/escaping (see {@link isDisguisedFlag}). */
 function hasDisguisedFlag(args: string[]): boolean {
-	return args.some(isDisguisedFlag);
+  return args.some(isDisguisedFlag);
 }
 
 /**
@@ -406,30 +406,31 @@ function hasDisguisedFlag(args: string[]): boolean {
  *    callers must treat this as "deny", not "nothing to see here"
  *  - otherwise the resolved `{ name, args }`
  */
-export function commandInvocation(segment: string): { name: string; args: string[] } | null | ObfuscatedCommand {
-	const tokens = segment.trim().split(/\s+/).filter(Boolean);
-	let i = 0;
-	while (i < tokens.length) {
-		let tok = tokens[i];
-		if (isPointlessEscaping(tok)) return OBFUSCATED;
-		if (tok.startsWith("\\")) tok = tok.slice(1); // `\cat` bypasses aliases
-		if (ENV_ASSIGN.test(tok)) {
-			i++;
-			continue;
-		}
-		const base = (tok.split("/").pop() ?? tok).toLowerCase();
-		// A bare leftover quote/backslash with no real content — can surface from
-		// a degenerate substitution body (e.g. `"$(")"`, whose extracted inner
-		// text is just `"`). Not a command; skip it like an empty token rather
-		// than resolving a nonexistent "command" named `"`.
-		if (base === "" || /^['"\\]+$/.test(base)) {
-			i++;
-			continue;
-		}
-		const args = tokens.slice(i + 1);
-		if (hasDisguisedFlag(args)) return OBFUSCATED;
-		return { name: base, args };
-	}
-	return null;
+export function commandInvocation(
+  segment: string,
+): { name: string; args: string[] } | null | ObfuscatedCommand {
+  const tokens = segment.trim().split(/\s+/).filter(Boolean);
+  let i = 0;
+  while (i < tokens.length) {
+    let tok = tokens[i];
+    if (isPointlessEscaping(tok)) return OBFUSCATED;
+    if (tok.startsWith("\\")) tok = tok.slice(1); // `\cat` bypasses aliases
+    if (ENV_ASSIGN.test(tok)) {
+      i++;
+      continue;
+    }
+    const base = (tok.split("/").pop() ?? tok).toLowerCase();
+    // A bare leftover quote/backslash with no real content — can surface from
+    // a degenerate substitution body (e.g. `"$(")"`, whose extracted inner
+    // text is just `"`). Not a command; skip it like an empty token rather
+    // than resolving a nonexistent "command" named `"`.
+    if (base === "" || /^['"\\]+$/.test(base)) {
+      i++;
+      continue;
+    }
+    const args = tokens.slice(i + 1);
+    if (hasDisguisedFlag(args)) return OBFUSCATED;
+    return { name: base, args };
+  }
+  return null;
 }
-

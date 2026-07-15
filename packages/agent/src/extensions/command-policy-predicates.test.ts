@@ -6,11 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  isAwkCommand,
-  isPerlCommand,
-  isPythonCommand,
-} from "./command-policy-predicates.ts";
+import { isAwkCommand, isPerlCommand, isPythonCommand } from "./command-policy-predicates.ts";
 
 const predicateMatches = [
   ["python", isPythonCommand],

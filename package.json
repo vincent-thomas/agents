@@ -1,7 +1,9 @@
 {
   "name": "agent",
   "version": "0.1.0",
-  "workspaces": ["./packages/*"],
+  "workspaces": [
+    "./packages/*"
+  ],
   "devDependencies": {
     "oxfmt": "^0.59.0"
   }

@@ -11,31 +11,30 @@
  *   system prompt, or skills. That would both bloat its context and re-enable
  *   behavior that makes no sense for a session that can't write or run
  *   commands.
- * - default model is a cheap/fast one, independent of whatever model
- *   agent-lord itself is running — the whole point of delegating.
+ * - model and thinking level are supplied explicitly by the host, independent
+ *   of whatever model agent-lord itself is running.
  */
 import {
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
   SessionManager,
+  type CreateAgentSessionOptions,
   type ExtensionAPI,
-} from "@mariozechner/pi-coding-agent";
-import { getModel, type Model } from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
 import { Object as TObject, String as TString } from "typebox";
-import {
-  buildExplorePrompt,
-  formatExploreResult,
-  hasExceededTurnLimit,
-} from "./logic.ts";
+import { buildExplorePrompt, formatExploreResult, hasExceededTurnLimit } from "./logic.ts";
 
 export interface ExploreExtensionOptions {
-  /** Model for the nested exploration session. Default: a cheap/fast model, independent of agent-lord's own. */
-  model?: Model<any>;
+  /** Model for the nested exploration session. */
+  model: Model<any>;
+  /** Thinking level for the nested exploration session. */
+  thinkingLevel: NonNullable<CreateAgentSessionOptions["thinkingLevel"]>;
 }
 
-export function createExploreExtension(options: ExploreExtensionOptions = {}) {
-  const model = options.model ?? getModel("anthropic", "claude-haiku-4-5");
+export function createExploreExtension(options: ExploreExtensionOptions) {
+  const { model, thinkingLevel } = options;
 
   return function (pi: ExtensionAPI) {
     pi.registerTool({
@@ -47,8 +46,7 @@ export function createExploreExtension(options: ExploreExtensionOptions = {}) {
         "Best for broad or multi-file questions ('where is X', 'how does Y work'). " +
         "Returns a terse, distilled answer with file:line references. The " +
         "sub-agent cannot write, edit, or run shell commands.",
-      promptSnippet:
-        "Delegate a read-only exploration query to a cheaper sub-agent",
+      promptSnippet: "Delegate a read-only exploration query",
       parameters: TObject({
         query: TString({
           description:
@@ -56,8 +54,7 @@ export function createExploreExtension(options: ExploreExtensionOptions = {}) {
         }),
       }),
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
-        const notify = (text: string) =>
-          onUpdate?.({ content: [{ type: "text", text }] });
+        const notify = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
         notify(`Exploring: ${params.query}`);
 
         const agentDir = getAgentDir();
@@ -76,6 +73,7 @@ export function createExploreExtension(options: ExploreExtensionOptions = {}) {
           cwd: ctx.cwd,
           agentDir,
           model,
+          thinkingLevel,
           tools: ["read", "grep", "find", "ls"],
           resourceLoader,
           sessionManager: SessionManager.inMemory(ctx.cwd),
@@ -108,5 +106,3 @@ export function createExploreExtension(options: ExploreExtensionOptions = {}) {
     });
   };
 }
-
-export default createExploreExtension;

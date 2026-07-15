@@ -8,12 +8,17 @@ import {
   InteractiveMode,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { getModel } from "@mariozechner/pi-ai";
+import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { Type } from "@sinclair/typebox";
 import { createCommandPolicyExtension } from "@vt-agent/command-policy";
 import commandPolicyExtension from "./extensions/command-policy.ts";
-import { writeGuardExtension } from "./extensions/write-guard";
+import { createwriteGuardExtension } from "./extensions/write-guard";
+import { gitCommitExtension } from "./extensions/git-commit";
 import { createExploreExtension } from "@vt-agent/explorer";
+
+import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
+
+const models = builtinModels();
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({
   cwd,
@@ -24,12 +29,19 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
     cwd,
     resourceLoaderOptions: {
       additionalExtensionPaths: [],
+      appendSystemPromptOverride(base) {
+        return [appendSystemPrompt];
+      },
       extensionFactories: [
         commandPolicyExtension,
         createExploreExtension({
-          model: getModel("anthropic", "claude-haiku-4-5"),
+          model: models.getModel("openai", "gpt-5.6-luna"),
+          thinkingLevel: "low",
         }),
-        writeGuardExtension,
+        createwriteGuardExtension({
+          overwriteFileThreshold: 50,
+        }),
+        gitCommitExtension,
       ],
     },
   });

@@ -14,35 +14,41 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { checkFileTooLarge } from "./logic.ts";
 
-export function writeGuardExtension(pi: ExtensionAPI) {
-  pi.on("tool_call", async (event, ctx) => {
-    // Only the write tool overwrites an existing file wholesale; edit is
-    // already safe (it must match exact text), so we only guard write.
-    if (!isToolCallEventType("write", event)) return;
+export interface WriteGuardExtensionOptions {
+  overwriteFileThreshold: number;
+}
 
-    const filePath = event.input.path;
-    if (!filePath) return;
+export function createwriteGuardExtension({ overwriteFileThreshold }: WriteGuardExtensionOptions) {
+  return function (pi: ExtensionAPI) {
+    pi.on("tool_call", async (event, ctx) => {
+      // Only the write tool overwrites an existing file wholesale; edit is
+      // already safe (it must match exact text), so we only guard write.
+      if (!isToolCallEventType("write", event)) return;
 
-    const absolute = resolve(ctx.cwd, filePath);
-    if (!existsSync(absolute)) return; // new file — allow
+      const filePath = event.input.path;
+      if (!filePath) return;
 
-    let content: string;
-    try {
-      content = readFileSync(absolute, "utf-8");
-    } catch {
-      return; // can't read — let write proceed
-    }
+      const absolute = resolve(ctx.cwd, filePath);
+      if (!existsSync(absolute)) return; // new file — allow
 
-    const blockReason = checkFileTooLarge(filePath, content);
-    if (!blockReason) return; // small enough — allow
+      let content: string;
+      try {
+        content = readFileSync(absolute, "utf-8");
+      } catch {
+        return; // can't read — let write proceed
+      }
 
-    if (ctx.hasUI) {
-      ctx.ui.notify(
-        `✋ Blocked overwrite of ${filePath} (too large). Use edit instead.`,
-        "warning",
-      );
-    }
+      const blockReason = checkFileTooLarge(filePath, content, overwriteFileThreshold);
+      if (!blockReason) return; // small enough — allow
 
-    return { block: true, reason: blockReason };
-  });
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `✋ Blocked overwrite of ${filePath} (too large). Use edit instead.`,
+          "warning",
+        );
+      }
+
+      return { block: true, reason: blockReason };
+    });
+  };
 }

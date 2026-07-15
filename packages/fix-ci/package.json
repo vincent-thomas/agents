@@ -1,17 +1,15 @@
 {
-  "name": "@vt-agent/command-policy",
+  "name": "@vt-agent/git_push",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "module": "./index.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "echo ''",
     "test": "node --test"
   },
   "dependencies": {
-    "@mariozechner/pi-coding-agent": "^0.73.1"
-  },
-  "devDependencies": {
-    "typescript": "^7.0.2"
+    "@mariozechner/pi-coding-agent": "^0.73.1",
+    "typebox": "^1.1.24"
   }
 }

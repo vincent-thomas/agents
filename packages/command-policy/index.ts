@@ -15,12 +15,5 @@
  * directly.
  */
 
-export {
-  createCommandPolicyExtension,
-  type CommandPolicyOptions,
-} from "./extension.ts";
-export {
-  CommandPolicyStatus,
-  type CommandPolicyEntry,
-  type CommandUse,
-} from "./types.ts";
+export { createCommandPolicyExtension, type CommandPolicyOptions } from "./extension.ts";
+export { CommandPolicyStatus, type CommandPolicyEntry, type CommandUse } from "./types.ts";

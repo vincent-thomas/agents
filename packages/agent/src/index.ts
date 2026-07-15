@@ -1,3 +1,5 @@
+#!/usr/bin/env bun
+
 import {
   type CreateAgentSessionRuntimeFactory,
   type ExtensionAPI,
@@ -15,6 +17,7 @@ import commandPolicyExtension from "./extensions/command-policy.ts";
 import { createwriteGuardExtension } from "./extensions/write-guard";
 import { gitCommitExtension } from "./extensions/git-commit";
 import { createExploreExtension } from "@vt-agent/explorer";
+import { createFixCiExtension } from "@vt-agent/git_push";
 
 import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
 
@@ -42,6 +45,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
           overwriteFileThreshold: 50,
         }),
         gitCommitExtension,
+        createFixCiExtension(),
       ],
     },
   });

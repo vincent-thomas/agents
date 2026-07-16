@@ -19,12 +19,39 @@ import {
   DefaultResourceLoader,
   getAgentDir,
   SessionManager,
+  truncateToVisualLines,
   type CreateAgentSessionOptions,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { Object as TObject, String as TString } from "typebox";
-import { buildExplorePrompt, formatExploreResult, hasExceededTurnLimit } from "./logic.ts";
+import {
+  buildExplorePrompt,
+  finishExploreToolExecution,
+  formatExploreResult,
+  formatExploreToolExecution,
+  hasExceededTurnLimit,
+  startExploreToolExecution,
+  type ExploreToolExecution,
+} from "./logic.ts";
+
+interface ExploreToolDetails {
+  toolTrace: ExploreToolExecution[];
+}
+
+class ExploreResultText {
+  constructor(private readonly text: string) {}
+
+  render(width: number): string[] {
+    return truncateToVisualLines(
+      this.text,
+      Math.max(1, this.text.length + 1),
+      width,
+    ).visualLines;
+  }
+
+  invalidate(): void {}
+}
 
 export interface ExploreExtensionOptions {
   /** Model for the nested exploration session. */
@@ -41,10 +68,10 @@ export function createExploreExtension(options: ExploreExtensionOptions) {
       name: "explore",
       label: "Explore",
       description:
-        "Delegate a read-only code search/exploration question to a separate, " +
-        "cheaper sub-agent instead of doing many raw read/grep calls yourself. " +
+        "Delegate a read-only code search/exploration question, " +
+        "instead of doing many raw read/grep calls yourself. " +
         "Best for broad or multi-file questions ('where is X', 'how does Y work'). " +
-        "Returns a terse, distilled answer with file:line references. The " +
+        "Returns a terse, distilled answer with file:line references (which it knows to do itself). The " +
         "sub-agent cannot write, edit, or run shell commands.",
       promptSnippet: "Delegate a read-only exploration query",
       parameters: TObject({
@@ -54,7 +81,10 @@ export function createExploreExtension(options: ExploreExtensionOptions) {
         }),
       }),
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
-        const notify = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
+        let toolTrace: ExploreToolExecution[] = [];
+        const details = (): ExploreToolDetails => ({ toolTrace });
+        const notify = (text: string) =>
+          onUpdate?.({ content: [{ type: "text", text }], details: details() });
         notify(`Exploring: ${params.query}`);
 
         const agentDir = getAgentDir();
@@ -81,7 +111,22 @@ export function createExploreExtension(options: ExploreExtensionOptions) {
 
         let turnCount = 0;
         const unsubscribe = session.subscribe((event) => {
-          if (event.type === "turn_end") {
+          if (event.type === "tool_execution_start") {
+            toolTrace = startExploreToolExecution(
+              toolTrace,
+              event.toolCallId,
+              event.toolName,
+              event.args,
+            );
+            notify(`Exploring: ${params.query}`);
+          } else if (event.type === "tool_execution_end") {
+            toolTrace = finishExploreToolExecution(
+              toolTrace,
+              event.toolCallId,
+              event.isError,
+            );
+            notify(`Exploring: ${params.query}`);
+          } else if (event.type === "turn_end") {
             turnCount++;
             if (hasExceededTurnLimit(turnCount)) {
               void session.abort();
@@ -101,7 +146,37 @@ export function createExploreExtension(options: ExploreExtensionOptions) {
         }
 
         const text = formatExploreResult(session.getLastAssistantText());
-        return { content: [{ type: "text" as const, text }] };
+        return {
+          content: [{ type: "text" as const, text }],
+          details: details(),
+        };
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        const content = result.content.find((item) => item.type === "text");
+        const resultText =
+          content?.type === "text" ? theme.fg("toolOutput", content.text) : "";
+        const details = result.details as ExploreToolDetails | undefined;
+
+        if (!expanded) {
+          return new ExploreResultText(resultText);
+        }
+
+        let text = theme.fg("toolOutput", `Exploring: ${context.args.query}`);
+        if (details?.toolTrace.length) {
+          text += `\n\n${theme.fg("muted", "Sub-agent tools:")}`;
+          for (const execution of details.toolTrace) {
+            const marker =
+              execution.status === "running"
+                ? theme.fg("warning", "…")
+                : execution.status === "failed"
+                  ? theme.fg("error", "✗")
+                  : theme.fg("success", "✓");
+            text += `\n${marker} ${theme.fg("toolOutput", formatExploreToolExecution(execution))}`;
+          }
+        }
+        if (!isPartial && resultText) text += `\n\n${resultText}`;
+
+        return new ExploreResultText(text);
       },
     });
   };

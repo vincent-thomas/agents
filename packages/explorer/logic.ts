@@ -10,6 +10,73 @@ export function hasExceededTurnLimit(turnCount: number): boolean {
   return turnCount >= MAX_EXPLORE_TURNS;
 }
 
+export type ExploreToolStatus = "running" | "succeeded" | "failed";
+
+export interface ExploreToolExecution {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  status: ExploreToolStatus;
+}
+
+export function startExploreToolExecution(
+  trace: ExploreToolExecution[],
+  id: string,
+  name: string,
+  args: unknown,
+): ExploreToolExecution[] {
+  const execution: ExploreToolExecution = {
+    id,
+    name,
+    args:
+      typeof args === "object" && args !== null && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {},
+    status: "running",
+  };
+  const existingIndex = trace.findIndex((item) => item.id === id);
+  if (existingIndex === -1) return [...trace, execution];
+
+  return trace.map((item, index) => (index === existingIndex ? execution : item));
+}
+
+export function finishExploreToolExecution(
+  trace: ExploreToolExecution[],
+  id: string,
+  failed: boolean,
+): ExploreToolExecution[] {
+  return trace.map((item) =>
+    item.id === id ? { ...item, status: failed ? "failed" : "succeeded" } : item,
+  );
+}
+
+export function formatExploreToolExecution(execution: ExploreToolExecution): string {
+  const stringArg = (name: string, fallback: string): string => {
+    const value = execution.args[name];
+    return typeof value === "string" ? value : fallback;
+  };
+
+  switch (execution.name) {
+    case "read": {
+      const path = stringArg("path", "...");
+      const offset = execution.args.offset;
+      const limit = execution.args.limit;
+      if (typeof offset !== "number" && typeof limit !== "number") return `read ${path}`;
+      const start = typeof offset === "number" ? offset : 1;
+      const end = typeof limit === "number" ? start + limit - 1 : undefined;
+      return `read ${path}:${start}${end === undefined ? "" : `-${end}`}`;
+    }
+    case "grep":
+      return `grep /${stringArg("pattern", "")}/ in ${stringArg("path", ".")}`;
+    case "find":
+      return `find ${stringArg("pattern", "*")} in ${stringArg("path", ".")}`;
+    case "ls":
+      return `ls ${stringArg("path", ".")}`;
+    default:
+      return execution.name;
+  }
+}
+
 export function buildExplorePrompt(query: string): string {
   return [
     "You are a read-only code exploration assistant. You can only read files,",

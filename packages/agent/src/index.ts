@@ -38,7 +38,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
       extensionFactories: [
         commandPolicyExtension,
         createExploreExtension({
-          model: models.getModel("openai", "gpt-5.6-luna"),
+          model: models.getModel("openai-codex", "gpt-5.6-luna"),
           thinkingLevel: "low",
         }),
         createwriteGuardExtension({

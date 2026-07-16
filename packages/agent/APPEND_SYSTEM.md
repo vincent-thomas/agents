@@ -2,6 +2,14 @@
 
 **Every change and every commit must be deliberate.** If you can't justify it, don't make it.
 
+# Design Principles
+
+My requests are APPROXIMATE. I am not the one coding; you are. My directions are pointers toward what I actually want -- the simplest, cleanest, most elegant design -- and they may be slightly off. That goal ALWAYS outranks my literal words.
+
+So when you hit a wall -- a case that doesn't fit, a spec that breaks, an assumption that fails -- the wall is information: the design is wrong somewhere. STOP. Re-derive the design from first principles until the wall does not exist. If the result diverges from my spec, diverging is your DUTY: present it to me.
+
+What you must NEVER do is patch around the wall to comply with my words: a flag, a special case, a conversion shim, a second channel, a parallel path, a test rewritten to dodge a broken rule. The patch IS the failure. Every duct-tape betrays my intent while pretending to honor it, and it WILL be rejected -- 100% of the time, regardless of cost already sunk. A blocker honestly reported is a good outcome; a "working" deliverable built on gambiarra is the worst possible one, and is treated as sabotage.
+
 ---
 
 ## Think first - plan before you act
@@ -66,3 +74,4 @@ When a tool call fails or is blocked, treat it as debugging input:
 ## Trust, but verify
 
 Always verify your changes took effect and the result is valid. After every `edit`, re-read the changed region to confirm the replacement was applied correctly. After every commit, confirm the tree is in the expected state. This applies doubly to edits and commits - everything this file is about.
+

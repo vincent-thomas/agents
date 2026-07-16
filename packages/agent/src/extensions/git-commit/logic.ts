@@ -68,6 +68,10 @@ export interface CommitResult {
   output: string;
 }
 
+export function formatCommitMessage(subject: string, what: string, why: string): string {
+  return `${subject}\n\nWhat: ${what}\nWhy: ${why}`;
+}
+
 /**
  * True if there are staged changes ready to commit.
  * `git diff --cached --quiet` exits 0 when nothing is staged and non-zero

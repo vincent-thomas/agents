@@ -3,7 +3,7 @@
  *
  * `git_commit` tool — checks default branch, runs pre-checks (static
  * analysis only), then commits the currently-staged changes with
- * the provided message. Does NOT stage anything itself.
+ * a structured subject, what, and why. Does NOT stage anything itself.
  *
  * Manual `git commit` in bash is blocked by the command-policy extension
  * (its `entries` array bans the "git commit" subcommand), not here.
@@ -13,7 +13,7 @@ import { Type } from "@sinclair/typebox";
 import { currentBranch } from "./git-utils.ts";
 import { isDefaultBranch, branchExistsOnRemote } from "./logic.ts";
 import { hasUpstream } from "./git-utils.ts";
-import { gitCommit } from "./logic.ts";
+import { formatCommitMessage, gitCommit } from "./logic.ts";
 import { runPreChecks } from "./precheck.ts";
 import { execAsync, extractErrorOutput } from "./exec-async.ts";
 
@@ -23,14 +23,28 @@ export function gitCommitExtension(pi: ExtensionAPI) {
     name: "git_commit",
     label: "Git Commit",
     description:
-      "Commit the currently-staged changes with the provided message. " +
+      "Commit the currently-staged changes with a structured subject, what, and why. " +
       "Pass `add_all: true` to auto-stage all tracked file changes first. " +
       "Runs pre-commit checks (static analysis only) before committing. " +
-      "Blocks commits on default branches (main/master). " +
-      "You MUST use this tool instead of running `git commit` in bash.",
+      "Blocks commits on default branches (main/master).",
     parameters: Type.Object({
-      message: Type.String({
-        description: "Commit message. Be specific about what changed and why.",
+      subject: Type.String({
+        description: "Imperative commit subject (72 characters or fewer).",
+        minLength: 1,
+        maxLength: 72,
+      }),
+      what: Type.String({
+        description:
+          "Concise, human-readable summary of the behavior or capability changed. " +
+          "Do not just list mechanical edits for example.",
+        minLength: 1,
+        maxLength: 200,
+      }),
+      why: Type.String({
+        description:
+          "Concise inclusive reason why the work in this commit was needed.",
+        minLength: 1,
+        maxLength: 200,
       }),
       add_all: Type.Boolean({
         description:
@@ -136,7 +150,12 @@ export function gitCommitExtension(pi: ExtensionAPI) {
         content: [{ type: "text", text: completedSteps.join("\n") }],
       });
 
-      const result = await gitCommit(cwd, params.message, signal);
+      const message = formatCommitMessage(
+        params.subject,
+        params.what,
+        params.why,
+      );
+      const result = await gitCommit(cwd, message, signal);
 
       if (!result.success) {
         return {
@@ -153,7 +172,7 @@ export function gitCommitExtension(pi: ExtensionAPI) {
         content: [
           {
             type: "text" as const,
-            text: result.output || `Committed: "${params.message}"`,
+            text: result.output || `Committed: "${params.subject}"`,
           },
         ],
       };

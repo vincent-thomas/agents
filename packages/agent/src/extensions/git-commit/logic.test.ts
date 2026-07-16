@@ -5,7 +5,12 @@
  */
 import assert from "node:assert/strict";
 import { test, suite } from "node:test";
-import { isDefaultBranch, gitCommit, branchExistsOnRemote } from "./logic.ts";
+import {
+  branchExistsOnRemote,
+  formatCommitMessage,
+  gitCommit,
+  isDefaultBranch,
+} from "./logic.ts";
 import { execSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -125,6 +130,25 @@ suite("branchExistsOnRemote", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatCommitMessage
+// ---------------------------------------------------------------------------
+
+suite("formatCommitMessage", () => {
+  test("creates a subject with labeled what and why sections", () => {
+    assert.equal(
+      formatCommitMessage(
+        "Require structured commit messages",
+        "Split the commit message into explicit fields.",
+        "Agents otherwise tend to provide only a subject.",
+      ),
+      "Require structured commit messages\n\n" +
+        "What: Split the commit message into explicit fields.\n" +
+        "Why: Agents otherwise tend to provide only a subject.",
+    );
   });
 });
 

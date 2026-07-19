@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildObsidianArgs, formatObsidianOutput } from "./logic.ts";
+import {
+  buildObsidianArgs,
+  formatObsidianInvocation,
+  formatObsidianOutput,
+} from "./logic.ts";
 
 test("buildObsidianArgs selects the configured vault by name", () => {
   assert.deepEqual(buildObsidianArgs("My Vault", "search", ["query=agency"]), [
@@ -10,6 +14,13 @@ test("buildObsidianArgs selects the configured vault by name", () => {
   ]);
   assert.deepEqual(buildObsidianArgs("My Vault", "help", ["search"]), ["help", "search"]);
   assert.deepEqual(buildObsidianArgs("My Vault", "version", []), ["version"]);
+});
+
+test("formatObsidianInvocation preserves argv boundaries", () => {
+  assert.equal(
+    formatObsidianInvocation(["vault=My Vault", "search", "query=agent design"]),
+    '$ obsidian "vault=My Vault" search "query=agent design"',
+  );
 });
 
 test("buildObsidianArgs rejects invalid vault names", () => {

@@ -1,15 +1,38 @@
 import { execFile } from "node:child_process";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { truncateHead, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  truncateHead,
+  truncateToVisualLines,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import { Array as TArray, Object as TObject, Optional, String as TString } from "typebox";
 import {
   READ_ONLY_OBSIDIAN_COMMANDS,
   buildObsidianArgs,
+  formatObsidianInvocation,
   formatObsidianOutput,
 } from "./logic.ts";
 
 const MAX_BUFFER = 5 * 1024 * 1024;
 const TIMEOUT_MS = 30_000;
+
+class ObsidianCallText {
+  constructor(
+    private readonly text: string,
+    private readonly trailingBlankLine = false,
+  ) {}
+
+  render(width: number): string[] {
+    const lines = truncateToVisualLines(
+      this.text,
+      Math.max(1, this.text.length + 1),
+      width,
+    ).visualLines;
+    return this.trailingBlankLine ? [...lines, ""] : lines;
+  }
+
+  invalidate(): void {}
+}
 
 function executeObsidian(
   cwd: string,
@@ -64,6 +87,16 @@ export function createObsidianExtension(cwd: string, vaultName: string) {
           }),
         ),
       }),
+      renderCall(args, theme, context) {
+        let text = theme.fg("toolTitle", theme.bold("Obsidian"));
+        if (context.expanded && args.command) {
+          const invocation = formatObsidianInvocation(
+            buildObsidianArgs(vaultName, args.command, args.arguments ?? []),
+          );
+          text += `\n${theme.fg("toolOutput", invocation)}`;
+        }
+        return new ObsidianCallText(text, context.expanded && Boolean(args.command));
+      },
       async execute(_toolCallId, params, signal) {
         const args = buildObsidianArgs(vaultName, params.command, params.arguments ?? []);
         const { stdout, stderr } = await executeObsidian(cwd, args, signal);

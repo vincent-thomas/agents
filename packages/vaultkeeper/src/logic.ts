@@ -22,6 +22,15 @@ export const READ_ONLY_OBSIDIAN_COMMANDS = [
 
 export type ReadOnlyObsidianCommand = (typeof READ_ONLY_OBSIDIAN_COMMANDS)[number];
 
+const SIMPLE_ARGUMENT = /^[A-Za-z0-9_./:=@+-]+$/;
+
+export function formatObsidianInvocation(args: readonly string[]): string {
+  const invocation = ["obsidian", ...args]
+    .map((arg) => (SIMPLE_ARGUMENT.test(arg) ? arg : JSON.stringify(arg)))
+    .join(" ");
+  return `$ ${invocation}`;
+}
+
 const VAULT_ARGUMENT = /^-{0,2}vault(?:=|$)/i;
 
 export function buildObsidianArgs(

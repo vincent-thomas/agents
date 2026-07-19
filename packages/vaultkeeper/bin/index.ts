@@ -2,4 +2,4 @@
 
 import { runVaultkeeper } from "../src/index.ts";
 
-await runVaultkeeper("VT");
+await runVaultkeeper({ vaultName: "VT" });

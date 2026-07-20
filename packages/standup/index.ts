@@ -1,8 +1,7 @@
 import { complete } from "@earendil-works/pi-ai/compat";
 import type { Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { access, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   GIT_LOG_FORMAT,
@@ -14,6 +13,7 @@ import {
   mergeCommitsByHash,
   parseBranchLog,
   parseRepositoryArguments,
+  repositoryCacheKey,
   repositoryLabel,
   type StandupCommit,
 } from "./logic.ts";
@@ -23,6 +23,8 @@ export interface StandupExtensionOptions {
   model: Model<any>;
   /** Override the identity selected from `git config --global user.email`. */
   authorEmail?: string;
+  /** Override the persistent mirror cache under the Pi agent directory. */
+  cacheDirectory?: string;
 }
 
 interface CommitSummary {
@@ -37,6 +39,15 @@ function responseText(response: Awaited<ReturnType<typeof complete>>): string {
     .map((item) => item.text)
     .join("\n")
     .trim();
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function createStandupExtension(options: StandupExtensionOptions) {
@@ -61,7 +72,6 @@ export function createStandupExtension(options: StandupExtensionOptions) {
           if (ctx.hasUI) ctx.ui.notify(message, level);
         };
 
-        let workingDirectory: string | undefined;
         try {
           const repositories = parseRepositoryArguments(args);
           const authorEmail =
@@ -76,14 +86,31 @@ export function createStandupExtension(options: StandupExtensionOptions) {
 
           const today = new Date();
           const { since, until } = localDayRange(today);
-          workingDirectory = await mkdtemp(join(tmpdir(), "pi-standup-"));
+          const cacheDirectory = options.cacheDirectory ?? join(getAgentDir(), "cache", "standup");
+          await mkdir(cacheDirectory, { recursive: true });
           const summaries: CommitSummary[] = [];
 
           for (const [repositoryIndex, repository] of repositories.entries()) {
             const label = repositoryLabel(repository);
-            const cloneDirectory = join(workingDirectory, `${repositoryIndex}.git`);
-            setStatus(`Cloning ${label} (${repositoryIndex + 1}/${repositories.length})…`);
-            await runGit(["clone", "--mirror", repository, cloneDirectory]);
+            const cloneDirectory = join(cacheDirectory, `${repositoryCacheKey(repository)}.git`);
+            if (await pathExists(cloneDirectory)) {
+              setStatus(`Updating cached ${label} (${repositoryIndex + 1}/${repositories.length})…`);
+              const cachedRemote = (await runGit(["remote", "get-url", "origin"], cloneDirectory)).trim();
+              if (cachedRemote !== repository) {
+                throw new Error(`Cached remote mismatch for ${label}`);
+              }
+              await runGit(["remote", "update", "--prune"], cloneDirectory);
+            } else {
+              setStatus(`Cloning ${label} (${repositoryIndex + 1}/${repositories.length})…`);
+              const stagingDirectory = await mkdtemp(join(cacheDirectory, ".clone-"));
+              try {
+                const stagedClone = join(stagingDirectory, "repository.git");
+                await runGit(["clone", "--mirror", repository, stagedClone]);
+                await rename(stagedClone, cloneDirectory);
+              } finally {
+                await rm(stagingDirectory, { recursive: true, force: true });
+              }
+            }
 
             const branchOutput = await runGit(
               ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
@@ -161,7 +188,6 @@ export function createStandupExtension(options: StandupExtensionOptions) {
           notify(`Could not create standup: ${message}`, "error");
         } finally {
           setStatus();
-          if (workingDirectory) await rm(workingDirectory, { recursive: true, force: true });
         }
       },
     });

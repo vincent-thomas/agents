@@ -18,6 +18,7 @@ import { createwriteGuardExtension } from "./extensions/write-guard";
 import { gitCommitExtension } from "./extensions/git-commit";
 import { createExploreExtension } from "@vt-agent/explorer";
 import { createFixCiExtension } from "@vt-agent/git_push";
+import { createStandupExtension } from "@vt-agent/standup";
 import rootCauseExtension from "./extensions/root-cause/index.ts";
 
 import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
@@ -47,6 +48,9 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         }),
         gitCommitExtension,
         createFixCiExtension(),
+        createStandupExtension({
+          model: models.getModel("openai-codex", "gpt-5.4-mini"),
+        }),
         rootCauseExtension,
       ],
     },

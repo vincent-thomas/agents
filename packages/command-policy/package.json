@@ -9,7 +9,7 @@
     "test": "node --test"
   },
   "dependencies": {
-    "@mariozechner/pi-coding-agent": "^0.73.1"
+    "@earendil-works/pi-coding-agent": "^0.80.10"
   },
   "devDependencies": {
     "typescript": "^7.0.2"

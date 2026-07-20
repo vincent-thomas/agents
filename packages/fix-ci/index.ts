@@ -12,7 +12,7 @@
  * Manual `git push` in bash is blocked by the command-policy extension
  * (its entries ban the "git push" subcommand), not here.
  */
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Object as TObject } from "typebox";
 import { currentBranch, isWorktreeDirty } from "./git-utils.ts";
 import {
@@ -67,7 +67,8 @@ export function createFixCiExtension() {
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         const cwd = ctx.cwd;
-        const notify = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
+        const notify = (text: string) =>
+          onUpdate?.({ content: [{ type: "text", text }] });
 
         // ── 0. Reject if working tree is dirty ─────────────────────────
         notify("Checking for uncommitted changes…");
@@ -95,18 +96,29 @@ export function createFixCiExtension() {
           if (baseAhead) {
             if (!branchName) {
               return respond(
-                `Could not determine the current branch name. ` + `Fix manually and try again.`,
-                { mergeFailed: true, error: "Unable to determine current branch" },
+                `Could not determine the current branch name. ` +
+                  `Fix manually and try again.`,
+                {
+                  mergeFailed: true,
+                  error: "Unable to determine current branch",
+                },
               );
             }
 
             notify(`Merging ${prBase} into ${branchName} via worktree…`);
 
-            const mergeResult = await mergeBaseBranchIntoCurrent(cwd, prBase, branchName, signal);
+            const mergeResult = await mergeBaseBranchIntoCurrent(
+              cwd,
+              prBase,
+              branchName,
+              signal,
+            );
 
             if (!mergeResult.success) {
               if (mergeResult.conflictPaths.length > 0) {
-                const conflictList = formatConflictList(mergeResult.conflictPaths);
+                const conflictList = formatConflictList(
+                  mergeResult.conflictPaths,
+                );
 
                 return respond(
                   `## ⚠️ Merge Conflicts Detected\n\n` +
@@ -180,7 +192,9 @@ export function createFixCiExtension() {
               cycleCount = 0;
 
               if (pullResult.conflictPaths.length > 0) {
-                const conflictList = formatConflictList(pullResult.conflictPaths);
+                const conflictList = formatConflictList(
+                  pullResult.conflictPaths,
+                );
 
                 return respond(
                   `## ⚠️ Merge Conflicts During Pull\n\n` +
@@ -255,10 +269,13 @@ export function createFixCiExtension() {
           const prResult = await createDraftPr(cwd, prTitle, prBody, signal);
 
           if (!prResult.success) {
-            return respond(`Draft PR creation failed:\n\n\`\`\`\n${prResult.output}\n\`\`\``, {
-              prCreationFailed: true,
-              output: prResult.output,
-            });
+            return respond(
+              `Draft PR creation failed:\n\n\`\`\`\n${prResult.output}\n\`\`\``,
+              {
+                prCreationFailed: true,
+                output: prResult.output,
+              },
+            );
           }
 
           const prUrl = prResult.url ? prResult.url : "(see gh output)";
@@ -273,9 +290,12 @@ export function createFixCiExtension() {
         const prState = await getPrState(cwd, signal);
         if (prState === "MERGED") {
           cycleCount = 0;
-          return respond(`✅ Pull request was already merged. Nothing more to do.`, {
-            prMerged: true,
-          });
+          return respond(
+            `✅ Pull request was already merged. Nothing more to do.`,
+            {
+              prMerged: true,
+            },
+          );
         }
         if (prState === "CLOSED") {
           cycleCount = 0;
@@ -299,7 +319,11 @@ export function createFixCiExtension() {
               `Some checks are still running. Last status:\n\n` +
               formatChecks(pollResult.checks) +
               `\n\nStop here — tell the user CI timed out.`,
-            { checks: pollResult.checks, mode: pollResult.mode, timedOut: true },
+            {
+              checks: pollResult.checks,
+              mode: pollResult.mode,
+              timedOut: true,
+            },
           );
         }
 
@@ -335,7 +359,10 @@ export function createFixCiExtension() {
 
             const ready = await markPrReady(cwd, signal);
             if (ready) {
-              successLines.push("", `✅ PR #${prNum} marked as ready for review.`);
+              successLines.push(
+                "",
+                `✅ PR #${prNum} marked as ready for review.`,
+              );
             } else {
               successLines.push(
                 "",
@@ -344,18 +371,31 @@ export function createFixCiExtension() {
             }
 
             // ── Re-request review from previous reviewer ──────────
-            const previousReviewer = await getLatestChangesRequestedReviewer(cwd, signal);
+            const previousReviewer = await getLatestChangesRequestedReviewer(
+              cwd,
+              signal,
+            );
             if (previousReviewer) {
               notify(
                 `Re-requesting review from @${previousReviewer} (previously requested changes)…`,
               );
-              const reRequested = await addReviewers(cwd, previousReviewer, signal);
+              const reRequested = await addReviewers(
+                cwd,
+                previousReviewer,
+                signal,
+              );
               if (reRequested) {
-                successLines.push("", `📨 Re-requested review from @${previousReviewer}.`);
+                successLines.push(
+                  "",
+                  `📨 Re-requested review from @${previousReviewer}.`,
+                );
               }
             }
           } else {
-            successLines.push("", "⚠️ No PR detected — push was not preceded by PR creation.");
+            successLines.push(
+              "",
+              "⚠️ No PR detected — push was not preceded by PR creation.",
+            );
           }
 
           return respond(successLines.join("\n"), {
@@ -369,7 +409,12 @@ export function createFixCiExtension() {
         notify(`${failures.length} check(s) failed. Fetching logs…`);
 
         const failureLogs = await fetchFailureLogs(failures, cwd, signal);
-        const report = buildReport(pollResult.mode, pollResult.checks, failures, failureLogs);
+        const report = buildReport(
+          pollResult.mode,
+          pollResult.checks,
+          failures,
+          failureLogs,
+        );
 
         // ── 7. Cycle limit ───────────────────────────────────────────────
         if (cycle >= MAX_CYCLES) {
@@ -379,7 +424,12 @@ export function createFixCiExtension() {
               `\n\nThis was attempt ${cycle}/${MAX_CYCLES}. Stop here — ` +
               `tell the user you were unable to fix CI after ${MAX_CYCLES} attempts ` +
               `and show them the remaining failures.`,
-            { checks: pollResult.checks, mode: pollResult.mode, failureLogs, exhausted: true },
+            {
+              checks: pollResult.checks,
+              mode: pollResult.mode,
+              failureLogs,
+              exhausted: true,
+            },
           );
         }
 
@@ -391,7 +441,12 @@ export function createFixCiExtension() {
             `Do not modify workflow files unless the failure is clearly a workflow bug. ` +
             `Run relevant checks locally if possible to verify before committing. ` +
             `After committing your fix, call push_and_check_ci again.`,
-          { checks: pollResult.checks, mode: pollResult.mode, failureLogs, cycle },
+          {
+            checks: pollResult.checks,
+            mode: pollResult.mode,
+            failureLogs,
+            cycle,
+          },
         );
       },
     });
@@ -409,7 +464,11 @@ function formatConflictList(paths: string[]): string {
 function formatChecks(checks: CheckResult[]): string {
   return checks
     .map((c) => {
-      const icon = isFailure(c.bucket) ? "❌" : c.bucket === "pass" ? "✅" : "⏭️";
+      const icon = isFailure(c.bucket)
+        ? "❌"
+        : c.bucket === "pass"
+          ? "✅"
+          : "⏭️";
       return `${icon} ${c.name}: ${c.state}`;
     })
     .join("\n");

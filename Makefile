@@ -1,12 +1,11 @@
 .DEFAULT_GOAL := all
 
-.PHONY: all build test clean format
+.PHONY: all test format audit
 
-all: build test
+all: test audit
 
-build:
-	bun run --filter ./packages/agent build
-	bun run --filter ./packages/vaultkeeper build
+audit:
+	bun audit
 
 test:
 	bun test

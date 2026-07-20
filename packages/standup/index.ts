@@ -81,7 +81,7 @@ export function createStandupExtension(options: StandupExtensionOptions) {
 
           for (const [repositoryIndex, repository] of repositories.entries()) {
             const label = repositoryLabel(repository);
-            const cloneDirectory = join(workingDirectory, `${repositoryIndex}-${label}.git`);
+            const cloneDirectory = join(workingDirectory, `${repositoryIndex}.git`);
             setStatus(`Cloning ${label} (${repositoryIndex + 1}/${repositories.length})…`);
             await runGit(["clone", "--mirror", repository, cloneDirectory]);
 

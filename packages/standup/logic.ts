@@ -15,19 +15,16 @@ const RECORD_SEPARATOR = "\u001e";
 export const GIT_LOG_FORMAT = "%H%x00%an%x00%ae%x00%cI%x00%s%x1e";
 export const MAX_DIFF_CHUNK_CHARS = 120_000;
 
-export function parseRepositoryArguments(args: string): string[] {
-  let value: unknown;
-  try {
-    value = JSON.parse(args);
-  } catch {
-    throw new Error('Expected a JSON array of repository URLs, e.g. ["git@github.com:org/repo.git"]');
+export function normalizeRepositories(repositories: readonly string[]): string[] {
+  if (
+    !Array.isArray(repositories) ||
+    repositories.length === 0 ||
+    repositories.some((repository) => typeof repository !== "string" || repository.trim() === "")
+  ) {
+    throw new Error("Configure createStandupExtension with a non-empty list of repository URL strings");
   }
 
-  if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string" || item.trim() === "")) {
-    throw new Error("Expected a non-empty JSON array containing only non-empty repository URL strings");
-  }
-
-  return [...new Set(value.map((item) => (item as string).trim()))];
+  return [...new Set(repositories.map((repository) => repository.trim()))];
 }
 
 export function parseBranchLog(output: string, branch: string): StandupCommit[] {

@@ -7,19 +7,19 @@ import {
   chunkDiff,
   isOnLocalDay,
   mergeCommitsByHash,
+  normalizeRepositories,
   parseBranchLog,
-  parseRepositoryArguments,
   repositoryCacheKey,
   repositoryLabel,
 } from "./logic.ts";
 
-test("parseRepositoryArguments accepts and deduplicates a JSON string array", () => {
-  assert.deepEqual(parseRepositoryArguments('[" git@example.com:a.git ", "https://example.com/b", "git@example.com:a.git"]'), [
-    "git@example.com:a.git",
-    "https://example.com/b",
-  ]);
-  assert.throws(() => parseRepositoryArguments("repo-a repo-b"), /JSON array/);
-  assert.throws(() => parseRepositoryArguments("[]"), /non-empty JSON array/);
+test("normalizeRepositories trims and deduplicates configured URLs", () => {
+  assert.deepEqual(
+    normalizeRepositories([" git@example.com:a.git ", "https://example.com/b", "git@example.com:a.git"]),
+    ["git@example.com:a.git", "https://example.com/b"],
+  );
+  assert.throws(() => normalizeRepositories([]), /Configure createStandupExtension/);
+  assert.throws(() => normalizeRepositories([""]), /non-empty list/);
 });
 
 test("parseBranchLog parses the delimiter-safe git format", () => {

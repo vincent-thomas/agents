@@ -2,8 +2,8 @@
  * @vt-pi/fix-ci — a Pi extension factory that registers the
  * `push_and_check_ci` tool: pushes the current branch, opens a draft PR,
  * polls GitHub checks until they finish, returns results with failure logs,
- * and (on all-pass) marks the PR ready and waits for review. Tracks fix
- * cycles and tells the agent to stop after MAX_CYCLES attempts.
+ * and (on all-pass) marks the PR ready for review. Tracks fix cycles and
+ * tells the agent to stop after MAX_CYCLES attempts.
  *
  * This is the package's only public entry point (see package.json's
  * "exports"): createFixCiExtension is its single export. The polling /
@@ -35,11 +35,8 @@ import {
   markPrReady,
   addReviewers,
   getLatestChangesRequestedReviewer,
-  waitForReview,
-  MAX_REVIEW_POLLS,
   type CheckResult,
   type FailureLog,
-  type ReviewResult,
 } from "./logic.ts";
 
 const MAX_CYCLES = 3;
@@ -331,7 +328,7 @@ export function createFixCiExtension() {
             formatChecks(pollResult.checks),
           ];
 
-          // ── Mark PR ready and wait for review ─────────────────────
+          // ── Mark PR ready for review ──────────────────────────────
           const prNum = await detectPrNumber(cwd, signal);
           if (prNum) {
             notify(`CI passed for PR #${prNum}. Marking ready for review…`);
@@ -356,29 +353,6 @@ export function createFixCiExtension() {
               if (reRequested) {
                 successLines.push("", `📨 Re-requested review from @${previousReviewer}.`);
               }
-            }
-
-            // ── Wait for review ──────────────────────────────────
-            notify("Waiting for review…");
-
-            const reviewResult = await waitForReview(cwd, signal, notify);
-
-            if (reviewResult.decision === "changes_requested") {
-              return respond(formatChangesRequested(reviewResult), {
-                checks: pollResult.checks,
-                mode: pollResult.mode,
-                allPassed: true,
-                review: reviewResult,
-              });
-            }
-
-            if (reviewResult.decision === "approved") {
-              successLines.push("", `✅ PR approved by @${reviewResult.reviewer}.`);
-              if (reviewResult.reviewBody) {
-                successLines.push("", `> ${reviewResult.reviewBody}`);
-              }
-            } else {
-              successLines.push("", `⏳ Review still pending after ${MAX_REVIEW_POLLS} polls.`);
             }
           } else {
             successLines.push("", "⚠️ No PR detected — push was not preceded by PR creation.");
@@ -480,35 +454,6 @@ function buildReport(
     }
     lines.push("");
   }
-
-  return lines.join("\n");
-}
-
-function formatChangesRequested(result: ReviewResult): string {
-  const lines: string[] = [];
-  lines.push(`## Review: Changes Requested by @${result.reviewer}`);
-  lines.push("");
-
-  if (result.reviewBody) {
-    lines.push(`> ${result.reviewBody.replace(/\n/g, "\n> ")}`);
-    lines.push("");
-  }
-
-  if (result.comments.length > 0) {
-    lines.push("### Inline comments");
-    lines.push("");
-    for (const c of result.comments) {
-      const location = c.startLine
-        ? `\`${c.path}:L${c.startLine}-L${c.line}\``
-        : c.line
-          ? `\`${c.path}:${c.line}\``
-          : `\`${c.path}\``;
-      lines.push(`- ${location} — ${c.body.replace(/\n/g, " ")}`);
-    }
-    lines.push("");
-  }
-
-  lines.push("Address these comments, commit the fixes, and call `push_and_check_ci` again.");
 
   return lines.join("\n");
 }

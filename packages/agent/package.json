@@ -4,7 +4,7 @@
   "type": "module",
   "module": "src/index.ts",
   "bin": {
-    "agent": "./src/index.ts"
+    "coder": "./src/index.ts"
   },
   "scripts": {
     "build": "bun build ./src/index.ts --target bun --outfile ./dist/index.js --packages external --bundle",

@@ -896,24 +896,6 @@ export interface Review {
   commitId: string | null; // SHA the review was submitted against; null if unknown
 }
 
-interface ReviewComment {
-  id: number;
-  pullRequestReviewId: number;
-  path: string;
-  line: number | null;
-  startLine: number | null; // start of a multi-line comment range; null for single-line comments
-  body: string;
-  author: string;
-}
-
-export interface ReviewResult {
-  decision: "approved" | "changes_requested" | "pending" | "timeout";
-  reviews: Review[];
-  comments: ReviewComment[]; // only from the most recent CHANGES_REQUESTED review
-  reviewer: string | null;
-  reviewBody: string;
-}
-
 // ---------------------------------------------------------------------------
 // Review fetching
 // ---------------------------------------------------------------------------
@@ -933,11 +915,10 @@ interface RawReview {
  * Map raw `gh api` review JSON into Review objects.
  *
  * Pulled out from fetchPrReviews so the mapping is unit-testable without
- * mocking `gh` — mirroring parseReviewComments. The `author ?? user` login
- * fallback is the reason this matters: `gh api` (REST) returns the reviewer
- * under `.user`, while `gh pr view`-style (GraphQL) output uses `.author`;
- * getting that wrong silently labels every reviewer "unknown", which then
- * breaks re-request-review and the changes-requested attribution downstream.
+ * mocking `gh`. The `author ?? user` login fallback is the reason this matters:
+ * `gh api` (REST) returns the reviewer under `.user`, while `gh pr view`-style
+ * (GraphQL) output uses `.author`; getting that wrong silently labels every
+ * reviewer "unknown", which breaks review re-requests.
  */
 export function parseReviews(raw: unknown): Review[] {
   const reviews = raw as RawReview[];
@@ -964,54 +945,6 @@ async function fetchPrReviews(
     );
     if (!stdout.trim()) return [];
     return parseReviews(JSON.parse(stdout.trim()));
-  } catch {
-    return [];
-  }
-}
-
-/** Shape of one entry in `gh api .../reviews/{id}/comments` output that we care about. */
-interface RawReviewComment {
-  id: number;
-  path?: string;
-  line?: number;
-  start_line?: number;
-  body?: string;
-  user?: { login: string };
-}
-
-/**
- * Map raw `gh api` review-comment JSON into ReviewComment objects.
- * Pulled out from fetchCommentsForReview so the mapping is unit-testable
- * without mocking `gh`.
- */
-export function parseReviewComments(raw: unknown, reviewId: number): ReviewComment[] {
-  const comments = raw as RawReviewComment[];
-  return (Array.isArray(comments) ? comments : []).map((c) => ({
-    id: c.id,
-    pullRequestReviewId: reviewId,
-    path: c.path ?? "",
-    line: c.line ?? null,
-    startLine: c.start_line ?? null,
-    body: c.body ?? "",
-    author: c.user?.login ?? "unknown",
-  }));
-}
-
-async function fetchCommentsForReview(
-  cwd: string,
-  prNumber: number | null,
-  reviewId: number,
-  signal?: AbortSignal,
-): Promise<ReviewComment[]> {
-  if (!prNumber) return [];
-  try {
-    const { stdout } = await execAsync(
-      `gh api --paginate repos/{owner}/{repo}/pulls/${prNumber}/reviews/${reviewId}/comments`,
-      { cwd, timeout: 15_000, signal },
-    );
-    if (!stdout.trim()) return [];
-    const raw = JSON.parse(stdout.trim());
-    return parseReviewComments(raw, reviewId);
   } catch {
     return [];
   }
@@ -1050,155 +983,4 @@ export async function getLatestChangesRequestedReviewer(
   if (staleChangesRequested.length === 0) return null;
 
   return staleChangesRequested[0].author;
-}
-
-// ---------------------------------------------------------------------------
-// Review polling
-// ---------------------------------------------------------------------------
-
-export const MAX_REVIEW_POLLS = 120; // 120 * 30s = 60 minutes
-const REVIEW_POLL_INTERVAL_MS = 30_000;
-
-/**
- * Pick the review that decides the PR's outcome from the currently-active
- * reviews (already narrowed to the current HEAD, with DISMISSED removed), or
- * null when no decision has been reached yet.
- *
- * Mirrors how GitHub itself derives a PR's review decision: only APPROVED and
- * CHANGES_REQUESTED reviews are decisive — a COMMENTED or PENDING review never
- * changes the outcome, so a reviewer who approves (or requests changes) and
- * then leaves a plain follow-up comment is still approving (or still blocking).
- * Taking the single latest review by timestamp, as this used to, let that
- * trailing comment mask the decision and stall the poll until it timed out.
- *
- * Each reviewer's *latest* decisive review is what counts (an earlier one they
- * superseded is ignored). If any reviewer's current stance is CHANGES_REQUESTED
- * the PR is blocked, so that wins over approvals; otherwise the most recent
- * approval is returned.
- */
-export function decisiveReview(active: Review[]): Review | null {
-  const latestByAuthor = new Map<string, Review>();
-  for (const r of active) {
-    if (r.state !== "APPROVED" && r.state !== "CHANGES_REQUESTED") continue;
-    const prev = latestByAuthor.get(r.author);
-    if (!prev || r.submittedAt > prev.submittedAt) latestByAuthor.set(r.author, r);
-  }
-
-  const decisive = [...latestByAuthor.values()];
-  if (decisive.length === 0) return null;
-
-  const blocking = decisive.filter((r) => r.state === "CHANGES_REQUESTED");
-  const pool = blocking.length > 0 ? blocking : decisive;
-  return pool.reduce((a, b) => (a.submittedAt > b.submittedAt ? a : b));
-}
-
-/**
- * Poll for PR reviews until a decision is reached (approved or changes
- * requested). Times out after MAX_REVIEW_POLLS polls.
- *
- * Reviews submitted against an older commit (before the current HEAD) are
- * treated as stale and ignored — only reviews against the current HEAD are
- * considered active.
- *
- * - APPROVED → returns immediately
- * - CHANGES_REQUESTED → fetches inline comments linked to that review
- * - COMMENTED (no decision yet) → logs via onStatus, keeps polling
- * - PENDING / no active reviews → logs via onStatus, keeps polling
- */
-export async function waitForReview(
-  cwd: string,
-  signal?: AbortSignal,
-  onStatus?: (msg: string) => void,
-): Promise<ReviewResult> {
-  let polls = 0;
-
-  // Capture the PR's HEAD SHA at the start. Reviews submitted against
-  // an older commit (before new pushes) are stale and should be ignored.
-  const headSha = ((await getHeadSha(cwd, signal)) ?? "").trim();
-  const prNumber = await detectPrNumber(cwd, signal);
-
-  while (polls < MAX_REVIEW_POLLS) {
-    if (signal?.aborted) {
-      return { decision: "pending", reviews: [], comments: [], reviewer: null, reviewBody: "" };
-    }
-
-    polls++;
-
-    const reviews = await fetchPrReviews(cwd, prNumber, signal);
-    // Filter out DISMISSED and stale reviews (submitted against an older commit).
-    const active = reviews.filter((r) => {
-      if (r.state === "DISMISSED") return false;
-      if (headSha && r.commitId && r.commitId !== headSha) return false;
-      return true;
-    });
-
-    if (active.length === 0) {
-      onStatus?.(`Poll ${polls}/${MAX_REVIEW_POLLS}: awaiting reviewer assignment…`);
-      await sleep(REVIEW_POLL_INTERVAL_MS, signal);
-      continue;
-    }
-
-    // A decisive review (approval / changes requested) settles the outcome
-    // even if a later COMMENTED/PENDING review exists — those never change a
-    // PR's decision on GitHub, so they must not mask an earlier one here.
-    const decisive = decisiveReview(active);
-
-    if (decisive?.state === "APPROVED") {
-      onStatus?.(`PR approved by @${decisive.author}.`);
-      return {
-        decision: "approved",
-        reviews,
-        comments: [],
-        reviewer: decisive.author,
-        reviewBody: decisive.body,
-      };
-    }
-    if (decisive?.state === "CHANGES_REQUESTED") {
-      onStatus?.(`Changes requested by @${decisive.author}. Fetching review comments…`);
-      // Fetch comments linked to this specific review directly.
-      const linkedComments = await fetchCommentsForReview(cwd, prNumber, decisive.id, signal);
-      return {
-        decision: "changes_requested",
-        reviews,
-        comments: linkedComments,
-        reviewer: decisive.author,
-        reviewBody: decisive.body,
-      };
-    }
-
-    // No decision yet — report the most recent active review's status and
-    // keep polling.
-    const latest = active.reduce((a, b) => (a.submittedAt > b.submittedAt ? a : b));
-
-    switch (latest.state) {
-      case "COMMENTED": {
-        const bodyPreview = latest.body
-          ? ` — "${latest.body.slice(0, 80)}${latest.body.length > 80 ? "…" : ""}"`
-          : "";
-        onStatus?.(
-          `Poll ${polls}/${MAX_REVIEW_POLLS}: @${latest.author} commented${bodyPreview} — awaiting decision…`,
-        );
-        break;
-      }
-      case "PENDING": {
-        onStatus?.(`Poll ${polls}/${MAX_REVIEW_POLLS}: @${latest.author} is reviewing (pending)…`);
-        break;
-      }
-      default: {
-        onStatus?.(
-          `Poll ${polls}/${MAX_REVIEW_POLLS}: review state is "${latest.state}" — waiting…`,
-        );
-      }
-    }
-
-    await sleep(REVIEW_POLL_INTERVAL_MS, signal);
-  }
-
-  return {
-    decision: "timeout",
-    reviews: [],
-    comments: [],
-    reviewer: null,
-    reviewBody: "",
-  };
 }

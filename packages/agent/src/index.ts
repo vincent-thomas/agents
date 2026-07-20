@@ -18,6 +18,7 @@ import { createwriteGuardExtension } from "./extensions/write-guard";
 import { gitCommitExtension } from "./extensions/git-commit";
 import { createExploreExtension } from "@vt-agent/explorer";
 import { createFixCiExtension } from "@vt-agent/git_push";
+import rootCauseExtension from "./extensions/root-cause/index.ts";
 
 import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
 
@@ -46,6 +47,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         }),
         gitCommitExtension,
         createFixCiExtension(),
+        rootCauseExtension,
       ],
     },
   });

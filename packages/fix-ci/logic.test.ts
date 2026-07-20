@@ -14,10 +14,7 @@ import {
   gitPush,
   extractRunId,
   trimLog,
-  parseReviewComments,
   parseReviews,
-  decisiveReview,
-  type Review,
 } from "./logic.ts";
 import { execSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -136,56 +133,6 @@ suite("trimLog", () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseReviewComments
-// ---------------------------------------------------------------------------
-
-suite("parseReviewComments", () => {
-  test("maps a single-line comment (no start_line)", () => {
-    const raw = [{ id: 1, path: "a.ts", line: 42, body: "fix this", user: { login: "alice" } }];
-    const [comment] = parseReviewComments(raw, 99);
-    assert.deepEqual(comment, {
-      id: 1,
-      pullRequestReviewId: 99,
-      path: "a.ts",
-      line: 42,
-      startLine: null,
-      body: "fix this",
-      author: "alice",
-    });
-  });
-
-  test("maps a multi-line comment's start_line to startLine", () => {
-    const raw = [
-      {
-        id: 2,
-        path: "b.ts",
-        line: 10,
-        start_line: 5,
-        body: "range comment",
-        user: { login: "bob" },
-      },
-    ];
-    const [comment] = parseReviewComments(raw, 100);
-    assert.equal(comment.startLine, 5);
-    assert.equal(comment.line, 10);
-  });
-
-  test("defaults missing fields", () => {
-    const [comment] = parseReviewComments([{ id: 3 }], 1);
-    assert.equal(comment.path, "");
-    assert.equal(comment.line, null);
-    assert.equal(comment.startLine, null);
-    assert.equal(comment.body, "");
-    assert.equal(comment.author, "unknown");
-  });
-
-  test("non-array input returns empty list", () => {
-    assert.deepEqual(parseReviewComments(null, 1), []);
-    assert.deepEqual(parseReviewComments(undefined, 1), []);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // parseReviews
 // ---------------------------------------------------------------------------
 
@@ -229,80 +176,6 @@ suite("parseReviews", () => {
   test("non-array input returns empty list", () => {
     assert.deepEqual(parseReviews(null), []);
     assert.deepEqual(parseReviews(undefined), []);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// decisiveReview
-// ---------------------------------------------------------------------------
-
-function review(overrides: Partial<Review> & { state: string; submittedAt: string }): Review {
-  return {
-    id: 1,
-    author: "alice",
-    body: "",
-    commitId: "head",
-    ...overrides,
-  };
-}
-
-suite("decisiveReview", () => {
-  test("no reviews → null", () => {
-    assert.equal(decisiveReview([]), null);
-  });
-
-  test("only COMMENTED/PENDING → null (no decision yet)", () => {
-    const active = [
-      review({ state: "COMMENTED", submittedAt: "2026-01-01T00:00:00Z" }),
-      review({ state: "PENDING", submittedAt: "2026-01-01T01:00:00Z", author: "bob" }),
-    ];
-    assert.equal(decisiveReview(active), null);
-  });
-
-  test("a later COMMENTED review does not mask an approval", () => {
-    const active = [
-      review({ id: 1, state: "APPROVED", submittedAt: "2026-01-01T00:00:00Z" }),
-      review({ id: 2, state: "COMMENTED", submittedAt: "2026-01-01T02:00:00Z" }),
-    ];
-    const result = decisiveReview(active);
-    assert.equal(result?.state, "APPROVED");
-    assert.equal(result?.id, 1);
-  });
-
-  test("a later COMMENTED review does not mask a changes-requested", () => {
-    const active = [
-      review({ id: 1, state: "CHANGES_REQUESTED", submittedAt: "2026-01-01T00:00:00Z" }),
-      review({ id: 2, state: "COMMENTED", submittedAt: "2026-01-01T02:00:00Z" }),
-    ];
-    assert.equal(decisiveReview(active)?.state, "CHANGES_REQUESTED");
-  });
-
-  test("a reviewer's newer approval supersedes their older changes-requested", () => {
-    const active = [
-      review({ id: 1, state: "CHANGES_REQUESTED", submittedAt: "2026-01-01T00:00:00Z" }),
-      review({ id: 2, state: "APPROVED", submittedAt: "2026-01-01T03:00:00Z" }),
-    ];
-    const result = decisiveReview(active);
-    assert.equal(result?.state, "APPROVED");
-    assert.equal(result?.id, 2);
-  });
-
-  test("an outstanding changes-requested from one reviewer blocks another's approval", () => {
-    const active = [
-      review({ author: "alice", state: "APPROVED", submittedAt: "2026-01-01T05:00:00Z" }),
-      review({ author: "bob", state: "CHANGES_REQUESTED", submittedAt: "2026-01-01T01:00:00Z" }),
-    ];
-    const result = decisiveReview(active);
-    assert.equal(result?.state, "CHANGES_REQUESTED");
-    assert.equal(result?.author, "bob");
-  });
-
-  test("multiple approvals → most recent one is returned", () => {
-    const active = [
-      review({ author: "alice", state: "APPROVED", submittedAt: "2026-01-01T01:00:00Z" }),
-      review({ author: "bob", state: "APPROVED", submittedAt: "2026-01-01T04:00:00Z" }),
-    ];
-    assert.equal(decisiveReview(active)?.author, "bob");
   });
 });
 

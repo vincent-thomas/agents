@@ -9,6 +9,7 @@ import {
   mergeCommitsByHash,
   parseBranchLog,
   parseRepositoryArguments,
+  repositoryCacheKey,
   repositoryLabel,
 } from "./logic.ts";
 
@@ -59,6 +60,14 @@ test("isOnLocalDay compares the timestamp in the machine local timezone", () => 
 test("repositoryLabel handles SSH and HTTPS clone URLs", () => {
   assert.equal(repositoryLabel("git@github.com:org/project.git"), "project");
   assert.equal(repositoryLabel("https://github.com/org/project.git"), "project");
+});
+
+test("repositoryCacheKey is stable without exposing clone credentials", () => {
+  const repository = "https://token@example.com/org/project.git";
+  const key = repositoryCacheKey(repository);
+  assert.equal(key, repositoryCacheKey(repository));
+  assert.notEqual(key, repositoryCacheKey("https://example.com/org/other.git"));
+  assert.doesNotMatch(key, /token|example|project/);
 });
 
 test("chunkDiff preserves every character across bounded chunks", () => {

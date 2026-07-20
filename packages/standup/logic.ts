@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export interface StandupCommit {
   hash: string;
   authorName: string;
@@ -75,6 +77,10 @@ export function repositoryLabel(repository: string): string {
   const withoutQuery = repository.split(/[?#]/, 1)[0] ?? repository;
   const tail = withoutQuery.replace(/[\\/]$/, "").split(/[/:]/).at(-1) ?? repository;
   return tail.replace(/\.git$/, "") || repository;
+}
+
+export function repositoryCacheKey(repository: string): string {
+  return createHash("sha256").update(repository).digest("hex");
 }
 
 export function chunkDiff(diff: string, maxChars = MAX_DIFF_CHUNK_CHARS): string[] {

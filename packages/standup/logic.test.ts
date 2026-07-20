@@ -91,4 +91,6 @@ test("prompts identify untrusted diffs and provide synthesis evidence", () => {
   assert.match(prompt, /2026-04-01/);
   assert.match(prompt, /Added cache behavior/);
   assert.match(prompt, /outcome-oriented/);
+  assert.match(prompt, /at most five bullets/);
+  assert.match(prompt, /Do not add an introduction or conclusion/);
 });

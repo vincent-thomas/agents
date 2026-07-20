@@ -4,7 +4,7 @@
   "type": "module",
   "module": "src/index.ts",
   "bin": {
-    "agent": "./src/index.ts"
+    "coder": "./src/index.ts"
   },
   "scripts": {
     "build": "bun build ./src/index.ts --target bun --outfile ./dist/index.js --packages external --bundle",
@@ -17,7 +17,8 @@
     "@sinclair/typebox": "^0.34.52",
     "@vt-agent/command-policy": "workspace:*",
     "@vt-agent/explorer": "workspace:*",
-    "@vt-agent/git_push": "workspace:*"
+    "@vt-agent/git_push": "workspace:*",
+    "@vt-agent/standup": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "latest",

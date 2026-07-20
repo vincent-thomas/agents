@@ -1,9 +1,11 @@
-.PHONY: build test clean format
+.DEFAULT_GOAL := all
 
-all: build test
+.PHONY: all test format audit
 
-build:
-	bun run --filter ./packages/agent build
+all: test audit
+
+audit:
+	bun audit
 
 test:
 	bun test

@@ -8,8 +8,8 @@
  * which has no Pi dependency and is tested directly there.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import type { CommandPolicyEntry } from "./types.ts";
 import { evaluateCommand } from "./matching.ts";
 

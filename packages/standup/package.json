@@ -1,5 +1,5 @@
 {
-  "name": "@vt-agent/command-policy",
+  "name": "@vt-agent/standup",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -9,7 +9,8 @@
     "test": "node --test"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.10"
+    "@earendil-works/pi-ai": "^0.80.7",
+    "@earendil-works/pi-coding-agent": "^0.80.7"
   },
   "devDependencies": {
     "typescript": "^7.0.2"

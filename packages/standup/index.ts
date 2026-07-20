@@ -11,14 +11,16 @@ import {
   isOnLocalDay,
   localDayRange,
   mergeCommitsByHash,
+  normalizeRepositories,
   parseBranchLog,
-  parseRepositoryArguments,
   repositoryCacheKey,
   repositoryLabel,
   type StandupCommit,
 } from "./logic.ts";
 
 export interface StandupExtensionOptions {
+  /** Repositories inspected whenever /standup runs. */
+  repositories: readonly string[];
   /** Cheaper model used only to describe individual commit diffs. */
   model: Model<any>;
   /** Override the identity selected from `git config --global user.email`. */
@@ -62,7 +64,7 @@ export function createStandupExtension(options: StandupExtensionOptions) {
 
     pi.registerCommand("standup", {
       description: "Summarize today's authored commits across remote repositories",
-      handler: async (args, ctx) => {
+      handler: async (_args, ctx) => {
         await ctx.waitForIdle();
 
         const setStatus = (message?: string) => {
@@ -73,7 +75,7 @@ export function createStandupExtension(options: StandupExtensionOptions) {
         };
 
         try {
-          const repositories = parseRepositoryArguments(args);
+          const repositories = normalizeRepositories(options.repositories);
           const authorEmail =
             options.authorEmail?.trim() || (await runGit(["config", "--global", "user.email"])).trim();
           if (!authorEmail) throw new Error("No author email configured; set git user.email or provide authorEmail");

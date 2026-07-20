@@ -49,6 +49,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         gitCommitExtension,
         createFixCiExtension(),
         createStandupExtension({
+          repositories: [],
           model: models.getModel("openai-codex", "gpt-5.4-mini"),
         }),
         rootCauseExtension,

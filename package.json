@@ -5,6 +5,6 @@
     "./packages/*"
   ],
   "devDependencies": {
-    "oxfmt": "^0.59.0"
+    "oxfmt": "^0.60.0"
   }
 }

@@ -20,6 +20,10 @@ import { createExploreExtension } from "@vt-agent/explorer";
 import { createFixCiExtension } from "@vt-agent/git_push";
 import { createStandupExtension } from "@vt-agent/standup";
 import rootCauseExtension from "./extensions/root-cause/index.ts";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
+
+const execAsync = promisify(exec);
 
 import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
 
@@ -49,7 +53,11 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         gitCommitExtension,
         createFixCiExtension(),
         createStandupExtension({
-          repositories: [],
+          repositories: (
+            await execAsync(
+              "fd -t d --max-depth 1 . ~/hdr | xargs -n 1 sh -c 'git -C $0 remote get-url origin'",
+            )
+          ).stdout.split("\n"),
           model: models.getModel("openai-codex", "gpt-5.4-mini"),
         }),
         rootCauseExtension,

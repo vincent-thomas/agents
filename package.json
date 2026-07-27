@@ -4,7 +4,11 @@
   "workspaces": [
     "./packages/*"
   ],
+  "scripts": {
+    "postinstall": "bun2nix -o bun.nix"
+  },
   "devDependencies": {
+    "bun2nix": "^2.1.2",
     "oxfmt": "^0.60.0"
   }
 }

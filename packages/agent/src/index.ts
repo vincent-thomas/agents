@@ -28,23 +28,9 @@ import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
 
 const models = builtinModels();
 
-function resolveSubagentModel(reference: string) {
-  const separator = reference.indexOf("/");
-  if (separator <= 0 || separator === reference.length - 1) {
-    throw new Error(
-      `Invalid sub-agent model '${reference}': expected '<provider>/<model>'`,
-    );
-  }
-
-  return models.getModel(
-    reference.slice(0, separator),
-    reference.slice(separator + 1),
-  );
-}
-
 const subagentCatalog = createSubagentCatalog({
   paths: [new URL("../agents/scout.md", import.meta.url)],
-  resolveModel: resolveSubagentModel,
+  getModel: (provider, model) => models.getModel(provider, model),
 });
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({

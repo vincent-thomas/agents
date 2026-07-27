@@ -15,7 +15,7 @@ import {
 
 export interface CreateSubagentCatalogOptions {
   paths: readonly (string | URL)[];
-  resolveModel(reference: string): Model<any>;
+  getModel(provider: string, model: string): Model<any>;
   extensionFactories?: ExtensionFactory[];
   customTools?: ToolDefinition[];
 }
@@ -41,8 +41,22 @@ export function createSubagentCatalog(
   const byName = new Map(definitions.map((definition) => [definition.name, definition]));
   const models = new Map(
     definitions.map((definition) => {
+      const separator = definition.model.indexOf("/");
+      if (separator <= 0 || separator === definition.model.length - 1) {
+        throw new Error(
+          `Invalid sub-agent model '${definition.model}' in ${definition.filePath}: ` +
+            "expected '<provider>/<model>'",
+        );
+      }
+
       try {
-        return [definition.name, options.resolveModel(definition.model)] as const;
+        return [
+          definition.name,
+          options.getModel(
+            definition.model.slice(0, separator),
+            definition.model.slice(separator + 1),
+          ),
+        ] as const;
       } catch (error) {
         throw new Error(
           `Could not resolve model '${definition.model}' from ${definition.filePath}`,

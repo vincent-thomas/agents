@@ -1,11 +1,40 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { loadSubagentDefinitions } from "./definitions.ts";
 import {
+  createSubagentToolsExtension,
   finishSubagentToolExecution,
   formatSubagentResult,
   formatSubagentToolExecution,
   startSubagentToolExecution,
 } from "./extension.ts";
+
+test("only parent-prompted agents expose a task parameter", () => {
+  const definitions = loadSubagentDefinitions([
+    new URL("../../agents/scout.md", import.meta.url),
+    new URL("../../agents/merge-conflicts.md", import.meta.url),
+  ]);
+  const registered: Array<{
+    name: string;
+    parameters: { properties?: Record<string, unknown> };
+  }> = [];
+  const extension = createSubagentToolsExtension({
+    definitions,
+    invokeSubagent: async () => {
+      throw new Error("not invoked");
+    },
+  });
+  extension({
+    registerTool(tool) {
+      registered.push(tool as (typeof registered)[number]);
+    },
+  } as never);
+
+  const parameterNames = (name: string) =>
+    Object.keys(registered.find((tool) => tool.name === name)!.parameters.properties ?? {});
+  assert.deepEqual(parameterNames("scout"), ["task"]);
+  assert.deepEqual(parameterNames("merge_conflicts"), []);
+});
 
 test("formats a missing sub-agent response", () => {
   assert.equal(formatSubagentResult(undefined), "The sub-agent did not return an answer.");

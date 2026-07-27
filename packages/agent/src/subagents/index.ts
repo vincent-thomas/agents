@@ -10,6 +10,8 @@ export {
   type CreateCatalogSubagentOptions,
   type CreateSubagentCatalogOptions,
   type SubagentCatalog,
+  type SubagentPromptContext,
+  type SubagentPromptFn,
 } from "./catalog.ts";
 export {
   createSubagentSession,
@@ -20,6 +22,7 @@ export {
 } from "./session.ts";
 export {
   createSubagentToolsExtension,
+  type SubagentInvocation,
   type SubagentToolContext,
   type SubagentToolsExtensionOptions,
 } from "./extension.ts";

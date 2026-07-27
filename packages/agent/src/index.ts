@@ -19,6 +19,7 @@ import { createFixCiExtension } from "@vt-agent/git_push";
 import { createStandupExtension } from "@vt-agent/standup";
 import rootCauseExtension from "./extensions/root-cause/index.ts";
 import { createSubagentCatalog } from "./subagents/index.ts";
+import { mergeConflictsPrompt } from "./subagents/prompts/merge-conflicts.ts";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -34,6 +35,9 @@ const subagentCatalog = createSubagentCatalog({
     new URL("../agents/merge-conflicts.md", import.meta.url),
   ],
   getModelFn: models.getModel.bind(models),
+  promptFns: {
+    merge_conflicts: mergeConflictsPrompt,
+  },
 });
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({

@@ -21,15 +21,21 @@ interface SubagentToolDetails {
 
 export interface SubagentToolContext {
   cwd: string;
+  parentPrompt?: string;
   signal?: AbortSignal;
+}
+
+export interface SubagentInvocation {
+  subagent: Subagent;
+  prompt: string;
 }
 
 export interface SubagentToolsExtensionOptions {
   definitions: SubagentDefinition[];
-  createSubagent(
+  invokeSubagent(
     definition: SubagentDefinition,
     context: SubagentToolContext,
-  ): Promise<Subagent>;
+  ): Promise<SubagentInvocation>;
 }
 
 class SubagentResultText {
@@ -118,17 +124,28 @@ export function createSubagentToolsExtension(
 ) {
   return function (pi: ExtensionAPI) {
     for (const definition of options.definitions) {
+      const acceptsParentPrompt = definition.prompt === "parent";
+      const parameters = acceptsParentPrompt
+        ? Type.Object({
+            task: Type.String({
+              description: `The task to delegate to the ${definition.name} sub-agent`,
+            }),
+          })
+        : Type.Object({});
+
       pi.registerTool({
         name: definition.name,
         label: definition.label,
         description: definition.description,
         promptSnippet: definition.description,
-        parameters: Type.Object({
-          task: Type.String({
-            description: `The task to delegate to the ${definition.name} sub-agent`,
-          }),
-        }),
+        parameters,
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
+          const parentPrompt =
+            acceptsParentPrompt &&
+            "task" in params &&
+            typeof params.task === "string"
+              ? params.task
+              : undefined;
           let toolTrace: SubagentToolExecution[] = [];
           const details = (): SubagentToolDetails => ({ toolTrace });
           const notify = () =>
@@ -136,17 +153,21 @@ export function createSubagentToolsExtension(
               content: [
                 {
                   type: "text",
-                  text: `${definition.label}: ${params.task}`,
+                  text: parentPrompt
+                    ? `${definition.label}: ${parentPrompt}`
+                    : definition.label,
                 },
               ],
               details: details(),
             });
           notify();
 
-          const subagent = await options.createSubagent(definition, {
+          const invocation = await options.invokeSubagent(definition, {
             cwd: ctx.cwd,
+            parentPrompt,
             signal,
           });
+          const { subagent, prompt } = invocation;
           const { session } = subagent;
 
           const unsubscribe = session.subscribe((event) => {
@@ -170,7 +191,7 @@ export function createSubagentToolsExtension(
 
           let resultText: string | undefined;
           try {
-            await session.prompt(params.task);
+            await session.prompt(prompt);
             resultText = session.getLastAssistantText();
           } finally {
             unsubscribe();
@@ -195,9 +216,15 @@ export function createSubagentToolsExtension(
 
           if (!expanded) return new SubagentResultText(resultText);
 
+          const parentPrompt =
+            acceptsParentPrompt &&
+            "task" in context.args &&
+            typeof context.args.task === "string"
+              ? context.args.task
+              : undefined;
           let text = theme.fg(
             "toolOutput",
-            `${definition.label}: ${context.args.task}`,
+            parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label,
           );
           if (details?.toolTrace.length) {
             text += `\n\n${theme.fg("muted", "Sub-agent tools:")}`;

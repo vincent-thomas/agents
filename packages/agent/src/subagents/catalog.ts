@@ -7,21 +7,36 @@ import {
   loadSubagentDefinitions,
   type SubagentDefinition,
 } from "./definitions.ts";
-import { createSubagentToolsExtension } from "./extension.ts";
+import {
+  createSubagentToolsExtension,
+  type SubagentInvocation,
+} from "./extension.ts";
 import {
   createSubagentSession,
   type Subagent,
 } from "./session.ts";
 
+export interface SubagentPromptContext {
+  cwd: string;
+  definition: SubagentDefinition;
+  signal?: AbortSignal;
+}
+
+export type SubagentPromptFn = (
+  context: SubagentPromptContext,
+) => string | Promise<string>;
+
 export interface CreateSubagentCatalogOptions {
   paths: readonly (string | URL)[];
   getModelFn(provider: string, model: string): Model<any>;
+  promptFns?: Record<string, SubagentPromptFn>;
   extensionFactories?: ExtensionFactory[];
   customTools?: ToolDefinition[];
 }
 
 export interface CreateCatalogSubagentOptions {
   cwd: string;
+  parentPrompt?: string;
   agentDir?: string;
   extensionFactories?: ExtensionFactory[];
   customTools?: ToolDefinition[];
@@ -31,6 +46,10 @@ export interface CreateCatalogSubagentOptions {
 export interface SubagentCatalog {
   definitions: SubagentDefinition[];
   create(name: string, options: CreateCatalogSubagentOptions): Promise<Subagent>;
+  invoke(
+    name: string,
+    options: CreateCatalogSubagentOptions,
+  ): Promise<SubagentInvocation>;
   createToolsExtension(names?: string[]): ExtensionFactory;
 }
 
@@ -38,6 +57,14 @@ export function createSubagentCatalog(
   options: CreateSubagentCatalogOptions,
 ): SubagentCatalog {
   const definitions = loadSubagentDefinitions(options.paths);
+  for (const definition of definitions) {
+    if (definition.prompt !== "parent" && !options.promptFns?.[definition.prompt]) {
+      throw new Error(
+        `Unknown prompt source '${definition.prompt}' in ${definition.filePath}`,
+      );
+    }
+  }
+
   const byName = new Map(definitions.map((definition) => [definition.name, definition]));
   const models = new Map(
     definitions.map((definition) => {
@@ -83,8 +110,8 @@ export function createSubagentCatalog(
         : [
             createSubagentToolsExtension({
               definitions: nestedDefinitions,
-              createSubagent: (child, context) =>
-                createFromDefinition(child, context),
+              invokeSubagent: (child, context) =>
+                invokeDefinition(child, context),
             }),
           ];
 
@@ -106,16 +133,40 @@ export function createSubagentCatalog(
     });
   };
 
+  const invokeDefinition = async (
+    definition: SubagentDefinition,
+    createOptions: CreateCatalogSubagentOptions,
+  ): Promise<SubagentInvocation> => {
+    const prompt =
+      definition.prompt === "parent"
+        ? createOptions.parentPrompt
+        : await options.promptFns![definition.prompt]!({
+            cwd: createOptions.cwd,
+            definition,
+            signal: createOptions.signal,
+          });
+    if (!prompt || prompt.trim() === "") {
+      throw new Error(`Prompt source '${definition.prompt}' returned no prompt`);
+    }
+
+    return {
+      subagent: await createFromDefinition(definition, createOptions),
+      prompt,
+    };
+  };
+
   return {
     definitions,
     create: (name, createOptions) =>
       createFromDefinition(requireDefinition(name), createOptions),
+    invoke: (name, createOptions) =>
+      invokeDefinition(requireDefinition(name), createOptions),
     createToolsExtension(names = definitions.map((definition) => definition.name)) {
       const exposedDefinitions = names.map(requireDefinition);
       return createSubagentToolsExtension({
         definitions: exposedDefinitions,
-        createSubagent: (definition, context) =>
-          createFromDefinition(definition, context),
+        invokeSubagent: (definition, context) =>
+          invokeDefinition(definition, context),
       });
     },
   };

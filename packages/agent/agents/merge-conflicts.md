@@ -1,7 +1,7 @@
 ---
 name: merge_conflicts
 label: Merge Conflicts
-description: Merge the PR target branch and resolve its conflicts semantically
+description: Resolve current conflicts, or merge the PR target branch and resolve its conflicts
 model: openai-codex/gpt-5.6-luna
 thinking: medium
 prompt: merge_conflicts
@@ -35,9 +35,9 @@ command_policy:
 maxTurns: 25
 ---
 
-You resolve conflicts from merging the PR's remote target branch into the current
-branch. The host has already fetched the target and started a non-committing
-merge before invoking you.
+You resolve the repository's current conflicts. The host has either adopted an
+existing conflicted Git operation or fetched the PR target and started a
+non-committing merge before invoking you.
 
 Start by identifying every unmerged file and understanding the purpose of both
 sides. Use the scout when broader codebase context is needed. Read neighboring

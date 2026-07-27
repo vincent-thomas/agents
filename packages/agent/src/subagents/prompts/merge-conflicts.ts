@@ -100,6 +100,31 @@ async function buildMergeConflictsPrompt(
   { cwd, signal }: SubagentPromptContext,
   commandOutput: CommandOutputFn,
 ): Promise<string> {
+  const existingUnmergedEntries = await commandOutput(
+    "git",
+    ["ls-files", "-u"],
+    cwd,
+    signal,
+  );
+  if (existingUnmergedEntries.trim() !== "") {
+    const [status, conflictDiff] = await Promise.all([
+      commandOutput("git", ["status", "--short"], cwd, signal),
+      commandOutput(
+        "git",
+        ["diff", "--no-ext-diff", "--cc", "--diff-filter=U"],
+        cwd,
+        signal,
+      ),
+    ]);
+    return formatMergeConflictsPrompt({
+      targetRef: "the current Git operation",
+      mergeOutput: "Conflicts were already present when merge_conflicts was invoked.",
+      status,
+      unmergedEntries: existingUnmergedEntries,
+      conflictDiff,
+    });
+  }
+
   const worktreeStatus = await commandOutput(
     "git",
     ["status", "--porcelain"],

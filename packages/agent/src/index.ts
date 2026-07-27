@@ -14,6 +14,7 @@ import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { createCommandPolicyExtension } from "@vt-agent/command-policy";
 import commandPolicyExtension from "./extensions/command-policy.ts";
 import { createwriteGuardExtension } from "./extensions/write-guard";
+import { mergeConflictWriteGuardExtension } from "./extensions/merge-conflict-write-guard/index.ts";
 import { gitCommitExtension } from "./extensions/git-commit";
 import { createFixCiExtension } from "@vt-agent/git_push";
 import { createStandupExtension } from "@vt-agent/standup";
@@ -55,6 +56,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
       extensionFactories: [
         commandPolicyExtension,
         subagentCatalog.createToolsExtension(),
+        mergeConflictWriteGuardExtension,
         createwriteGuardExtension({
           overwriteFileThreshold: 50,
         }),

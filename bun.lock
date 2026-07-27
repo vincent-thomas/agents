@@ -5,7 +5,7 @@
     "": {
       "name": "agent",
       "devDependencies": {
-        "oxfmt": "latest",
+        "oxfmt": "^0.60.0",
       },
     },
     "packages/agent": {

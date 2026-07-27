@@ -11,15 +11,14 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
-import { Type } from "@sinclair/typebox";
 import { createCommandPolicyExtension } from "@vt-agent/command-policy";
 import commandPolicyExtension from "./extensions/command-policy.ts";
 import { createwriteGuardExtension } from "./extensions/write-guard";
 import { gitCommitExtension } from "./extensions/git-commit";
-import { createExploreExtension } from "@vt-agent/explorer";
 import { createFixCiExtension } from "@vt-agent/git_push";
 import { createStandupExtension } from "@vt-agent/standup";
 import rootCauseExtension from "./extensions/root-cause/index.ts";
+import { createSubagentCatalog } from "./subagents/index.ts";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -28,6 +27,25 @@ const execAsync = promisify(exec);
 import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
 
 const models = builtinModels();
+
+function resolveSubagentModel(reference: string) {
+  const separator = reference.indexOf("/");
+  if (separator <= 0 || separator === reference.length - 1) {
+    throw new Error(
+      `Invalid sub-agent model '${reference}': expected '<provider>/<model>'`,
+    );
+  }
+
+  return models.getModel(
+    reference.slice(0, separator),
+    reference.slice(separator + 1),
+  );
+}
+
+const subagentCatalog = createSubagentCatalog({
+  paths: [new URL("../agents/scout.md", import.meta.url)],
+  resolveModel: resolveSubagentModel,
+});
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({
   cwd,
@@ -43,10 +61,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
       },
       extensionFactories: [
         commandPolicyExtension,
-        createExploreExtension({
-          model: models.getModel("openai-codex", "gpt-5.6-luna"),
-          thinkingLevel: "low",
-        }),
+        subagentCatalog.createToolsExtension(),
         createwriteGuardExtension({
           overwriteFileThreshold: 50,
         }),

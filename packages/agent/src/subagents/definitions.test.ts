@@ -23,9 +23,13 @@ You are a read-only codebase scout.
 test("loads definitions from an explicit list of Markdown paths", () => {
   const definitions = loadSubagentDefinitions([
     new URL("../../agents/scout.md", import.meta.url),
+    new URL("../../agents/merge-conflicts.md", import.meta.url),
   ]);
 
-  assert.deepEqual(definitions.map((definition) => definition.name), ["scout"]);
+  assert.deepEqual(definitions.map((definition) => definition.name), [
+    "scout",
+    "merge_conflicts",
+  ]);
 });
 
 test("parses frontmatter as metadata and the body as the system prompt", () => {

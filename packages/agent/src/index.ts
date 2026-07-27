@@ -29,7 +29,10 @@ import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
 const models = builtinModels();
 
 const subagentCatalog = createSubagentCatalog({
-  paths: [new URL("../agents/scout.md", import.meta.url)],
+  paths: [
+    new URL("../agents/scout.md", import.meta.url),
+    new URL("../agents/merge-conflicts.md", import.meta.url),
+  ],
   getModelFn: models.getModel.bind(models),
 });
 

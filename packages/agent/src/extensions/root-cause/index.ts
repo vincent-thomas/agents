@@ -1,9 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-  fetchFailureLogs,
-  isFailure,
-  pollChecks,
-} from "@vt-agent/git_push/logic.ts";
+import { fetchFailureLogs, isFailure, pollChecks } from "@vt-agent/git_push/logic.ts";
 import { buildRootCausePrompt } from "./logic.ts";
 
 export function rootCauseExtension(pi: ExtensionAPI) {

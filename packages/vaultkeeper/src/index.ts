@@ -10,9 +10,7 @@ import {
 import { createObsidianExtension } from "./obsidian-tool.ts";
 import systemPrompt from "../SYSTEM.md" with { type: "text" };
 
-export async function runVaultkeeper(props: {
-  vaultName: string;
-}): Promise<void> {
+export async function runVaultkeeper(props: { vaultName: string }): Promise<void> {
   const { vaultName } = props;
 
   const cwd = process.cwd();

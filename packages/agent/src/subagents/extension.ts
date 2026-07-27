@@ -1,7 +1,4 @@
-import {
-  truncateToVisualLines,
-  type ExtensionAPI,
-} from "@earendil-works/pi-coding-agent";
+import { truncateToVisualLines, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import type { SubagentDefinition } from "./definitions.ts";
 import type { Subagent } from "./session.ts";
@@ -42,11 +39,7 @@ class SubagentResultText {
   constructor(private readonly text: string) {}
 
   render(width: number): string[] {
-    return truncateToVisualLines(
-      this.text,
-      Math.max(1, this.text.length + 1),
-      width,
-    ).visualLines;
+    return truncateToVisualLines(this.text, Math.max(1, this.text.length + 1), width).visualLines;
   }
 
   invalidate(): void {}
@@ -119,9 +112,7 @@ export function formatSubagentResult(text: string | undefined): string {
   return text;
 }
 
-export function createSubagentToolsExtension(
-  options: SubagentToolsExtensionOptions,
-) {
+export function createSubagentToolsExtension(options: SubagentToolsExtensionOptions) {
   return function (pi: ExtensionAPI) {
     for (const definition of options.definitions) {
       const acceptsParentPrompt = definition.prompt === "parent";
@@ -141,9 +132,7 @@ export function createSubagentToolsExtension(
         parameters,
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
           const parentPrompt =
-            acceptsParentPrompt &&
-            "task" in params &&
-            typeof params.task === "string"
+            acceptsParentPrompt && "task" in params && typeof params.task === "string"
               ? params.task
               : undefined;
           let toolTrace: SubagentToolExecution[] = [];
@@ -153,9 +142,7 @@ export function createSubagentToolsExtension(
               content: [
                 {
                   type: "text",
-                  text: parentPrompt
-                    ? `${definition.label}: ${parentPrompt}`
-                    : definition.label,
+                  text: parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label,
                 },
               ],
               details: details(),
@@ -180,11 +167,7 @@ export function createSubagentToolsExtension(
               );
               notify();
             } else if (event.type === "tool_execution_end") {
-              toolTrace = finishSubagentToolExecution(
-                toolTrace,
-                event.toolCallId,
-                event.isError,
-              );
+              toolTrace = finishSubagentToolExecution(toolTrace, event.toolCallId, event.isError);
               notify();
             }
           });
@@ -210,16 +193,13 @@ export function createSubagentToolsExtension(
         },
         renderResult(result, { expanded, isPartial }, theme, context) {
           const content = result.content.find((item) => item.type === "text");
-          const resultText =
-            content?.type === "text" ? theme.fg("toolOutput", content.text) : "";
+          const resultText = content?.type === "text" ? theme.fg("toolOutput", content.text) : "";
           const details = result.details as SubagentToolDetails | undefined;
 
           if (!expanded) return new SubagentResultText(resultText);
 
           const parentPrompt =
-            acceptsParentPrompt &&
-            "task" in context.args &&
-            typeof context.args.task === "string"
+            acceptsParentPrompt && "task" in context.args && typeof context.args.task === "string"
               ? context.args.task
               : undefined;
           let text = theme.fg(

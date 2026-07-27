@@ -2,11 +2,11 @@
   "name": "@vt-agent/vaultkeeper",
   "version": "0.0.0",
   "private": true,
-  "type": "module",
-  "module": "./src/index.ts",
   "bin": {
     "vaultkeeper": "./bin/index.ts"
   },
+  "type": "module",
+  "module": "./src/index.ts",
   "scripts": {
     "build": "bun build ./bin/index.ts --target bun --outfile ./dist/index.js --packages external --bundle",
     "test": "node --test"

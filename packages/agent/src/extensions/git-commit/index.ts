@@ -41,8 +41,7 @@ export function gitCommitExtension(pi: ExtensionAPI) {
         maxLength: 200,
       }),
       why: Type.String({
-        description:
-          "Concise inclusive reason why the work in this commit was needed.",
+        description: "Concise inclusive reason why the work in this commit was needed.",
         minLength: 1,
         maxLength: 200,
       }),
@@ -150,11 +149,7 @@ export function gitCommitExtension(pi: ExtensionAPI) {
         content: [{ type: "text", text: completedSteps.join("\n") }],
       });
 
-      const message = formatCommitMessage(
-        params.subject,
-        params.what,
-        params.why,
-      );
+      const message = formatCommitMessage(params.subject, params.what, params.why);
       const result = await gitCommit(cwd, message, signal);
 
       if (!result.success) {

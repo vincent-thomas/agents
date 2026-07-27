@@ -19,7 +19,19 @@ command_policy:
     command: git
     subcommand:
       - [diff]
-    allowedFlags: [--check, --name-only, --diff-filter, --cc, --ours, --theirs, --base, --no-ext-diff, --cached, --staged]
+    allowedFlags:
+      [
+        --check,
+        --name-only,
+        --diff-filter,
+        --cc,
+        --ours,
+        --theirs,
+        --base,
+        --no-ext-diff,
+        --cached,
+        --staged,
+      ]
   - name: git ls-files
     status: allowed
     command: git

@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  buildObsidianArgs,
-  formatObsidianInvocation,
-  formatObsidianOutput,
-} from "./logic.ts";
+import { buildObsidianArgs, formatObsidianInvocation, formatObsidianOutput } from "./logic.ts";
 
 test("buildObsidianArgs selects the configured vault by name", () => {
   assert.deepEqual(buildObsidianArgs("My Vault", "search", ["query=agency"]), [
@@ -30,10 +26,7 @@ test("buildObsidianArgs rejects invalid vault names", () => {
 
 test("buildObsidianArgs rejects attempts to select another vault", () => {
   for (const argument of ["vault=Other", "--vault=Other", "--vault", "Vault=Other"]) {
-    assert.throws(
-      () => buildObsidianArgs("My Vault", "read", [argument]),
-      /cannot be overridden/,
-    );
+    assert.throws(() => buildObsidianArgs("My Vault", "read", [argument]), /cannot be overridden/);
   }
 });
 

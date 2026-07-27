@@ -74,4 +74,3 @@ When a tool call fails or is blocked, treat it as debugging input:
 ## Trust, but verify
 
 Always verify your changes took effect and the result is valid. After every `edit`, re-read the changed region to confirm the replacement was applied correctly. After every commit, confirm the tree is in the expected state. This applies doubly to edits and commits - everything this file is about.
-

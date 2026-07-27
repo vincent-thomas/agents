@@ -77,13 +77,19 @@ export function createStandupExtension(options: StandupExtensionOptions) {
         try {
           const repositories = normalizeRepositories(options.repositories);
           const authorEmail =
-            options.authorEmail?.trim() || (await runGit(["config", "--global", "user.email"])).trim();
-          if (!authorEmail) throw new Error("No author email configured; set git user.email or provide authorEmail");
+            options.authorEmail?.trim() ||
+            (await runGit(["config", "--global", "user.email"])).trim();
+          if (!authorEmail)
+            throw new Error(
+              "No author email configured; set git user.email or provide authorEmail",
+            );
 
           const auth = await ctx.modelRegistry.getApiKeyAndHeaders(options.model);
           if (!auth.ok) throw new Error(auth.error);
           if (!auth.apiKey) {
-            throw new Error(`No API key is available for ${options.model.provider}/${options.model.id}`);
+            throw new Error(
+              `No API key is available for ${options.model.provider}/${options.model.id}`,
+            );
           }
 
           const today = new Date();
@@ -96,8 +102,12 @@ export function createStandupExtension(options: StandupExtensionOptions) {
             const label = repositoryLabel(repository);
             const cloneDirectory = join(cacheDirectory, `${repositoryCacheKey(repository)}.git`);
             if (await pathExists(cloneDirectory)) {
-              setStatus(`Updating cached ${label} (${repositoryIndex + 1}/${repositories.length})…`);
-              const cachedRemote = (await runGit(["remote", "get-url", "origin"], cloneDirectory)).trim();
+              setStatus(
+                `Updating cached ${label} (${repositoryIndex + 1}/${repositories.length})…`,
+              );
+              const cachedRemote = (
+                await runGit(["remote", "get-url", "origin"], cloneDirectory)
+              ).trim();
               if (cachedRemote !== repository) {
                 throw new Error(`Cached remote mismatch for ${label}`);
               }
@@ -126,7 +136,13 @@ export function createStandupExtension(options: StandupExtensionOptions) {
             const branchCommits: StandupCommit[] = [];
             for (const branch of branches) {
               const log = await runGit(
-                ["log", branch, `--since=${since}`, `--until=${until}`, `--format=${GIT_LOG_FORMAT}`],
+                [
+                  "log",
+                  branch,
+                  `--since=${since}`,
+                  `--until=${until}`,
+                  `--format=${GIT_LOG_FORMAT}`,
+                ],
                 cloneDirectory,
               );
               branchCommits.push(
@@ -157,7 +173,13 @@ export function createStandupExtension(options: StandupExtensionOptions) {
                         content: [
                           {
                             type: "text",
-                            text: buildDiffSummaryPrompt(label, commit, chunk, chunkIndex, chunks.length),
+                            text: buildDiffSummaryPrompt(
+                              label,
+                              commit,
+                              chunk,
+                              chunkIndex,
+                              chunks.length,
+                            ),
                           },
                         ],
                         timestamp: Date.now(),
@@ -172,7 +194,9 @@ export function createStandupExtension(options: StandupExtensionOptions) {
                   },
                 );
                 const text = responseText(response);
-                chunkSummaries.push(text || "The lower model returned no description for this diff chunk.");
+                chunkSummaries.push(
+                  text || "The lower model returned no description for this diff chunk.",
+                );
               }
               summaries.push({ repository: label, commit, summary: chunkSummaries.join("\n") });
             }

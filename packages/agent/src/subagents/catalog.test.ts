@@ -28,7 +28,8 @@ test("resolves frontmatter models through the supplied provider lookup", () => {
   });
 
   assert.deepEqual(requests, [["openai-codex", "gpt-5.6-luna"]]);
-  assert.deepEqual(catalog.definitions.map((definition) => definition.name), [
-    "scout",
-  ]);
+  assert.deepEqual(
+    catalog.definitions.map((definition) => definition.name),
+    ["scout"],
+  );
 });

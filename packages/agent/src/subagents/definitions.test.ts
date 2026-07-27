@@ -27,10 +27,10 @@ test("loads definitions from an explicit list of Markdown paths", () => {
     new URL("../../agents/merge-conflicts.md", import.meta.url),
   ]);
 
-  assert.deepEqual(definitions.map((definition) => definition.name), [
-    "scout",
-    "merge_conflicts",
-  ]);
+  assert.deepEqual(
+    definitions.map((definition) => definition.name),
+    ["scout", "merge_conflicts"],
+  );
   const gitAdd = definitions
     .find((definition) => definition.name === "merge_conflicts")!
     .commandPolicy.find((entry) => entry.name === "git add")!;
@@ -56,10 +56,7 @@ test("parses frontmatter as metadata and the body as the system prompt", () => {
 });
 
 test("defaults bash agents to an empty deny-by-default command policy", () => {
-  const definition = validDefinition.replace(
-    "tools: read, grep, find, ls",
-    "tools: read, bash",
-  );
+  const definition = validDefinition.replace("tools: read, grep, find, ls", "tools: read, bash");
   const parsed = parseSubagentDefinition(definition, "shell.md");
 
   assert.deepEqual(parsed.tools, ["read", "bash"]);
@@ -67,10 +64,7 @@ test("defaults bash agents to an empty deny-by-default command policy", () => {
 });
 
 test("parses nested sub-agent names", () => {
-  const definition = validDefinition.replace(
-    "subagents: []",
-    "subagents: [scout, reviewer]",
-  );
+  const definition = validDefinition.replace("subagents: []", "subagents: [scout, reviewer]");
 
   assert.deepEqual(parseSubagentDefinition(definition, "worker.md").subagents, [
     "scout",
@@ -93,10 +87,7 @@ test("rejects missing nested agents and cycles", () => {
   );
   assert.throws(
     () =>
-      validateSubagentDefinitions([
-        agent("worker", ["reviewer"]),
-        agent("reviewer", ["worker"]),
-      ]),
+      validateSubagentDefinitions([agent("worker", ["reviewer"]), agent("reviewer", ["worker"])]),
     /nested sub-agent cycle: worker -> reviewer -> worker/,
   );
 });
@@ -171,10 +162,7 @@ test("rejects unknown metadata fields", () => {
 });
 
 test("rejects an empty system prompt", () => {
-  const definition = validDefinition.replace(
-    "You are a read-only codebase scout.",
-    "",
-  );
+  const definition = validDefinition.replace("You are a read-only codebase scout.", "");
 
   assert.throws(
     () => parseSubagentDefinition(definition, "empty.md"),

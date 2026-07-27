@@ -2,7 +2,7 @@
 
 .PHONY: all test format audit
 
-all: test
+all: format-check test
 
 audit:
 	bun audit
@@ -12,3 +12,6 @@ test:
 
 format:
 	bun x oxfmt
+
+format-check:
+	bun x oxfmt --check

@@ -54,11 +54,7 @@ test("blocks write and points to merge_conflicts when conflicts exist", async ()
       "Unresolved Git conflicts are present. Use the merge_conflicts sub-agent to resolve them before calling write.",
   });
   assert.deepEqual(guard.execCalls, [
-    [
-      "git",
-      ["ls-files", "-u"],
-      { cwd: "/repo", signal: undefined, timeout: 5_000 },
-    ],
+    ["git", ["ls-files", "-u"], { cwd: "/repo", signal: undefined, timeout: 5_000 }],
   ]);
   assert.deepEqual(guard.notifications, [
     [

@@ -1,20 +1,8 @@
 import type { Model } from "@earendil-works/pi-ai";
-import type {
-  ExtensionFactory,
-  ToolDefinition,
-} from "@earendil-works/pi-coding-agent";
-import {
-  loadSubagentDefinitions,
-  type SubagentDefinition,
-} from "./definitions.ts";
-import {
-  createSubagentToolsExtension,
-  type SubagentInvocation,
-} from "./extension.ts";
-import {
-  createSubagentSession,
-  type Subagent,
-} from "./session.ts";
+import type { ExtensionFactory, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { loadSubagentDefinitions, type SubagentDefinition } from "./definitions.ts";
+import { createSubagentToolsExtension, type SubagentInvocation } from "./extension.ts";
+import { createSubagentSession, type Subagent } from "./session.ts";
 
 export interface SubagentPromptContext {
   cwd: string;
@@ -22,9 +10,7 @@ export interface SubagentPromptContext {
   signal?: AbortSignal;
 }
 
-export type SubagentPromptFn = (
-  context: SubagentPromptContext,
-) => string | Promise<string>;
+export type SubagentPromptFn = (context: SubagentPromptContext) => string | Promise<string>;
 
 export interface CreateSubagentCatalogOptions {
   paths: readonly (string | URL)[];
@@ -46,22 +32,15 @@ export interface CreateCatalogSubagentOptions {
 export interface SubagentCatalog {
   definitions: SubagentDefinition[];
   create(name: string, options: CreateCatalogSubagentOptions): Promise<Subagent>;
-  invoke(
-    name: string,
-    options: CreateCatalogSubagentOptions,
-  ): Promise<SubagentInvocation>;
+  invoke(name: string, options: CreateCatalogSubagentOptions): Promise<SubagentInvocation>;
   createToolsExtension(names?: string[]): ExtensionFactory;
 }
 
-export function createSubagentCatalog(
-  options: CreateSubagentCatalogOptions,
-): SubagentCatalog {
+export function createSubagentCatalog(options: CreateSubagentCatalogOptions): SubagentCatalog {
   const definitions = loadSubagentDefinitions(options.paths);
   for (const definition of definitions) {
     if (definition.prompt !== "parent" && !options.promptFns?.[definition.prompt]) {
-      throw new Error(
-        `Unknown prompt source '${definition.prompt}' in ${definition.filePath}`,
-      );
+      throw new Error(`Unknown prompt source '${definition.prompt}' in ${definition.filePath}`);
     }
   }
 
@@ -110,8 +89,7 @@ export function createSubagentCatalog(
         : [
             createSubagentToolsExtension({
               definitions: nestedDefinitions,
-              invokeSubagent: (child, context) =>
-                invokeDefinition(child, context),
+              invokeSubagent: (child, context) => invokeDefinition(child, context),
             }),
           ];
 
@@ -125,10 +103,7 @@ export function createSubagentCatalog(
         ...(options.extensionFactories ?? []),
         ...(createOptions.extensionFactories ?? []),
       ],
-      customTools: [
-        ...(options.customTools ?? []),
-        ...(createOptions.customTools ?? []),
-      ],
+      customTools: [...(options.customTools ?? []), ...(createOptions.customTools ?? [])],
       signal: createOptions.signal,
     });
   };
@@ -157,16 +132,13 @@ export function createSubagentCatalog(
 
   return {
     definitions,
-    create: (name, createOptions) =>
-      createFromDefinition(requireDefinition(name), createOptions),
-    invoke: (name, createOptions) =>
-      invokeDefinition(requireDefinition(name), createOptions),
+    create: (name, createOptions) => createFromDefinition(requireDefinition(name), createOptions),
+    invoke: (name, createOptions) => invokeDefinition(requireDefinition(name), createOptions),
     createToolsExtension(names = definitions.map((definition) => definition.name)) {
       const exposedDefinitions = names.map(requireDefinition);
       return createSubagentToolsExtension({
         definitions: exposedDefinitions,
-        invokeSubagent: (definition, context) =>
-          invokeDefinition(definition, context),
+        invokeSubagent: (definition, context) => invokeDefinition(definition, context),
       });
     },
   };

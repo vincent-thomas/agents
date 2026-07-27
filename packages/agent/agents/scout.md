@@ -18,7 +18,7 @@ shell commands.
 Start wide enough to avoid tunnel vision. Go deep enough to produce evidence.
 
 Answer the delegated task as concisely as possible:
+
 - Give a direct, factual answer with file:line references where relevant.
 - Do not add a preamble, restate the task, or narrate your steps.
 - If you cannot find something, say so briefly instead of guessing.
-

@@ -35,9 +35,7 @@ suite("buildRootCausePrompt", () => {
   });
 
   test("describes unavailable logs without adding empty user context", () => {
-    const logs: FailureLog[] = [
-      { name: "test", link: checks[1]!.link, runId: "123", log: null },
-    ];
+    const logs: FailureLog[] = [{ name: "test", link: checks[1]!.link, runId: "123", log: null }];
 
     const prompt = buildRootCausePrompt("PR #12", checks, logs, "   ");
 

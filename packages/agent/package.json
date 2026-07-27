@@ -1,11 +1,11 @@
 {
   "name": "@vt-agent/agent",
   "private": true,
-  "type": "module",
-  "module": "src/index.ts",
   "bin": {
     "coder": "./src/index.ts"
   },
+  "type": "module",
+  "module": "src/index.ts",
   "scripts": {
     "build": "bun build ./src/index.ts --target bun --outfile ./dist/index.js --packages external --bundle",
     "dev": "tsx src/index.ts",

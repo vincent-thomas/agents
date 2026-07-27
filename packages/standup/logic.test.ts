@@ -15,7 +15,11 @@ import {
 
 test("normalizeRepositories trims and deduplicates configured URLs", () => {
   assert.deepEqual(
-    normalizeRepositories([" git@example.com:a.git ", "https://example.com/b", "git@example.com:a.git"]),
+    normalizeRepositories([
+      " git@example.com:a.git ",
+      "https://example.com/b",
+      "git@example.com:a.git",
+    ]),
     ["git@example.com:a.git", "https://example.com/b"],
   );
   assert.throws(() => normalizeRepositories([]), /Configure createStandupExtension/);
@@ -48,7 +52,13 @@ test("mergeCommitsByHash deduplicates commits and retains containing branches", 
     committedAt: "2026-04-01T09:30:00+02:00",
     subject: "Add cache",
   };
-  assert.deepEqual(mergeCommitsByHash([{ ...base, branches: ["z"] }, { ...base, branches: ["a"] }])[0]?.branches, ["a", "z"]);
+  assert.deepEqual(
+    mergeCommitsByHash([
+      { ...base, branches: ["z"] },
+      { ...base, branches: ["a"] },
+    ])[0]?.branches,
+    ["a", "z"],
+  );
 });
 
 test("isOnLocalDay compares the timestamp in the machine local timezone", () => {

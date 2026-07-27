@@ -20,9 +20,7 @@ export interface CreateSubagentSessionOptions {
   signal?: AbortSignal;
 }
 
-export type SubagentSession = Awaited<
-  ReturnType<typeof createAgentSession>
->["session"];
+export type SubagentSession = Awaited<ReturnType<typeof createAgentSession>>["session"];
 
 export interface Subagent {
   definition: SubagentDefinition;
@@ -59,10 +57,7 @@ export async function createSubagentSession(
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [
-      commandPolicyExtension,
-      ...(options.extensionFactories ?? []),
-    ],
+    extensionFactories: [commandPolicyExtension, ...(options.extensionFactories ?? [])],
     systemPromptOverride: () => definition.systemPrompt,
   });
   await resourceLoader.reload();

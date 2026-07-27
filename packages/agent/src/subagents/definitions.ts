@@ -1,22 +1,11 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import {
-  parseFrontmatter,
-  type CreateAgentSessionOptions,
-} from "@earendil-works/pi-coding-agent";
+import { parseFrontmatter, type CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
 import type { CommandPolicyEntry } from "@vt-agent/command-policy";
 
 const AGENT_NAME = /^[a-z][a-z0-9_]*$/;
 const TOOL_NAME = /^[a-z][a-z0-9_-]*$/;
-const THINKING_LEVELS = new Set([
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-]);
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const FRONTMATTER_FIELDS = new Set([
   "name",
   "label",
@@ -30,9 +19,7 @@ const FRONTMATTER_FIELDS = new Set([
   "maxTurns",
 ]);
 
-export type SubagentThinkingLevel = NonNullable<
-  CreateAgentSessionOptions["thinkingLevel"]
->;
+export type SubagentThinkingLevel = NonNullable<CreateAgentSessionOptions["thinkingLevel"]>;
 
 export interface SubagentDefinition {
   name: string;
@@ -111,10 +98,7 @@ function parseSubagentNames(value: unknown, filePath: string): string[] {
   });
 }
 
-function parseCommandPolicy(
-  value: unknown,
-  filePath: string,
-): CommandPolicyEntry[] {
+function parseCommandPolicy(value: unknown, filePath: string): CommandPolicyEntry[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) {
     throw definitionError(filePath, "frontmatter field 'command_policy' must be an array");
@@ -141,9 +125,7 @@ function parseCommandPolicy(
 
     const descriptionValue = entry.description;
     const description =
-      descriptionValue === undefined
-        ? undefined
-        : requiredString(entry, "description", filePath);
+      descriptionValue === undefined ? undefined : requiredString(entry, "description", filePath);
     const subcommandValue = entry.subcommand;
     const subcommand =
       subcommandValue === undefined
@@ -188,10 +170,7 @@ function parseCommandPolicy(
   });
 }
 
-export function parseSubagentDefinition(
-  content: string,
-  filePath: string,
-): SubagentDefinition {
+export function parseSubagentDefinition(content: string, filePath: string): SubagentDefinition {
   const { frontmatter, body } = parseFrontmatter(content);
 
   for (const field of Object.keys(frontmatter)) {
@@ -263,9 +242,7 @@ export function parseSubagentDefinition(
   };
 }
 
-export function validateSubagentDefinitions(
-  definitions: SubagentDefinition[],
-): void {
+export function validateSubagentDefinitions(definitions: SubagentDefinition[]): void {
   const byName = new Map<string, SubagentDefinition>();
   for (const definition of definitions) {
     if (byName.has(definition.name)) {
@@ -277,10 +254,7 @@ export function validateSubagentDefinitions(
   for (const definition of definitions) {
     for (const child of definition.subagents) {
       if (!byName.has(child)) {
-        throw definitionError(
-          definition.filePath,
-          `unknown nested sub-agent '${child}'`,
-        );
+        throw definitionError(definition.filePath, `unknown nested sub-agent '${child}'`);
       }
     }
   }
@@ -306,9 +280,7 @@ export function validateSubagentDefinitions(
   for (const definition of definitions) visit(definition.name, []);
 }
 
-export function loadSubagentDefinitions(
-  paths: readonly (string | URL)[],
-): SubagentDefinition[] {
+export function loadSubagentDefinitions(paths: readonly (string | URL)[]): SubagentDefinition[] {
   const definitions = paths.map((path) => {
     const filePath = path instanceof URL ? fileURLToPath(path) : path;
     if (!filePath.endsWith(".md")) {

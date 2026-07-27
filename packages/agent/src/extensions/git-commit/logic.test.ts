@@ -5,12 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { test, suite } from "node:test";
-import {
-  branchExistsOnRemote,
-  formatCommitMessage,
-  gitCommit,
-  isDefaultBranch,
-} from "./logic.ts";
+import { branchExistsOnRemote, formatCommitMessage, gitCommit, isDefaultBranch } from "./logic.ts";
 import { execSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";

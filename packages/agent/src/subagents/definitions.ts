@@ -75,13 +75,19 @@ const COMMAND_POLICY_FIELDS = new Set([
   "allowedFlags",
 ]);
 
-function stringArray(value: unknown, field: string, filePath: string): string[] {
+function stringArray(
+  value: unknown,
+  field: string,
+  filePath: string,
+  allowEmpty = false,
+): string[] {
   if (
     !Array.isArray(value) ||
-    value.length === 0 ||
+    (!allowEmpty && value.length === 0) ||
     value.some((item) => typeof item !== "string" || item.trim() === "")
   ) {
-    throw definitionError(filePath, `'${field}' must be a non-empty string array`);
+    const qualifier = allowEmpty ? "a string array" : "a non-empty string array";
+    throw definitionError(filePath, `'${field}' must be ${qualifier}`);
   }
   return value.map((item) => item.trim());
 }
@@ -155,11 +161,11 @@ function parseCommandPolicy(
     const bannedFlags =
       entry.bannedFlags === undefined
         ? undefined
-        : stringArray(entry.bannedFlags, `${field}.bannedFlags`, filePath);
+        : stringArray(entry.bannedFlags, `${field}.bannedFlags`, filePath, true);
     const allowedFlags =
       entry.allowedFlags === undefined
         ? undefined
-        : stringArray(entry.allowedFlags, `${field}.allowedFlags`, filePath);
+        : stringArray(entry.allowedFlags, `${field}.allowedFlags`, filePath, true);
 
     const base = {
       name,

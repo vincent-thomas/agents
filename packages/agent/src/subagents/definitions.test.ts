@@ -31,6 +31,11 @@ test("loads definitions from an explicit list of Markdown paths", () => {
     "scout",
     "merge_conflicts",
   ]);
+  const gitAdd = definitions
+    .find((definition) => definition.name === "merge_conflicts")!
+    .commandPolicy.find((entry) => entry.name === "git add")!;
+  assert.ok("allowedFlags" in gitAdd);
+  assert.deepEqual(gitAdd.allowedFlags, []);
 });
 
 test("parses frontmatter as metadata and the body as the system prompt", () => {

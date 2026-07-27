@@ -23,6 +23,7 @@ const FRONTMATTER_FIELDS = new Set([
   "description",
   "model",
   "thinking",
+  "prompt",
   "tools",
   "subagents",
   "command_policy",
@@ -39,6 +40,7 @@ export interface SubagentDefinition {
   description: string;
   model: string;
   thinking: SubagentThinkingLevel;
+  prompt: string;
   tools: string[];
   subagents: string[];
   commandPolicy: CommandPolicyEntry[];
@@ -245,6 +247,7 @@ export function parseSubagentDefinition(
     description: requiredString(frontmatter, "description", filePath),
     model: requiredString(frontmatter, "model", filePath),
     thinking: thinking as SubagentThinkingLevel,
+    prompt: requiredString(frontmatter, "prompt", filePath),
     tools,
     subagents: parseSubagentNames(frontmatter.subagents, filePath),
     commandPolicy: parseCommandPolicy(frontmatter.command_policy, filePath),

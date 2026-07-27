@@ -4,6 +4,7 @@ label: Scout
 description: Survey a codebase and return terse, relevant findings with file:line references
 model: openai-codex/gpt-5.6-luna
 thinking: low
+prompt: parent
 tools: read, grep, find, ls
 subagents: []
 maxTurns: 15

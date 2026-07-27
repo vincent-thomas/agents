@@ -13,6 +13,7 @@ label: Worker
 description: General worker
 model: example/model
 thinking: low
+prompt: parent
 tools: read, write, custom_tool
 subagents: [scout]
 maxTurns: 10

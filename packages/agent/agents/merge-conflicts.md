@@ -4,6 +4,7 @@ label: Merge Conflicts
 description: Resolve Git merge conflicts semantically while preserving the intent of both sides
 model: openai-codex/gpt-5.6-luna
 thinking: medium
+prompt: merge_conflicts
 tools: read, edit, grep, find, ls, bash
 subagents: [scout]
 command_policy:

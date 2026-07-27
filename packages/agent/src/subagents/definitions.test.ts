@@ -12,6 +12,7 @@ label: Scout
 description: Scout a codebase
 model: openai-codex/gpt-5.6-luna
 thinking: low
+prompt: parent
 tools: read, grep, find, ls
 subagents: []
 maxTurns: 15
@@ -39,6 +40,7 @@ test("parses frontmatter as metadata and the body as the system prompt", () => {
     description: "Scout a codebase",
     model: "openai-codex/gpt-5.6-luna",
     thinking: "low",
+    prompt: "parent",
     tools: ["read", "grep", "find", "ls"],
     subagents: [],
     commandPolicy: [],

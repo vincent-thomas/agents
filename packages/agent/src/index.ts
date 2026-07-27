@@ -30,7 +30,7 @@ const models = builtinModels();
 
 const subagentCatalog = createSubagentCatalog({
   paths: [new URL("../agents/scout.md", import.meta.url)],
-  getModel: (provider, model) => models.getModel(provider, model),
+  getModelFn: models.getModel.bind(models),
 });
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({

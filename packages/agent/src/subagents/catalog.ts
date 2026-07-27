@@ -15,7 +15,7 @@ import {
 
 export interface CreateSubagentCatalogOptions {
   paths: readonly (string | URL)[];
-  getModel(provider: string, model: string): Model<any>;
+  getModelFn(provider: string, model: string): Model<any>;
   extensionFactories?: ExtensionFactory[];
   customTools?: ToolDefinition[];
 }
@@ -52,7 +52,7 @@ export function createSubagentCatalog(
       try {
         return [
           definition.name,
-          options.getModel(
+          options.getModelFn(
             definition.model.slice(0, separator),
             definition.model.slice(separator + 1),
           ),

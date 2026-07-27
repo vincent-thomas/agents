@@ -7,7 +7,7 @@ test("resolves frontmatter models through the supplied provider lookup", () => {
 
   const catalog = createSubagentCatalog({
     paths: [new URL("../../agents/scout.md", import.meta.url)],
-    getModel(provider, model) {
+    getModelFn(provider, model) {
       requests.push([provider, model]);
       return {} as never;
     },

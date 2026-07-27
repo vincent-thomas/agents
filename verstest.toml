@@ -1,0 +1,8 @@
+[suite.coder]
+kind = "javascript"
+root = "./packages/agent"
+bunfig = "./packages/agent/bunfig.toml"
+pattern = "**/*.test.ts"
+# manifest_path = "crates/chelsea_lib/Cargo.toml"
+# package = "chelsea_lib"
+

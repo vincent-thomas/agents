@@ -29,9 +29,9 @@ export default createCommandPolicyExtension({
       description: "It is banned to try to gain superuser access",
     },
     {
-      name: "cargo",
+      name: "make",
       status: CommandPolicyStatus.Allowed,
-      command: "cargo",
+      command: "make",
       subcommand: [["bench"]],
     },
     {

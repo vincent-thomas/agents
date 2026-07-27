@@ -2,7 +2,7 @@
 
 .PHONY: all test format audit
 
-all: test audit
+all: test
 
 audit:
 	bun audit

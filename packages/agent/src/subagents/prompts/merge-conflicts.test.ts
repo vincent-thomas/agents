@@ -8,9 +8,14 @@ import {
 
 test("fetches the PR target and preserves a conflicting merge for resolution", async () => {
   const calls: string[] = [];
+  let unmergedChecks = 0;
   const commandOutput: CommandOutputFn = async (command, args) => {
     const call = `${command} ${args.join(" ")}`;
     calls.push(call);
+    if (call === "git ls-files -u") {
+      unmergedChecks += 1;
+      return unmergedChecks === 1 ? "" : "100644 abc 2\tsrc/index.ts\n";
+    }
     if (call === "git status --porcelain") return "";
     if (command === "gh") return "main\n";
     if (call === "git fetch origin +main:refs/remotes/origin/main") return "";
@@ -20,7 +25,6 @@ test("fetches the PR target and preserves a conflicting merge for resolution", a
         stderr: "CONFLICT (content): src/index.ts\n",
       });
     }
-    if (call === "git ls-files -u") return "100644 abc 2\tsrc/index.ts\n";
     if (call === "git status --short") return "UU src/index.ts\n";
     if (call === "git diff --no-ext-diff --cc --diff-filter=U") {
       return "diff --cc src/index.ts\n";
@@ -43,11 +47,11 @@ test("aborts a clean no-commit merge", async () => {
   const commandOutput: CommandOutputFn = async (command, args) => {
     const call = `${command} ${args.join(" ")}`;
     calls.push(call);
+    if (call === "git ls-files -u") return "";
     if (call === "git status --porcelain") return "";
     if (command === "gh") return "main\n";
     if (call === "git fetch origin +main:refs/remotes/origin/main") return "";
     if (call === "git merge --no-commit --no-ff origin/main") return "clean\n";
-    if (call === "git ls-files -u") return "";
     if (call === "git rev-parse --verify -q MERGE_HEAD") return "merge-head\n";
     if (call === "git merge --abort") return "";
     throw new Error(`Unexpected command: ${call}`);
@@ -61,6 +65,30 @@ test("aborts a clean no-commit merge", async () => {
     /origin\/main merges cleanly/,
   );
   assert.equal(calls.filter((call) => call === "git merge --abort").length, 1);
+});
+
+test("adopts conflicts from an existing Git operation", async () => {
+  const calls: string[] = [];
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    calls.push(call);
+    if (call === "git ls-files -u") return "100644 abc 2\tsrc/index.ts\n";
+    if (call === "git status --short") return "UU src/index.ts\n";
+    if (call === "git diff --no-ext-diff --cc --diff-filter=U") {
+      return "diff --cc src/index.ts\n";
+    }
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  const prompt = await createMergeConflictsPrompt(commandOutput)({
+    cwd: "/repo",
+    definition: {} as never,
+  });
+
+  assert.match(prompt, /current Git operation/);
+  assert.match(prompt, /Conflicts were already present/);
+  assert.ok(!calls.some((call) => call.startsWith("gh ")));
+  assert.ok(!calls.some((call) => call.startsWith("git merge ")));
 });
 
 test("includes exact Git conflict output without parent instructions", () => {

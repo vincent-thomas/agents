@@ -11,9 +11,6 @@ The runtime in `packages/agent/src/index.ts` currently enables:
 
 - **Command policy** — shell commands are denied by default. Approved commands,
   subcommands, and flags are defined explicitly.
-- **Read-only exploration** — the `explore` tool delegates broad codebase
-  questions to an isolated sub-agent that cannot edit files or run shell
-  commands.
 - **Write guard** — existing files longer than 50 lines cannot be replaced
   wholesale with the `write` tool; targeted `edit` operations are required.
 - **Commit guard** — the `git_commit` tool runs pre-checks and refuses to commit
@@ -87,7 +84,6 @@ Useful narrower commands:
 
 ```bash
 bun test
-bun test packages/explorer/logic.test.ts
 bun run --filter ./packages/agent build
 bunx oxfmt --write path/to/changed-file.ts
 ```
@@ -104,7 +100,6 @@ CI performs `bun install` followed by `make` on Ubuntu.
 | `packages/agent/src/extensions/write-guard`       | Protection against unsafe whole-file overwrites         |
 | `packages/agent/src/extensions/git-commit`        | Checked, non-default-branch commits                     |
 | `packages/command-policy`                         | Reusable shell parsing and policy-matching engine       |
-| `packages/explorer`                               | Isolated read-only exploration sub-agent                |
 | `packages/fix-ci`                                 | Push, GitHub CI, and PR automation (currently inactive) |
 | `Makefile`                                        | Canonical build and test entry point                    |
 | `flake.nix`                                       | Nix development and runtime packaging                   |
@@ -118,8 +113,7 @@ supplies extension factories through the resource loader, then starts an
 
 Extensions have two main integration patterns:
 
-1. **Registered tools** expose explicit operations such as `explore` and
-   `git_commit`.
+1. **Registered tools** expose explicit operations such as `git_commit`.
 2. **Event hooks** intercept operations, such as command-policy checks and the
    write guard.
 

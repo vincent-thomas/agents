@@ -13,4 +13,4 @@ jobs:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
       - run: bun install
-      - run: bun test --changed=${{ github.base_ref }}
+      - run: bun test --changed=${{ github.event.pull_request.base.sha }}

@@ -16,7 +16,6 @@
     "@earendil-works/pi-coding-agent": "^0.80.6",
     "@sinclair/typebox": "^0.34.52",
     "@vt-agent/command-policy": "workspace:*",
-    "@vt-agent/explorer": "workspace:*",
     "@vt-agent/git_push": "workspace:*",
     "@vt-agent/standup": "workspace:*"
   },

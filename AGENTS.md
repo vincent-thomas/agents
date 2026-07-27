@@ -14,7 +14,6 @@ This is a Bun/TypeScript workspace for a customized [Pi coding agent](https://gi
 | Host command allowlist         | `packages/agent/src/extensions/command-policy.ts`            | Concrete allowed/banned commands, subcommands, flags, and guidance.                                                                                                                                                              |
 | Command-name policy predicates | `packages/agent/src/extensions/command-policy-predicates.ts` | Host-specific matching for Python, Perl, and awk executable names.                                                                                                                                                               |
 | Reusable command-policy engine | `packages/command-policy/index.ts`                           | Public exports. Follow into `extension.ts` for Pi wiring, `matching.ts` for policy decisions, `command-utils.ts` for shell tokenization, and `types.ts` for rule shapes.                                                         |
-| Read-only exploration tool     | `packages/explorer/index.ts`                                 | Registers `explore` and creates an isolated nested Pi session. Pure prompt/result/turn-limit behavior is in `logic.ts`.                                                                                                          |
 | Safe-write enforcement         | `packages/agent/src/extensions/write-guard/index.ts`         | Pi hook that blocks whole-file overwrites of large existing files; pure threshold logic is in `logic.ts`.                                                                                                                        |
 | Commit tool                    | `packages/agent/src/extensions/git-commit/index.ts`          | Registers `git_commit` and orchestrates branch checks, prechecks, staging, and commit. Helpers are split into `logic.ts`, `precheck.ts`, `git-utils.ts`, `exec-async.ts`, and `shell-quote.ts`.                                  |
 | Push/CI/PR workflow            | `packages/fix-ci/index.ts`                                   | Implements the `push_and_check_ci` extension. Most git/GitHub polling and PR logic is in `logic.ts`; process/git helpers are adjacent. **This package currently exists but is not registered in `packages/agent/src/index.ts`.** |
@@ -26,7 +25,6 @@ This is a Bun/TypeScript workspace for a customized [Pi coding agent](https://gi
 - Change which extensions/models the agent uses: `packages/agent/src/index.ts`.
 - Add or alter an allowed shell command: edit the host rules in `packages/agent/src/extensions/command-policy.ts`; change parsing or matching semantics only in `packages/command-policy/`.
 - Debug a command unexpectedly allowed or blocked: trace `command-utils.ts` -> `matching.ts` -> host `command-policy.ts`. Add a regression test in `matching.test.ts` or `command-policy-predicates.test.ts`.
-- Change exploration isolation, tools, model session creation, or tool registration: `packages/explorer/index.ts`. Change only prompt formatting, empty-result handling, or turn limits in `packages/explorer/logic.ts`.
 - Change overwrite thresholds or write interception: `packages/agent/src/extensions/write-guard/index.ts`; keep the decision logic in `logic.ts`.
 - Change commit orchestration/UI responses: `packages/agent/src/extensions/git-commit/index.ts`. Put testable branch/commit decisions in `logic.ts`, Makefile validation in `precheck.ts`, and process plumbing in the helper files.
 - Change push, CI polling, PR creation/review, or retry behavior: `packages/fix-ci/index.ts` for orchestration and response text; `packages/fix-ci/logic.ts` for git/GitHub operations and polling.
@@ -35,7 +33,7 @@ This is a Bun/TypeScript workspace for a customized [Pi coding agent](https://gi
 ## Control flow and boundaries
 
 1. `packages/agent/src/index.ts` creates Pi services and supplies extension factories.
-2. Extensions either register tools (`explore`, `git_commit`) or intercept Pi events (command policy and write guard).
+2. Extensions either register tools (`git_commit`) or intercept Pi events (command policy and write guard).
 3. Extension entry points own SDK integration and user-facing progress/results.
 4. Pure or mostly pure decisions belong in adjacent `logic.ts` modules so they can be tested without a Pi session.
 5. Shell execution must stay asynchronous and carry `AbortSignal` through long-running git/GitHub operations so the TUI remains responsive.

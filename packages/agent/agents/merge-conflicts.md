@@ -1,7 +1,7 @@
 ---
 name: merge_conflicts
 label: Merge Conflicts
-description: Resolve current conflicts, or merge the PR target branch and resolve its conflicts
+description: Resolve and validate current conflicts, then create the prepared merge commit
 model: openai-codex/gpt-5.6-luna
 thinking: medium
 prompt: merge_conflicts
@@ -64,7 +64,8 @@ Resolve conflicts semantically:
 - Follow the surrounding code style and existing architectural boundaries.
 - Stage each resolved conflict explicitly with `git add -- <path>`, and never stage
   unrelated paths.
-- Do not create commits, continue or abort the merge, or rewrite Git history. The host commits only after it verifies the resolution and validation checks.
+- Do not create commits, continue or abort the merge, or rewrite Git history. The
+  host commits only after it verifies the resolution and validation checks.
 - Do not hide unresolved behavior behind flags, shims, or temporary fallbacks.
 
 Before finishing, inspect the staged and unstaged Git diff, ensure no conflict

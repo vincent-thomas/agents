@@ -24,6 +24,7 @@ import { parseLaunchMode, selectWorkspace } from "./workspace/launch.ts";
 import { assertOwnedWorkspace } from "./workspace/logic.ts";
 import { createSubagentCatalog } from "./subagents/index.ts";
 import { mergeConflictsPrompt } from "./subagents/prompts/merge-conflicts.ts";
+import { createMergeConflictsWorkflow } from "./subagents/workflows/merge-conflicts.ts";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -50,6 +51,11 @@ const subagentCatalog = createSubagentCatalog({
   getModelFn: models.getModel.bind(models),
   promptFns: {
     merge_conflicts: mergeConflictsPrompt,
+  },
+  workflowFns: {
+    merge_conflicts: createMergeConflictsWorkflow({
+      assertWorkspace: async (cwd) => assertOwnedWorkspace(selectedWorkspace.workspace, cwd),
+    }),
   },
 });
 

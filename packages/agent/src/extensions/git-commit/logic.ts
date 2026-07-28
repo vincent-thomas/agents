@@ -97,7 +97,7 @@ export async function gitCommit(
   message?: string,
   signal?: AbortSignal,
 ): Promise<CommitResult> {
-  if (!(await hasStagedChanges(cwd, signal))) {
+  if (message !== undefined && !(await hasStagedChanges(cwd, signal))) {
     return {
       success: false,
       output:

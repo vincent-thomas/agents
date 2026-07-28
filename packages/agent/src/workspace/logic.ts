@@ -173,19 +173,27 @@ export async function updateWorkspace(
   return updated;
 }
 
-export async function assertOwnedWorkspace(workspace: AgentWorkspace): Promise<void> {
+export async function assertOwnedWorkspace(
+  workspace: AgentWorkspace,
+  cwd = workspace.worktree,
+): Promise<void> {
   if (workspace.status !== "active") {
     throw new Error(`Agent workspace ${workspace.id} is completed and read-only.`);
   }
+  const actualCwd = await realpath(cwd);
+  const expectedCwd = await realpath(workspace.worktree);
+  if (actualCwd !== expectedCwd) {
+    throw new Error(`Agent workspace path mismatch: expected ${expectedCwd}, found ${actualCwd}.`);
+  }
   const currentBranch = (
-    await git(workspace.worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    await git(actualCwd, ["symbolic-ref", "--quiet", "--short", "HEAD"])
   ).stdout.trim();
   if (currentBranch !== workspace.branch) {
     throw new Error(
       `Agent workspace branch mismatch: expected ${workspace.branch}, found ${currentBranch}.`,
     );
   }
-  const repository = await resolveRepository(workspace.worktree);
+  const repository = await resolveRepository(actualCwd);
   if (repository.repository !== workspace.repository) {
     throw new Error(`Agent workspace ${workspace.id} belongs to a different repository.`);
   }

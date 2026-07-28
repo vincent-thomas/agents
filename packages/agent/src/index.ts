@@ -79,10 +79,10 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         }),
         (pi) =>
           gitCommitExtension(pi, {
-            assertWorkspace: async () => assertOwnedWorkspace(selectedWorkspace.workspace),
+            assertWorkspace: async (cwd) => assertOwnedWorkspace(selectedWorkspace.workspace, cwd),
           }),
         createFixCiExtension({
-          assertWorkspace: async () => assertOwnedWorkspace(selectedWorkspace.workspace),
+          assertWorkspace: async (cwd) => assertOwnedWorkspace(selectedWorkspace.workspace, cwd),
         }),
         createStandupExtension({
           repositories: (

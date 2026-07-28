@@ -78,6 +78,17 @@ test("lists repository workspaces and persists session metadata", async () => {
   }
 });
 
+test("rejects a command cwd outside the owned worktree", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo);
+
+    await assert.rejects(assertOwnedWorkspace(workspace, repo), /path mismatch/);
+  } finally {
+    cleanup();
+  }
+});
+
 test("rejects a workspace checked out on a branch it does not own", async () => {
   const { repo, store, cleanup } = fixture();
   try {

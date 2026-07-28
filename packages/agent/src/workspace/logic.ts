@@ -130,10 +130,25 @@ export async function listWorkspaces(
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
-export async function createWorkspace(store: WorkspaceStore, cwd: string): Promise<AgentWorkspace> {
+async function assertNewBranch(cwd: string, branch: string): Promise<void> {
+  await git(cwd, ["check-ref-format", "--branch", branch]);
+  try {
+    await git(cwd, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+  } catch (error: unknown) {
+    if ((error as { code?: number }).code === 1) return;
+    throw error;
+  }
+  throw new Error(`Branch already exists: ${branch}`);
+}
+
+export async function createWorkspace(
+  store: WorkspaceStore,
+  cwd: string,
+  branch: string,
+): Promise<AgentWorkspace> {
   const repo = await resolveRepository(cwd);
+  await assertNewBranch(repo.sourceRoot, branch);
   const id = randomUUID();
-  const branch = `agent/${id}`;
   const repoKey = `${basename(repo.sourceRoot)}-${createHash("sha256")
     .update(repo.repository)
     .digest("hex")
@@ -173,6 +188,14 @@ export async function updateWorkspace(
   return updated;
 }
 
+export async function assertWorkspacePath(expected: string, cwd = expected): Promise<void> {
+  const actualCwd = await realpath(cwd);
+  const expectedCwd = await realpath(expected);
+  if (actualCwd !== expectedCwd) {
+    throw new Error(`Workspace path mismatch: expected ${expectedCwd}, found ${actualCwd}.`);
+  }
+}
+
 export async function assertOwnedWorkspace(
   workspace: AgentWorkspace,
   cwd = workspace.worktree,
@@ -180,11 +203,8 @@ export async function assertOwnedWorkspace(
   if (workspace.status !== "active") {
     throw new Error(`Agent workspace ${workspace.id} is completed and read-only.`);
   }
+  await assertWorkspacePath(workspace.worktree, cwd);
   const actualCwd = await realpath(cwd);
-  const expectedCwd = await realpath(workspace.worktree);
-  if (actualCwd !== expectedCwd) {
-    throw new Error(`Agent workspace path mismatch: expected ${expectedCwd}, found ${actualCwd}.`);
-  }
   const currentBranch = (
     await git(actualCwd, ["symbolic-ref", "--quiet", "--short", "HEAD"])
   ).stdout.trim();

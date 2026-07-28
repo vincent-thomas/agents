@@ -8,24 +8,14 @@ import {
   type WorkspaceStore,
 } from "./logic.ts";
 
-export type LaunchMode = "auto" | "new" | "continue" | "resume";
+export type LaunchCommand = { kind: "regular" } | { kind: "goto"; branch?: string };
 
-export function parseLaunchMode(args: string[]): LaunchMode {
-  let mode: LaunchMode = "auto";
-  for (const arg of args) {
-    const next =
-      arg === "--new"
-        ? "new"
-        : arg === "--continue" || arg === "-c"
-          ? "continue"
-          : arg === "--resume" || arg === "-r"
-            ? "resume"
-            : null;
-    if (!next) throw new Error(`Unknown coder argument: ${arg}`);
-    if (mode !== "auto") throw new Error("Choose only one of --new, --continue, or --resume.");
-    mode = next;
+export function parseLaunchCommand(args: string[]): LaunchCommand {
+  if (args.length === 0) return { kind: "regular" };
+  if (args[0] !== "goto" || args.length > 2) {
+    throw new Error("Usage: coder [goto [branch-name]]");
   }
-  return mode;
+  return args[1] === undefined ? { kind: "goto" } : { kind: "goto", branch: args[1] };
 }
 
 export function workspaceLabel(workspace: AgentWorkspace): string {
@@ -33,22 +23,21 @@ export function workspaceLabel(workspace: AgentWorkspace): string {
   return `${name} · ${workspace.branch} · ${workspace.updatedAt}`;
 }
 
-async function promptForWorkspace(workspaces: AgentWorkspace[]): Promise<AgentWorkspace | "new"> {
+async function promptForWorkspace(workspaces: AgentWorkspace[]): Promise<AgentWorkspace> {
   if (!stdin.isTTY || !stdout.isTTY) {
-    throw new Error("Task selection requires an interactive terminal. Use --continue instead.");
+    throw new Error(
+      "Workspace selection requires an interactive terminal. Use goto <branch-name> instead.",
+    );
   }
 
   stdout.write("\nAgent workspaces\n\n");
   workspaces.forEach((workspace, index) => {
-    stdout.write(`  ${index + 1}. Continue: ${workspaceLabel(workspace)}\n`);
+    stdout.write(`  ${index + 1}. ${workspaceLabel(workspace)}\n`);
   });
-  stdout.write(`  ${workspaces.length + 1}. Start a new task\n`);
   const readline = createInterface({ input: stdin, output: stdout });
   try {
-    const answer = await readline.question("\nSelect task: ");
-    const index = Number.parseInt(answer, 10) - 1;
-    if (index === workspaces.length) return "new";
-    const selected = workspaces[index];
+    const answer = await readline.question("\nSelect workspace: ");
+    const selected = workspaces[Number.parseInt(answer, 10) - 1];
     if (!selected) throw new Error("No workspace selected.");
     return selected;
   } finally {
@@ -71,42 +60,26 @@ const defaultDependencies: WorkspaceSelectionDependencies = {
 export async function selectWorkspace(options: {
   store: WorkspaceStore;
   cwd: string;
-  mode: LaunchMode;
-  choose?: (workspaces: AgentWorkspace[]) => Promise<AgentWorkspace | "new">;
+  branch?: string;
+  choose?: (workspaces: AgentWorkspace[]) => Promise<AgentWorkspace>;
   dependencies?: WorkspaceSelectionDependencies;
 }): Promise<{ workspace: AgentWorkspace; created: boolean }> {
   const dependencies = options.dependencies ?? defaultDependencies;
+  if (options.branch !== undefined) {
+    return {
+      workspace: await dependencies.createWorkspace(options.store, options.cwd, options.branch),
+      created: true,
+    };
+  }
+
   const repository = await dependencies.resolveRepository(options.cwd);
   const active = (await dependencies.listWorkspaces(options.store, repository.repository)).filter(
     (workspace) => workspace.status === "active",
   );
-
   if (active.length === 0) {
-    if (options.mode === "continue" || options.mode === "resume") {
-      throw new Error("No active agent tasks exist. Run coder normally or use --new.");
-    }
-    return {
-      workspace: await dependencies.createWorkspace(options.store, options.cwd),
-      created: true,
-    };
-  }
-  if (options.mode === "new") {
-    return {
-      workspace: await dependencies.createWorkspace(options.store, options.cwd),
-      created: true,
-    };
-  }
-  if (options.mode === "continue" || (options.mode === "auto" && active.length === 1)) {
-    return { workspace: active[0]!, created: false };
+    throw new Error("No active agent workspaces exist. Create one with goto <branch-name>.");
   }
 
-  const choose = options.choose ?? promptForWorkspace;
-  const selected = await choose(active);
-  if (selected === "new") {
-    return {
-      workspace: await dependencies.createWorkspace(options.store, options.cwd),
-      created: true,
-    };
-  }
+  const selected = await (options.choose ?? promptForWorkspace)(active);
   return { workspace: selected, created: false };
 }

@@ -44,11 +44,10 @@ Start the interactive agent from the repository you want it to operate on:
 bun run /path/to/agents/packages/agent/src/index.ts
 ```
 
-The host creates an isolated `agent/<uuid>` branch and Git worktree under the
-Pi agent directory, leaving the checkout where `coder` was launched untouched.
-One active task resumes automatically. Use `--resume` to choose among tasks or
-start another from the picker, `--continue` to resume the newest task, and
-`--new` to explicitly create a task.
+With no arguments, coder runs in the current checkout and continues its most
+recent session. Use `goto <branch-name>` to create an isolated managed worktree
+on that exact new branch, or `goto` to choose among active managed workspaces.
+Creating a workspace fails when the requested local branch already exists.
 
 On first use, enter `/login` in the Pi interface and authenticate with a model
 provider. The exploration tool is currently configured to use OpenAI model

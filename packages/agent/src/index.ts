@@ -20,8 +20,8 @@ import { createFixCiExtension } from "@vt-agent/git_push";
 import { createStandupExtension } from "@vt-agent/standup";
 import rootCauseExtension from "./extensions/root-cause/index.ts";
 import { createWorkspaceExtension } from "./workspace/extension.ts";
-import { parseLaunchMode, selectWorkspace } from "./workspace/launch.ts";
-import { assertOwnedWorkspace } from "./workspace/logic.ts";
+import { parseLaunchCommand, selectWorkspace } from "./workspace/launch.ts";
+import { assertOwnedWorkspace, assertWorkspacePath } from "./workspace/logic.ts";
 import { createSubagentCatalog } from "./subagents/index.ts";
 import { mergeConflictsPrompt } from "./subagents/prompts/merge-conflicts.ts";
 import { createMergeConflictsWorkflow } from "./subagents/workflows/merge-conflicts.ts";
@@ -34,12 +34,18 @@ import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
 
 const agentDir = getAgentDir();
 const store = { stateDir: agentDir };
-const selectedWorkspace = await selectWorkspace({
-  store,
-  cwd: process.cwd(),
-  mode: parseLaunchMode(process.argv.slice(2)),
-});
-await assertOwnedWorkspace(selectedWorkspace.workspace);
+const sourceCwd = process.cwd();
+const launchCommand = parseLaunchCommand(process.argv.slice(2));
+const selectedWorkspace =
+  launchCommand.kind === "goto"
+    ? await selectWorkspace({ store, cwd: sourceCwd, branch: launchCommand.branch })
+    : undefined;
+const runtimeCwd = selectedWorkspace?.workspace.worktree ?? sourceCwd;
+const assertWorkspace = async (cwd: string) =>
+  selectedWorkspace
+    ? assertOwnedWorkspace(selectedWorkspace.workspace, cwd)
+    : assertWorkspacePath(runtimeCwd, cwd);
+await assertWorkspace(runtimeCwd);
 
 const models = builtinModels();
 
@@ -54,7 +60,7 @@ const subagentCatalog = createSubagentCatalog({
   },
   workflowFns: {
     merge_conflicts: createMergeConflictsWorkflow({
-      assertWorkspace: async (cwd) => assertOwnedWorkspace(selectedWorkspace.workspace, cwd),
+      assertWorkspace,
     }),
   },
 });
@@ -72,11 +78,15 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         return [appendSystemPrompt];
       },
       extensionFactories: [
-        createWorkspaceExtension({
-          store,
-          initialWorkspace: selectedWorkspace.workspace,
-          created: selectedWorkspace.created,
-        }),
+        ...(selectedWorkspace
+          ? [
+              createWorkspaceExtension({
+                store,
+                initialWorkspace: selectedWorkspace.workspace,
+                created: selectedWorkspace.created,
+              }),
+            ]
+          : []),
         commandPolicyExtension,
         subagentCatalog.createToolsExtension(),
         mergeConflictWriteGuardExtension,
@@ -85,10 +95,10 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         }),
         (pi) =>
           gitCommitExtension(pi, {
-            assertWorkspace: async (cwd) => assertOwnedWorkspace(selectedWorkspace.workspace, cwd),
+            assertWorkspace,
           }),
         createFixCiExtension({
-          assertWorkspace: async (cwd) => assertOwnedWorkspace(selectedWorkspace.workspace, cwd),
+          assertWorkspace,
         }),
         createStandupExtension({
           repositories: (
@@ -115,9 +125,9 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 };
 
 const runtime = await createAgentSessionRuntime(createRuntime, {
-  cwd: selectedWorkspace.workspace.worktree,
+  cwd: runtimeCwd,
   agentDir,
-  sessionManager: SessionManager.continueRecent(selectedWorkspace.workspace.worktree),
+  sessionManager: SessionManager.continueRecent(runtimeCwd),
 });
 
 const mode = new InteractiveMode(runtime, {

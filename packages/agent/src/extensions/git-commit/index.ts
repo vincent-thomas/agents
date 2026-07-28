@@ -17,7 +17,10 @@ import { formatCommitMessage, gitCommit } from "./logic.ts";
 import { runPreChecks } from "./precheck.ts";
 import { execAsync, extractErrorOutput } from "./exec-async.ts";
 
-export function gitCommitExtension(pi: ExtensionAPI) {
+export function gitCommitExtension(
+  pi: ExtensionAPI,
+  options: { assertWorkspace: (cwd: string) => Promise<void> },
+) {
   // ── Tool: git_commit ──────────────────────────────────────────────────────
   pi.registerTool({
     name: "git_commit",
@@ -54,6 +57,7 @@ export function gitCommitExtension(pi: ExtensionAPI) {
 
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const cwd = ctx.cwd;
+      await options.assertWorkspace(cwd);
 
       // 1. Check default branch.
       const branch = await currentBranch(cwd, signal);

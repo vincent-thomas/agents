@@ -77,8 +77,13 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         createwriteGuardExtension({
           overwriteFileThreshold: 50,
         }),
-        gitCommitExtension,
-        createFixCiExtension(),
+        (pi) =>
+          gitCommitExtension(pi, {
+            assertWorkspace: async () => assertOwnedWorkspace(selectedWorkspace.workspace),
+          }),
+        createFixCiExtension({
+          assertWorkspace: async () => assertOwnedWorkspace(selectedWorkspace.workspace),
+        }),
         createStandupExtension({
           repositories: (
             await execAsync(

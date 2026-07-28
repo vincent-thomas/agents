@@ -19,6 +19,7 @@ import { gitCommitExtension } from "./extensions/git-commit";
 import { createFixCiExtension } from "@vt-agent/git_push";
 import { createStandupExtension } from "@vt-agent/standup";
 import rootCauseExtension from "./extensions/root-cause/index.ts";
+import clearExtension from "./extensions/clear/index.ts";
 import { createWorkspaceExtension } from "./workspace/extension.ts";
 import { parseLaunchCommand, selectWorkspace } from "./workspace/launch.ts";
 import {
@@ -114,6 +115,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
           model: models.getModel("openai-codex", "gpt-5.4-mini"),
         }),
         rootCauseExtension,
+        clearExtension,
       ],
     },
   });

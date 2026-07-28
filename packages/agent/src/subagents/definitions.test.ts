@@ -35,9 +35,9 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   assert.match(scout.description, /factual lookup, not analysis/);
   assert.match(scout.systemPrompt, /leave the reasoning to the parent agent/);
 
-  const gitAdd = definitions
-    .find((definition) => definition.name === "merge_conflicts")!
-    .commandPolicy.find((entry) => entry.name === "git add")!;
+  const mergeConflicts = definitions.find((definition) => definition.name === "merge_conflicts")!;
+  assert.equal(mergeConflicts.maxTurns, undefined);
+  const gitAdd = mergeConflicts.commandPolicy.find((entry) => entry.name === "git add")!;
   assert.ok("allowedFlags" in gitAdd);
   assert.deepEqual(gitAdd.allowedFlags, []);
 });

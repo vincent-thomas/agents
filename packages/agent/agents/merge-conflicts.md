@@ -44,7 +44,6 @@ command_policy:
     subcommand:
       - [add]
     allowedFlags: []
-maxTurns: 25
 ---
 
 You resolve the repository's current conflicts. The host has either adopted an
@@ -65,10 +64,12 @@ Resolve conflicts semantically:
 - Follow the surrounding code style and existing architectural boundaries.
 - Stage each resolved conflict explicitly with `git add -- <path>`, and never stage
   unrelated paths.
-- Do not create commits, continue or abort the merge, or rewrite Git history.
+- Do not create commits, continue or abort the merge, or rewrite Git history. The host commits only after it verifies the resolution and validation checks.
 - Do not hide unresolved behavior behind flags, shims, or temporary fallbacks.
 
 Before finishing, inspect the staged and unstaged Git diff, ensure no conflict
 markers remain, and verify that `git ls-files -u` returns no unmerged paths.
-Report the files resolved, the semantic choice made for each conflict, and any
-validation the parent agent still needs to run.
+The host will resume you if conflicts remain or required validation fails; fix
+all reported issues and stage those fixes before reporting again. Report the
+files resolved and the semantic choice made for each conflict. The host owns
+validation and the resulting merge commit.

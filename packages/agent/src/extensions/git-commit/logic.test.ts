@@ -165,6 +165,31 @@ suite("gitCommit", () => {
   );
 
   test(
+    "uses Git's prepared message for a merge commit",
+    withGitRepo(async (dir) => {
+      const currentBranch = git("git branch --show-current", dir);
+      git("git checkout -b target", dir);
+      writeFileSync(join(dir, "init.txt"), "target");
+      git("git add init.txt", dir);
+      git("git commit -m target", dir);
+      git(`git checkout ${currentBranch}`, dir);
+      writeFileSync(join(dir, "init.txt"), "current");
+      git("git add init.txt", dir);
+      git("git commit -m current", dir);
+      assert.throws(() => git("git merge --no-commit --no-ff target", dir));
+      git("git checkout --ours init.txt", dir);
+      git("git add init.txt", dir);
+      assert.equal(git("git diff --cached --name-only", dir), "");
+
+      const result = await gitCommit(dir);
+
+      assert.equal(result.success, true);
+      assert.equal(git("git show --format=%P --no-patch HEAD", dir).split(" ").length, 2);
+      assert.match(git("git log --format=%s -1", dir), /^Merge branch 'target'/);
+    }),
+  );
+
+  test(
     "fails when nothing is staged",
     withGitRepo(async (dir) => {
       const result = await gitCommit(dir, "empty commit");

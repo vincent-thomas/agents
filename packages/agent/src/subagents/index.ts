@@ -12,6 +12,8 @@ export {
   type SubagentCatalog,
   type SubagentPromptContext,
   type SubagentPromptFn,
+  type SubagentWorkflowContext,
+  type SubagentWorkflowFn,
 } from "./catalog.ts";
 export {
   createSubagentSession,

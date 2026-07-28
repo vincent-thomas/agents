@@ -47,7 +47,7 @@ function respond(text: string, details: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text }], details };
 }
 
-export function createFixCiExtension() {
+export function createFixCiExtension(options: { assertWorkspace: (cwd: string) => Promise<void> }) {
   return function (pi: ExtensionAPI) {
     let cycleCount = 0;
 
@@ -67,6 +67,7 @@ export function createFixCiExtension() {
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         const cwd = ctx.cwd;
+        await options.assertWorkspace(cwd);
         const notify = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
 
         // ── 0. Reject if working tree is dirty ─────────────────────────

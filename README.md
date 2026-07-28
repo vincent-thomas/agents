@@ -38,15 +38,17 @@ Install dependencies from the repository root:
 bun install
 ```
 
-Start the interactive agent in the directory you want it to operate on:
+Start the interactive agent from the repository you want it to operate on:
 
 ```bash
-bun run packages/agent/src/index.ts
+bun run /path/to/agents/packages/agent/src/index.ts
 ```
 
-The process uses its current working directory as the agent workspace. To work
-on another project without installing this repository there, run the entry
-point by absolute path from that project's directory.
+With no arguments, coder runs in the repository's primary checkout and
+continues its most recent session, even when invoked from a linked worktree.
+Use `goto <branch-name>` to create an isolated managed worktree
+on that exact new branch, or `goto` to choose among active managed workspaces.
+Creating a workspace fails when the requested local branch already exists.
 
 On first use, enter `/login` in the Pi interface and authenticate with a model
 provider. The exploration tool is currently configured to use OpenAI model
@@ -92,24 +94,25 @@ CI performs `bun install` followed by `make` on Ubuntu.
 
 ## Repository layout
 
-| Path                                              | Purpose                                                 |
-| ------------------------------------------------- | ------------------------------------------------------- |
-| `packages/agent`                                  | Interactive application and host-specific extensions    |
-| `packages/agent/src/index.ts`                     | Runtime assembly and active extension registration      |
-| `packages/agent/src/extensions/command-policy.ts` | Allowed and banned host commands                        |
-| `packages/agent/src/extensions/write-guard`       | Protection against unsafe whole-file overwrites         |
-| `packages/agent/src/extensions/git-commit`        | Checked, non-default-branch commits                     |
-| `packages/command-policy`                         | Reusable shell parsing and policy-matching engine       |
-| `packages/fix-ci`                                 | Push, GitHub CI, and PR automation (currently inactive) |
-| `Makefile`                                        | Canonical build and test entry point                    |
-| `flake.nix`                                       | Nix development and runtime packaging                   |
-| `AGENTS.md`                                       | Detailed routing and change guidance for coding agents  |
+| Path                                              | Purpose                                                |
+| ------------------------------------------------- | ------------------------------------------------------ |
+| `packages/agent`                                  | Interactive application and host-specific extensions   |
+| `packages/agent/src/index.ts`                     | Runtime assembly and active extension registration     |
+| `packages/agent/src/workspace`                    | Agent task provisioning, registry, and TUI integration |
+| `packages/agent/src/extensions/command-policy.ts` | Allowed and banned host commands                       |
+| `packages/agent/src/extensions/write-guard`       | Protection against unsafe whole-file overwrites        |
+| `packages/agent/src/extensions/git-commit`        | Checked, non-default-branch commits                    |
+| `packages/command-policy`                         | Reusable shell parsing and policy-matching engine      |
+| `packages/fix-ci`                                 | Active push, GitHub CI, and PR automation              |
+| `Makefile`                                        | Canonical build and test entry point                   |
+| `flake.nix`                                       | Nix development and runtime packaging                  |
+| `AGENTS.md`                                       | Detailed routing and change guidance for coding agents |
 
 ## Architecture
 
-`packages/agent/src/index.ts` creates Pi's services and interactive runtime. It
-supplies extension factories through the resource loader, then starts an
-`InteractiveMode` session rooted at the current directory.
+`packages/agent/src/index.ts` first selects or provisions a host-owned task
+workspace, then creates Pi's services and interactive runtime in that worktree.
+The workspace identity is checked again by commit and push workflows.
 
 Extensions have two main integration patterns:
 
@@ -123,15 +126,17 @@ behavior in adjacent helpers such as `logic.ts`, and add colocated
 
 ## Safety model
 
-The command policy is intentionally deny-by-default. Common read-only utilities
-such as `rg`, `fd`, `jq`, and selected Git inspection commands are allowed.
-Riskier operations are constrained or redirected to dedicated tools:
+The command policy permits project-defined build, test, formatting, and
+language-toolchain commands. It constrains operations where a stronger host
+workflow exists:
 
 - `cat`, `grep`, `find`, `sed`, and `tee` are replaced by Pi-native read,
   search, and edit tools.
 - Recursive deletion and recursive permission changes are blocked.
-- `sudo`, `doas`, Python, Perl, and awk execution are blocked.
-- Direct `git commit`, `git push`, and branch management are blocked.
+- `sudo` and `doas` are blocked.
+- Git is separately deny-by-default: inspection, staging, and restoration are
+  allowed, while commits, synchronization, history changes, and branch
+  lifecycle must use host-owned workflows.
 
 When changing policy behavior, start in
 `packages/agent/src/extensions/command-policy.ts`. Change the reusable matching

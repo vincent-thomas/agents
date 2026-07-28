@@ -10,14 +10,13 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { currentBranch } from "./git-utils.ts";
-import { isDefaultBranch, branchExistsOnRemote } from "./logic.ts";
-import { hasUpstream } from "./git-utils.ts";
-import { formatCommitMessage, gitCommit } from "./logic.ts";
-import { runPreChecks } from "./precheck.ts";
-import { execAsync, extractErrorOutput } from "./exec-async.ts";
+import { formatCommitMessage } from "./logic.ts";
+import { runGitCommit } from "./orchestration.ts";
 
-export function gitCommitExtension(pi: ExtensionAPI) {
+export function gitCommitExtension(
+  pi: ExtensionAPI,
+  options: { assertWorkspace: (cwd: string) => Promise<void> },
+) {
   // ── Tool: git_commit ──────────────────────────────────────────────────────
   pi.registerTool({
     name: "git_commit",
@@ -53,115 +52,16 @@ export function gitCommitExtension(pi: ExtensionAPI) {
     }),
 
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const cwd = ctx.cwd;
-
-      // 1. Check default branch.
-      const branch = await currentBranch(cwd, signal);
-      if (branch && (await isDefaultBranch(cwd, branch, signal))) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text:
-                `Cannot commit on "${branch}". ` +
-                `Create a feature branch first with \`git checkout -b <branch-name>\`, ` +
-                `then commit there.`,
-            },
-          ],
-        };
-      }
-
-      // 2. Check if branch exists on remote (only if it has an upstream).
-      if (branch && (await hasUpstream(cwd, signal))) {
-        if (!(await branchExistsOnRemote(cwd, branch, signal))) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text:
-                  `Branch "${branch}" has an upstream configured but does not exist on remote. ` +
-                  `This may indicate a deleted remote branch. Push it with \`push_and_check_ci\` or ` +
-                  `\`git push -u origin ${branch}\`.`,
-              },
-            ],
-          };
-        }
-      }
-
-      // 3. Pre-commit checks.
-      const completedSteps: string[] = [];
-      onUpdate?.({
-        content: [{ type: "text", text: "Running pre-commit checks…" }],
+      const result = await runGitCommit({
+        cwd: ctx.cwd,
+        message: formatCommitMessage(params.subject, params.what, params.why),
+        addAll: params.add_all,
+        signal,
+        assertWorkspace: options.assertWorkspace,
+        onProgress(text) {
+          onUpdate?.({ content: [{ type: "text", text }] });
+        },
       });
-
-      const preCheck = await runPreChecks(cwd, signal, (step) => {
-        const icon = step.passed ? "✅" : "❌";
-        const time = step.elapsed ? ` (${step.elapsed}s)` : "";
-        completedSteps.push(`${icon} ${step.command}${time}`);
-        onUpdate?.({
-          content: [{ type: "text", text: completedSteps.join("\n") }],
-        });
-      });
-
-      if (!preCheck.passed) {
-        const failedStep = preCheck.steps.find((s) => !s.passed)!;
-        const passedSteps = preCheck.steps
-          .filter((s) => s.passed)
-          .map((s) => `✅ ${s.command}`)
-          .join("\n");
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text:
-                `Pre-commit check failed. Fix the errors before committing.\n\n` +
-                (passedSteps ? `${passedSteps}\n` : "") +
-                `❌ \`${failedStep.command}\`:\n\`\`\`\n${failedStep.output}\n\`\`\``,
-            },
-          ],
-        };
-      }
-
-      // 4. Auto-stage if add_all is set.
-      if (params.add_all) {
-        completedSteps.push("📦 Staging all changes…");
-        onUpdate?.({
-          content: [{ type: "text", text: completedSteps.join("\n") }],
-        });
-
-        try {
-          await execAsync("git add -A", { cwd, timeout: 15_000, signal });
-        } catch (err: unknown) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Staging failed:\n\`\`\`\n${extractErrorOutput(err)}\n\`\`\``,
-              },
-            ],
-          };
-        }
-      }
-
-      // 5. Commit.
-      completedSteps.push("Committing…");
-      onUpdate?.({
-        content: [{ type: "text", text: completedSteps.join("\n") }],
-      });
-
-      const message = formatCommitMessage(params.subject, params.what, params.why);
-      const result = await gitCommit(cwd, message, signal);
-
-      if (!result.success) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Commit failed:\n\`\`\`\n${result.output}\n\`\`\``,
-            },
-          ],
-        };
-      }
 
       return {
         content: [

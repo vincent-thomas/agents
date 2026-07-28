@@ -1,0 +1,85 @@
+import { createInterface } from "node:readline/promises";
+import { stdin, stdout } from "node:process";
+import {
+  createWorkspace,
+  listWorkspaces,
+  resolveRepository,
+  type AgentWorkspace,
+  type WorkspaceStore,
+} from "./logic.ts";
+
+export type LaunchCommand = { kind: "regular" } | { kind: "goto"; branch?: string };
+
+export function parseLaunchCommand(args: string[]): LaunchCommand {
+  if (args.length === 0) return { kind: "regular" };
+  if (args[0] !== "goto" || args.length > 2) {
+    throw new Error("Usage: coder [goto [branch-name]]");
+  }
+  return args[1] === undefined ? { kind: "goto" } : { kind: "goto", branch: args[1] };
+}
+
+export function workspaceLabel(workspace: AgentWorkspace): string {
+  const name = workspace.sessionName ?? "unnamed task";
+  return `${name} · ${workspace.branch} · ${workspace.updatedAt}`;
+}
+
+async function promptForWorkspace(workspaces: AgentWorkspace[]): Promise<AgentWorkspace> {
+  if (!stdin.isTTY || !stdout.isTTY) {
+    throw new Error(
+      "Workspace selection requires an interactive terminal. Use goto <branch-name> instead.",
+    );
+  }
+
+  stdout.write("\nAgent workspaces\n\n");
+  workspaces.forEach((workspace, index) => {
+    stdout.write(`  ${index + 1}. ${workspaceLabel(workspace)}\n`);
+  });
+  const readline = createInterface({ input: stdin, output: stdout });
+  try {
+    const answer = await readline.question("\nSelect workspace: ");
+    const selected = workspaces[Number.parseInt(answer, 10) - 1];
+    if (!selected) throw new Error("No workspace selected.");
+    return selected;
+  } finally {
+    readline.close();
+  }
+}
+
+interface WorkspaceSelectionDependencies {
+  resolveRepository: typeof resolveRepository;
+  listWorkspaces: typeof listWorkspaces;
+  createWorkspace: typeof createWorkspace;
+}
+
+const defaultDependencies: WorkspaceSelectionDependencies = {
+  resolveRepository,
+  listWorkspaces,
+  createWorkspace,
+};
+
+export async function selectWorkspace(options: {
+  store: WorkspaceStore;
+  cwd: string;
+  branch?: string;
+  choose?: (workspaces: AgentWorkspace[]) => Promise<AgentWorkspace>;
+  dependencies?: WorkspaceSelectionDependencies;
+}): Promise<{ workspace: AgentWorkspace; created: boolean }> {
+  const dependencies = options.dependencies ?? defaultDependencies;
+  if (options.branch !== undefined) {
+    return {
+      workspace: await dependencies.createWorkspace(options.store, options.cwd, options.branch),
+      created: true,
+    };
+  }
+
+  const repository = await dependencies.resolveRepository(options.cwd);
+  const active = (await dependencies.listWorkspaces(options.store, repository.repository)).filter(
+    (workspace) => workspace.status === "active",
+  );
+  if (active.length === 0) {
+    throw new Error("No active agent workspaces exist. Create one with goto <branch-name>.");
+  }
+
+  const selected = await (options.choose ?? promptForWorkspace)(active);
+  return { workspace: selected, created: false };
+}

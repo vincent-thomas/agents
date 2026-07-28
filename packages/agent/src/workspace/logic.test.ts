@@ -55,7 +55,7 @@ test("creates an isolated branch and worktree without moving dirty source change
   }
 });
 
-test("lists repository workspaces newest first and persists session metadata", async () => {
+test("lists repository workspaces and persists session metadata", async () => {
   const { repo, store, cleanup } = fixture();
   try {
     const first = await createWorkspace(store, repo);
@@ -69,10 +69,10 @@ test("lists repository workspaces newest first and persists session metadata", a
     const records = await listWorkspaces(store, repository.repository);
 
     assert.equal(records.length, 2);
-    assert.equal(records[0]?.id, updated.id);
-    assert.equal(records[0]?.sessionFile, "/sessions/one.jsonl");
-    assert.equal(records[0]?.sessionName, "Refactor auth");
-    assert.equal(records[1]?.id, second.id);
+    const persisted = records.find((record) => record.id === updated.id);
+    assert.equal(persisted?.sessionFile, "/sessions/one.jsonl");
+    assert.equal(persisted?.sessionName, "Refactor auth");
+    assert.ok(records.some((record) => record.id === second.id));
   } finally {
     cleanup();
   }

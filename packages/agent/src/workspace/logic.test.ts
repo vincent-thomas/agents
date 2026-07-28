@@ -6,8 +6,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   assertOwnedWorkspace,
+  assertWorkspacePath,
   createWorkspace,
   listWorkspaces,
+  resolveRegularCheckout,
   resolveRepository,
   updateWorkspace,
   type WorkspaceStore,
@@ -41,15 +43,27 @@ test("creates an isolated branch and worktree without moving dirty source change
     writeFileSync(join(repo, "tracked.txt"), "dirty source checkout\n");
     const originalBranch = git(repo, "branch", "--show-current");
 
-    const workspace = await createWorkspace(store, repo);
+    const workspace = await createWorkspace(store, repo, "feature/parser");
 
     assert.equal(git(repo, "branch", "--show-current"), originalBranch);
     assert.equal(readFileSync(join(repo, "tracked.txt"), "utf8"), "dirty source checkout\n");
     assert.equal(readFileSync(join(workspace.worktree, "tracked.txt"), "utf8"), "committed\n");
     assert.equal(git(workspace.worktree, "branch", "--show-current"), workspace.branch);
-    assert.match(workspace.branch, /^agent\/[0-9a-f-]{36}$/);
+    assert.equal(workspace.branch, "feature/parser");
     assert.equal(workspace.baseSha, git(repo, "rev-parse", "HEAD"));
     await assertOwnedWorkspace(workspace);
+  } finally {
+    cleanup();
+  }
+});
+
+test("resolves the regular checkout from a managed worktree", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/regular-checkout");
+    const repository = await resolveRepository(repo);
+
+    assert.equal(await resolveRegularCheckout(workspace.worktree), repository.sourceRoot);
   } finally {
     cleanup();
   }
@@ -58,8 +72,8 @@ test("creates an isolated branch and worktree without moving dirty source change
 test("lists repository workspaces and persists session metadata", async () => {
   const { repo, store, cleanup } = fixture();
   try {
-    const first = await createWorkspace(store, repo);
-    const second = await createWorkspace(store, repo);
+    const first = await createWorkspace(store, repo, "feature/one");
+    const second = await createWorkspace(store, repo, "feature/two");
     const updated = await updateWorkspace(store, first, {
       sessionFile: "/sessions/one.jsonl",
       sessionName: "Refactor auth",
@@ -78,10 +92,30 @@ test("lists repository workspaces and persists session metadata", async () => {
   }
 });
 
+test("rejects an existing branch", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const branch = git(repo, "branch", "--show-current");
+
+    await assert.rejects(createWorkspace(store, repo, branch), /Branch already exists/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("rejects a command cwd outside the launch directory", async () => {
+  const { root, repo, cleanup } = fixture();
+  try {
+    await assert.rejects(assertWorkspacePath(repo, root), /path mismatch/);
+  } finally {
+    cleanup();
+  }
+});
+
 test("rejects a command cwd outside the owned worktree", async () => {
   const { repo, store, cleanup } = fixture();
   try {
-    const workspace = await createWorkspace(store, repo);
+    const workspace = await createWorkspace(store, repo, "feature/owned");
 
     await assert.rejects(assertOwnedWorkspace(workspace, repo), /path mismatch/);
   } finally {
@@ -92,7 +126,7 @@ test("rejects a command cwd outside the owned worktree", async () => {
 test("rejects a workspace checked out on a branch it does not own", async () => {
   const { repo, store, cleanup } = fixture();
   try {
-    const workspace = await createWorkspace(store, repo);
+    const workspace = await createWorkspace(store, repo, "feature/detach");
     git(workspace.worktree, "checkout", "--detach");
 
     await assert.rejects(assertOwnedWorkspace(workspace), /branch mismatch|symbolic-ref/);

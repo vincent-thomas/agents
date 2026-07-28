@@ -38,7 +38,7 @@ export type CommandOutputFn = (
   signal?: AbortSignal,
 ) => Promise<string>;
 
-async function defaultCommandOutput(
+export async function defaultCommandOutput(
   command: string,
   args: string[],
   cwd: string,

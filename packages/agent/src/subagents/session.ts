@@ -83,7 +83,7 @@ export async function createSubagentSession(
 
   let turnCount = 0;
   const unsubscribe = session.subscribe((event) => {
-    if (event.type !== "turn_end") return;
+    if (event.type !== "turn_end" || definition.maxTurns === undefined) return;
     turnCount++;
     if (turnCount >= definition.maxTurns) void session.abort();
   });

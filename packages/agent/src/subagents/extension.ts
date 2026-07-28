@@ -25,6 +25,7 @@ export interface SubagentToolContext {
 export interface SubagentInvocation {
   subagent: Subagent;
   prompt: string;
+  run?(onProgress: (text: string) => void): Promise<string | undefined>;
 }
 
 export interface SubagentToolsExtensionOptions {
@@ -136,13 +137,16 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
               ? params.task
               : undefined;
           let toolTrace: SubagentToolExecution[] = [];
+          let workflowStatus: string | undefined;
           const details = (): SubagentToolDetails => ({ toolTrace });
           const notify = () =>
             onUpdate?.({
               content: [
                 {
                   type: "text",
-                  text: parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label,
+                  text:
+                    workflowStatus ??
+                    (parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label),
                 },
               ],
               details: details(),
@@ -174,8 +178,15 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
 
           let resultText: string | undefined;
           try {
-            await session.prompt(prompt);
-            resultText = session.getLastAssistantText();
+            if (invocation.run) {
+              resultText = await invocation.run((text) => {
+                workflowStatus = text;
+                notify();
+              });
+            } else {
+              await session.prompt(prompt);
+              resultText = session.getLastAssistantText();
+            }
           } finally {
             unsubscribe();
             subagent.dispose();

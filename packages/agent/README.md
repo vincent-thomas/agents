@@ -1,27 +1,27 @@
 # agent
 
-The interactive coder runs each task in a host-owned Git branch and isolated
-worktree. Launch it from the repository the task should start from:
+Launch the interactive coder for the current repository:
 
 ```bash
 bun run /path/to/agents/packages/agent/src/index.ts
 ```
 
-The first launch creates an `agent/<uuid>` branch. Later launches resume the
-only active task automatically or show a picker when several tasks exist.
+A plain launch runs in the repository's primary checkout and continues that
+checkout's most recent session, or creates it when none exists. This remains
+true when coder is invoked from a linked worktree. To create or enter an
+isolated, host-owned Git worktree, use `goto`:
 
 ```bash
-bun run /path/to/agents/packages/agent/src/index.ts --resume
-bun run /path/to/agents/packages/agent/src/index.ts --continue
-bun run /path/to/agents/packages/agent/src/index.ts --new
+bun run /path/to/agents/packages/agent/src/index.ts goto feature/parser
+bun run /path/to/agents/packages/agent/src/index.ts goto
 ```
 
-- `--resume` opens the task picker, including an explicit **Start a new task** choice.
-- `--continue` resumes the most recently updated active task.
-- `--new` explicitly provisions another branch and worktree.
+- `goto <branch-name>` creates a worktree on that exact new branch. It fails if
+  the local branch already exists.
+- `goto` opens a picker containing the repository's active managed workspaces.
 
-Inside Pi, use `/name <task>` to give the session a friendly task name and
-`/workspace` to inspect its branch, base commit, worktree, and session file.
+Inside a managed workspace, use `/name <task>` to give the session a friendly
+name and `/workspace` to inspect its branch, base commit, worktree, and session file.
 The model cannot create or switch branches. Commits use `git_commit`; pushes,
 PR creation, target-branch merges, and CI polling use `push_and_check_ci`.
 

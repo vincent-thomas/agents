@@ -31,7 +31,7 @@ export interface SubagentDefinition {
   tools: string[];
   subagents: string[];
   commandPolicy: CommandPolicyEntry[];
-  maxTurns: number;
+  maxTurns?: number;
   systemPrompt: string;
   filePath: string;
 }
@@ -212,12 +212,14 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
 
   const rawMaxTurns = frontmatter.maxTurns;
   const maxTurns =
-    typeof rawMaxTurns === "number"
-      ? rawMaxTurns
-      : typeof rawMaxTurns === "string" && /^[1-9]\d*$/.test(rawMaxTurns)
-        ? Number(rawMaxTurns)
-        : Number.NaN;
-  if (!Number.isInteger(maxTurns) || maxTurns <= 0) {
+    rawMaxTurns === undefined
+      ? undefined
+      : typeof rawMaxTurns === "number"
+        ? rawMaxTurns
+        : typeof rawMaxTurns === "string" && /^[1-9]\d*$/.test(rawMaxTurns)
+          ? Number(rawMaxTurns)
+          : Number.NaN;
+  if (maxTurns !== undefined && (!Number.isInteger(maxTurns) || maxTurns <= 0)) {
     throw definitionError(filePath, "frontmatter field 'maxTurns' must be a positive integer");
   }
 
@@ -236,7 +238,7 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
     tools,
     subagents: parseSubagentNames(frontmatter.subagents, filePath),
     commandPolicy: parseCommandPolicy(frontmatter.command_policy, filePath),
-    maxTurns,
+    ...(maxTurns === undefined ? {} : { maxTurns }),
     systemPrompt,
     filePath,
   };

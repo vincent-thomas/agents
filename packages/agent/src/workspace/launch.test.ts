@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseLaunchMode, selectWorkspace, workspaceLabel } from "./launch.ts";
+import { parseLaunchCommand, selectWorkspace, workspaceLabel } from "./launch.ts";
 import type { AgentWorkspace, WorkspaceStore } from "./logic.ts";
 
 function workspace(id: string, updatedAt: string): AgentWorkspace {
@@ -18,13 +18,15 @@ function workspace(id: string, updatedAt: string): AgentWorkspace {
   };
 }
 
-test("parses one explicit launch mode", () => {
-  assert.equal(parseLaunchMode([]), "auto");
-  assert.equal(parseLaunchMode(["--new"]), "new");
-  assert.equal(parseLaunchMode(["-c"]), "continue");
-  assert.equal(parseLaunchMode(["--resume"]), "resume");
-  assert.throws(() => parseLaunchMode(["--new", "--resume"]), /only one/);
-  assert.throws(() => parseLaunchMode(["--unknown"]), /Unknown coder argument/);
+test("parses regular and goto launches", () => {
+  assert.deepEqual(parseLaunchCommand([]), { kind: "regular" });
+  assert.deepEqual(parseLaunchCommand(["goto"]), { kind: "goto" });
+  assert.deepEqual(parseLaunchCommand(["goto", "feature/parser"]), {
+    kind: "goto",
+    branch: "feature/parser",
+  });
+  assert.throws(() => parseLaunchCommand(["--resume"]), /Usage/);
+  assert.throws(() => parseLaunchCommand(["goto", "one", "two"]), /Usage/);
 });
 
 test("formats a stable user-facing workspace label", () => {
@@ -32,28 +34,25 @@ test("formats a stable user-facing workspace label", () => {
   assert.equal(workspaceLabel(record), "Fix parser · agent/one · 2026-01-02T03:04:05.000Z");
 });
 
-test("resume modes never create a missing task", async () => {
-  for (const mode of ["continue", "resume"] as const) {
-    await assert.rejects(
-      selectWorkspace({
-        store: {} as WorkspaceStore,
-        cwd: "/repo",
-        mode,
-        dependencies: {
-          resolveRepository: async () => ({
-            repository: "/repo/.git",
-            sourceRoot: "/repo",
-            head: "x",
-          }),
-          listWorkspaces: async () => [],
-          createWorkspace: async () => {
-            throw new Error("must not create");
-          },
+test("goto without a branch rejects when no active workspace exists", async () => {
+  await assert.rejects(
+    selectWorkspace({
+      store: {} as WorkspaceStore,
+      cwd: "/repo",
+      dependencies: {
+        resolveRepository: async () => ({
+          repository: "/repo/.git",
+          sourceRoot: "/repo",
+          head: "x",
+        }),
+        listWorkspaces: async () => [],
+        createWorkspace: async () => {
+          throw new Error("must not create");
         },
-      }),
-      /No active agent tasks/,
-    );
-  }
+      },
+    }),
+    /No active agent workspaces/,
+  );
 });
 
 test("interactive selection resumes the chosen active workspace", async () => {
@@ -64,7 +63,6 @@ test("interactive selection resumes the chosen active workspace", async () => {
   const selected = await selectWorkspace({
     store: {} as WorkspaceStore,
     cwd: "/repo",
-    mode: "resume",
     choose: async (options) => options[1]!,
     dependencies: {
       resolveRepository: async () => ({ repository: "/repo/.git", sourceRoot: "/repo", head: "x" }),
@@ -78,18 +76,23 @@ test("interactive selection resumes the chosen active workspace", async () => {
   assert.equal(selected.created, false);
 });
 
-test("interactive selection creates a workspace only when the user chooses new", async () => {
-  const existing = workspace("existing", "2026-01-01T00:00:00.000Z");
+test("goto with a branch creates a workspace without listing existing ones", async () => {
   const created = workspace("created", "2026-01-02T00:00:00.000Z");
   const selected = await selectWorkspace({
     store: {} as WorkspaceStore,
     cwd: "/repo",
-    mode: "resume",
-    choose: async () => "new",
+    branch: "feature/parser",
     dependencies: {
-      resolveRepository: async () => ({ repository: "/repo/.git", sourceRoot: "/repo", head: "x" }),
-      listWorkspaces: async () => [existing],
-      createWorkspace: async () => created,
+      resolveRepository: async () => {
+        throw new Error("must not resolve before creation");
+      },
+      listWorkspaces: async () => {
+        throw new Error("must not list");
+      },
+      createWorkspace: async (_store, _cwd, branch) => {
+        assert.equal(branch, "feature/parser");
+        return created;
+      },
     },
   });
   assert.equal(selected.workspace.id, created.id);

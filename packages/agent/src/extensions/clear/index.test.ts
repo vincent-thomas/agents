@@ -1,84 +1,91 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createClearExtension } from "./index.ts";
+import { clearExtension, clearSession } from "./index.ts";
 
-type CommandHandler = (args: string, context: any) => Promise<void>;
+test("registers clear at the Pi extension boundary", () => {
+  let command: { name: string; description: string | undefined } | undefined;
 
-function setup(deleteSession: (sessionFile: string) => Promise<void>) {
-  let handler: CommandHandler | undefined;
-
-  createClearExtension({ deleteSession })({
-    registerCommand(name, command) {
-      assert.equal(name, "clear");
-      assert.equal(command.description, "Start a new session and delete the current one");
-      handler = command.handler as CommandHandler;
+  clearExtension({
+    registerCommand(name, options) {
+      command = { name, description: options.description };
     },
   } as never);
 
-  assert.ok(handler);
-  return handler;
-}
+  assert.deepEqual(command, {
+    name: "clear",
+    description: "Start a new session and delete the current one",
+  });
+});
 
 test("starts a replacement session before deleting the active session", async () => {
   const calls: string[] = [];
-  const handler = setup(async (sessionFile) => {
+  const deleteSession = async (sessionFile: string) => {
     calls.push(`delete:${sessionFile}`);
-  });
+  };
 
-  await handler("", {
-    waitForIdle: async () => calls.push("idle"),
-    sessionManager: {
-      getSessionFile: () => "/sessions/previous.jsonl",
-    },
-    newSession: async ({ withSession }: { withSession: (context: unknown) => Promise<void> }) => {
-      calls.push("new");
-      await withSession({ ui: { notify() {} } });
-      return { cancelled: false };
-    },
-  });
+  await clearSession(
+    {
+      waitForIdle: async () => calls.push("idle"),
+      sessionManager: {
+        getSessionFile: () => "/sessions/previous.jsonl",
+      },
+      newSession: async ({ withSession }: { withSession: (context: unknown) => Promise<void> }) => {
+        calls.push("new");
+        await withSession({ ui: { notify() {} } });
+        return { cancelled: false };
+      },
+    } as never,
+    deleteSession,
+  );
 
   assert.deepEqual(calls, ["idle", "new", "delete:/sessions/previous.jsonl"]);
 });
 
 test("does not delete the active session when replacement is cancelled", async () => {
   const deleted: string[] = [];
-  const handler = setup(async (sessionFile) => {
+  const deleteSession = async (sessionFile: string) => {
     deleted.push(sessionFile);
-  });
+  };
 
-  await handler("", {
-    waitForIdle: async () => {},
-    sessionManager: {
-      getSessionFile: () => "/sessions/previous.jsonl",
-    },
-    newSession: async () => ({ cancelled: true }),
-  });
+  await clearSession(
+    {
+      waitForIdle: async () => {},
+      sessionManager: {
+        getSessionFile: () => "/sessions/previous.jsonl",
+      },
+      newSession: async () => ({ cancelled: true }),
+    } as never,
+    deleteSession,
+  );
 
   assert.deepEqual(deleted, []);
 });
 
 test("reports a deletion failure from the replacement session", async () => {
   const notifications: unknown[][] = [];
-  const handler = setup(async () => {
+  const deleteSession = async () => {
     throw new Error("permission denied");
-  });
+  };
 
-  await handler("", {
-    waitForIdle: async () => {},
-    sessionManager: {
-      getSessionFile: () => "/sessions/previous.jsonl",
-    },
-    newSession: async ({ withSession }: { withSession: (context: unknown) => Promise<void> }) => {
-      await withSession({
-        ui: {
-          notify(...args: unknown[]) {
-            notifications.push(args);
+  await clearSession(
+    {
+      waitForIdle: async () => {},
+      sessionManager: {
+        getSessionFile: () => "/sessions/previous.jsonl",
+      },
+      newSession: async ({ withSession }: { withSession: (context: unknown) => Promise<void> }) => {
+        await withSession({
+          ui: {
+            notify(...args: unknown[]) {
+              notifications.push(args);
+            },
           },
-        },
-      });
-      return { cancelled: false };
-    },
-  });
+        });
+        return { cancelled: false };
+      },
+    } as never,
+    deleteSession,
+  );
 
   assert.deepEqual(notifications, [
     ["Could not delete previous session: permission denied", "error"],

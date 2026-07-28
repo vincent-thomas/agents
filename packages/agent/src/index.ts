@@ -21,6 +21,11 @@ import { createStandupExtension } from "@vt-agent/standup";
 import rootCauseExtension from "./extensions/root-cause/index.ts";
 import clearExtension from "./extensions/clear/index.ts";
 import { createWorkspaceExtension } from "./workspace/extension.ts";
+import {
+  createSessionPointerExtension,
+  createSessionPointerStore,
+  sessionFileExists,
+} from "./session-pointer.ts";
 import { parseLaunchCommand, selectWorkspace } from "./workspace/launch.ts";
 import {
   assertOwnedWorkspace,
@@ -52,6 +57,13 @@ const assertWorkspace = async (cwd: string) =>
     ? assertOwnedWorkspace(selectedWorkspace.workspace, cwd)
     : assertWorkspacePath(runtimeCwd, cwd);
 await assertWorkspace(runtimeCwd);
+
+const sessionPointerStore = createSessionPointerStore(agentDir);
+const currentSessionFile = await sessionPointerStore.read(runtimeCwd);
+const sessionManager =
+  currentSessionFile && (await sessionFileExists(currentSessionFile))
+    ? SessionManager.open(currentSessionFile)
+    : SessionManager.create(runtimeCwd);
 
 const models = builtinModels();
 
@@ -94,6 +106,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
             ]
           : []),
         commandPolicyExtension,
+        createSessionPointerExtension(sessionPointerStore),
         subagentCatalog.createToolsExtension(),
         mergeConflictWriteGuardExtension,
         createwriteGuardExtension({
@@ -134,7 +147,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: runtimeCwd,
   agentDir,
-  sessionManager: SessionManager.continueRecent(runtimeCwd),
+  sessionManager,
 });
 
 const mode = new InteractiveMode(runtime, {

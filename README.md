@@ -44,10 +44,11 @@ Start the interactive agent from the repository you want it to operate on:
 bun run /path/to/agents/packages/agent/src/index.ts
 ```
 
-With no arguments, coder runs in the repository's primary checkout and
-continues its most recent session, even when invoked from a linked worktree.
-Use `goto <branch-name>` to create an isolated managed worktree
-on that exact new branch, or `goto` to choose among active managed workspaces.
+With no arguments, coder runs in the repository's primary checkout and resumes
+its current session, even when invoked from a linked worktree. `/clear` replaces
+that session and removes its prior transcript. Use `goto <branch-name>` to create
+an isolated managed worktree on that exact new branch, or `goto` to choose among
+active managed workspaces.
 Creating a workspace fails when the requested local branch already exists.
 
 On first use, enter `/login` in the Pi interface and authenticate with a model

@@ -35,9 +35,7 @@ export function workspaceLabel(workspace: AgentWorkspace): string {
 
 async function promptForWorkspace(workspaces: AgentWorkspace[]): Promise<AgentWorkspace | "new"> {
   if (!stdin.isTTY || !stdout.isTTY) {
-    throw new Error(
-      "Multiple active agent tasks exist. Use --continue or run coder interactively.",
-    );
+    throw new Error("Task selection requires an interactive terminal. Use --continue instead.");
   }
 
   stdout.write("\nAgent workspaces\n\n");
@@ -83,7 +81,16 @@ export async function selectWorkspace(options: {
     (workspace) => workspace.status === "active",
   );
 
-  if (options.mode === "new" || active.length === 0) {
+  if (active.length === 0) {
+    if (options.mode === "continue" || options.mode === "resume") {
+      throw new Error("No active agent tasks exist. Run coder normally or use --new.");
+    }
+    return {
+      workspace: await dependencies.createWorkspace(options.store, options.cwd),
+      created: true,
+    };
+  }
+  if (options.mode === "new") {
     return {
       workspace: await dependencies.createWorkspace(options.store, options.cwd),
       created: true,

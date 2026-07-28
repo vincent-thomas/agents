@@ -32,6 +32,30 @@ test("formats a stable user-facing workspace label", () => {
   assert.equal(workspaceLabel(record), "Fix parser · agent/one · 2026-01-02T03:04:05.000Z");
 });
 
+test("resume modes never create a missing task", async () => {
+  for (const mode of ["continue", "resume"] as const) {
+    await assert.rejects(
+      selectWorkspace({
+        store: {} as WorkspaceStore,
+        cwd: "/repo",
+        mode,
+        dependencies: {
+          resolveRepository: async () => ({
+            repository: "/repo/.git",
+            sourceRoot: "/repo",
+            head: "x",
+          }),
+          listWorkspaces: async () => [],
+          createWorkspace: async () => {
+            throw new Error("must not create");
+          },
+        },
+      }),
+      /No active agent tasks/,
+    );
+  }
+});
+
 test("interactive selection resumes the chosen active workspace", async () => {
   const records = [
     workspace("newest", "2026-01-02T00:00:00.000Z"),

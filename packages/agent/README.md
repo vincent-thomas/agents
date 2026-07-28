@@ -1,14 +1,15 @@
 # agent
 
-Launch the interactive coder in the current repository checkout:
+Launch the interactive coder for the current repository:
 
 ```bash
 bun run /path/to/agents/packages/agent/src/index.ts
 ```
 
-A plain launch continues the checkout's most recent session, or creates it when
-none exists. To create or enter an isolated, host-owned Git worktree, use
-`goto`:
+A plain launch runs in the repository's primary checkout and continues that
+checkout's most recent session, or creates it when none exists. This remains
+true when coder is invoked from a linked worktree. To create or enter an
+isolated, host-owned Git worktree, use `goto`:
 
 ```bash
 bun run /path/to/agents/packages/agent/src/index.ts goto feature/parser

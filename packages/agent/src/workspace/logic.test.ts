@@ -9,6 +9,7 @@ import {
   assertWorkspacePath,
   createWorkspace,
   listWorkspaces,
+  resolveRegularCheckout,
   resolveRepository,
   updateWorkspace,
   type WorkspaceStore,
@@ -51,6 +52,18 @@ test("creates an isolated branch and worktree without moving dirty source change
     assert.equal(workspace.branch, "feature/parser");
     assert.equal(workspace.baseSha, git(repo, "rev-parse", "HEAD"));
     await assertOwnedWorkspace(workspace);
+  } finally {
+    cleanup();
+  }
+});
+
+test("resolves the regular checkout from a managed worktree", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/regular-checkout");
+    const repository = await resolveRepository(repo);
+
+    assert.equal(await resolveRegularCheckout(workspace.worktree), repository.sourceRoot);
   } finally {
     cleanup();
   }

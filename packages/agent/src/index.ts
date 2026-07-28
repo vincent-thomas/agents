@@ -21,7 +21,11 @@ import { createStandupExtension } from "@vt-agent/standup";
 import rootCauseExtension from "./extensions/root-cause/index.ts";
 import { createWorkspaceExtension } from "./workspace/extension.ts";
 import { parseLaunchCommand, selectWorkspace } from "./workspace/launch.ts";
-import { assertOwnedWorkspace, assertWorkspacePath } from "./workspace/logic.ts";
+import {
+  assertOwnedWorkspace,
+  assertWorkspacePath,
+  resolveRegularCheckout,
+} from "./workspace/logic.ts";
 import { createSubagentCatalog } from "./subagents/index.ts";
 import { mergeConflictsPrompt } from "./subagents/prompts/merge-conflicts.ts";
 import { createMergeConflictsWorkflow } from "./subagents/workflows/merge-conflicts.ts";
@@ -40,7 +44,8 @@ const selectedWorkspace =
   launchCommand.kind === "goto"
     ? await selectWorkspace({ store, cwd: sourceCwd, branch: launchCommand.branch })
     : undefined;
-const runtimeCwd = selectedWorkspace?.workspace.worktree ?? sourceCwd;
+const runtimeCwd =
+  selectedWorkspace?.workspace.worktree ?? (await resolveRegularCheckout(sourceCwd));
 const assertWorkspace = async (cwd: string) =>
   selectedWorkspace
     ? assertOwnedWorkspace(selectedWorkspace.workspace, cwd)

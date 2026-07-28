@@ -77,6 +77,13 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+export async function resolveRegularCheckout(cwd: string): Promise<string> {
+  const output = (await git(cwd, ["worktree", "list", "--porcelain", "-z"])).stdout;
+  const entry = output.split("\0").find((field) => field.startsWith("worktree "));
+  if (!entry) throw new Error(`Git did not report a primary worktree for ${cwd}.`);
+  return realpath(entry.slice("worktree ".length));
+}
+
 export async function resolveRepository(cwd: string): Promise<{
   repository: string;
   sourceRoot: string;

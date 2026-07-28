@@ -44,8 +44,9 @@ Start the interactive agent from the repository you want it to operate on:
 bun run /path/to/agents/packages/agent/src/index.ts
 ```
 
-With no arguments, coder runs in the current checkout and continues its most
-recent session. Use `goto <branch-name>` to create an isolated managed worktree
+With no arguments, coder runs in the repository's primary checkout and
+continues its most recent session, even when invoked from a linked worktree.
+Use `goto <branch-name>` to create an isolated managed worktree
 on that exact new branch, or `goto` to choose among active managed workspaces.
 Creating a workspace fails when the requested local branch already exists.
 

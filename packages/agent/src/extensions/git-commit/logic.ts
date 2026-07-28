@@ -94,7 +94,7 @@ async function hasStagedChanges(cwd: string, signal?: AbortSignal): Promise<bool
  */
 export async function gitCommit(
   cwd: string,
-  message: string,
+  message?: string,
   signal?: AbortSignal,
 ): Promise<CommitResult> {
   if (!(await hasStagedChanges(cwd, signal))) {
@@ -108,7 +108,9 @@ export async function gitCommit(
 
   // Commit.
   try {
-    const { stdout, stderr } = await execAsync(`git commit -m ${shellQuote(message)}`, {
+    const command =
+      message === undefined ? "git commit --no-edit" : `git commit -m ${shellQuote(message)}`;
+    const { stdout, stderr } = await execAsync(command, {
       cwd,
       timeout: 30_000,
       signal,

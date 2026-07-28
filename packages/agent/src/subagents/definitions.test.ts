@@ -31,6 +31,10 @@ test("loads definitions from an explicit list of Markdown paths", () => {
     definitions.map((definition) => definition.name),
     ["scout", "merge_conflicts"],
   );
+  const scout = definitions.find((definition) => definition.name === "scout")!;
+  assert.match(scout.description, /factual lookup, not analysis/);
+  assert.match(scout.systemPrompt, /leave the reasoning to the parent agent/);
+
   const gitAdd = definitions
     .find((definition) => definition.name === "merge_conflicts")!
     .commandPolicy.find((entry) => entry.name === "git add")!;

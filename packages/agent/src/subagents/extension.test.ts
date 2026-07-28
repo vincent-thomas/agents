@@ -36,6 +36,46 @@ test("only parent-prompted agents expose a task parameter", () => {
   assert.deepEqual(parameterNames("merge_conflicts"), []);
 });
 
+test("runs a code-owned workflow instead of a single prompt", async () => {
+  let registered: { execute: (...args: any[]) => Promise<any> } | undefined;
+  let workflowRuns = 0;
+  let disposed = false;
+  const definition = loadSubagentDefinitions([
+    new URL("../../agents/scout.md", import.meta.url),
+    new URL("../../agents/merge-conflicts.md", import.meta.url),
+  ]).find((candidate) => candidate.name === "merge_conflicts")!;
+  const extension = createSubagentToolsExtension({
+    definitions: [definition],
+    invokeSubagent: async () => ({
+      prompt: "initial prompt",
+      subagent: {
+        definition,
+        session: {
+          subscribe: () => () => {},
+        } as never,
+        dispose: () => {
+          disposed = true;
+        },
+      },
+      run: async () => {
+        workflowRuns++;
+        return "workflow complete";
+      },
+    }),
+  });
+  extension({
+    registerTool(tool) {
+      registered = tool as typeof registered;
+    },
+  } as never);
+
+  const result = await registered!.execute("call", {}, undefined, undefined, { cwd: "." });
+
+  assert.equal(workflowRuns, 1);
+  assert.equal(disposed, true);
+  assert.equal(result.content[0].text, "workflow complete");
+});
+
 test("formats a missing sub-agent response", () => {
   assert.equal(formatSubagentResult(undefined), "The sub-agent did not return an answer.");
   assert.equal(formatSubagentResult("   "), "The sub-agent did not return an answer.");

@@ -12,10 +12,19 @@ export interface SubagentPromptContext {
 
 export type SubagentPromptFn = (context: SubagentPromptContext) => string | Promise<string>;
 
+export interface SubagentWorkflowContext extends SubagentPromptContext {
+  subagent: Subagent;
+  prompt: string;
+  onProgress(text: string): void;
+}
+
+export type SubagentWorkflowFn = (context: SubagentWorkflowContext) => Promise<string | undefined>;
+
 export interface CreateSubagentCatalogOptions {
   paths: readonly (string | URL)[];
   getModelFn(provider: string, model: string): Model<any>;
   promptFns?: Record<string, SubagentPromptFn>;
+  workflowFns?: Record<string, SubagentWorkflowFn>;
   extensionFactories?: ExtensionFactory[];
   customTools?: ToolDefinition[];
 }
@@ -124,9 +133,24 @@ export function createSubagentCatalog(options: CreateSubagentCatalogOptions): Su
       throw new Error(`Prompt source '${definition.prompt}' returned no prompt`);
     }
 
+    const subagent = await createFromDefinition(definition, createOptions);
+    const workflow = options.workflowFns?.[definition.prompt];
     return {
-      subagent: await createFromDefinition(definition, createOptions),
+      subagent,
       prompt,
+      ...(workflow
+        ? {
+            run: (onProgress: (text: string) => void) =>
+              workflow({
+                cwd: createOptions.cwd,
+                definition,
+                signal: createOptions.signal,
+                subagent,
+                prompt,
+                onProgress,
+              }),
+          }
+        : {}),
     };
   };
 

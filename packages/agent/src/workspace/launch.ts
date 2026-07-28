@@ -33,7 +33,7 @@ export function workspaceLabel(workspace: AgentWorkspace): string {
   return `${name} · ${workspace.branch} · ${workspace.updatedAt}`;
 }
 
-async function promptForWorkspace(workspaces: AgentWorkspace[]): Promise<AgentWorkspace> {
+async function promptForWorkspace(workspaces: AgentWorkspace[]): Promise<AgentWorkspace | "new"> {
   if (!stdin.isTTY || !stdout.isTTY) {
     throw new Error(
       "Multiple active agent tasks exist. Use --continue or run coder interactively.",
@@ -42,12 +42,14 @@ async function promptForWorkspace(workspaces: AgentWorkspace[]): Promise<AgentWo
 
   stdout.write("\nAgent workspaces\n\n");
   workspaces.forEach((workspace, index) => {
-    stdout.write(`  ${index + 1}. ${workspaceLabel(workspace)}\n`);
+    stdout.write(`  ${index + 1}. Continue: ${workspaceLabel(workspace)}\n`);
   });
+  stdout.write(`  ${workspaces.length + 1}. Start a new task\n`);
   const readline = createInterface({ input: stdin, output: stdout });
   try {
-    const answer = await readline.question("\nResume task: ");
+    const answer = await readline.question("\nSelect task: ");
     const index = Number.parseInt(answer, 10) - 1;
+    if (index === workspaces.length) return "new";
     const selected = workspaces[index];
     if (!selected) throw new Error("No workspace selected.");
     return selected;
@@ -72,7 +74,7 @@ export async function selectWorkspace(options: {
   store: WorkspaceStore;
   cwd: string;
   mode: LaunchMode;
-  choose?: (workspaces: AgentWorkspace[]) => Promise<AgentWorkspace>;
+  choose?: (workspaces: AgentWorkspace[]) => Promise<AgentWorkspace | "new">;
   dependencies?: WorkspaceSelectionDependencies;
 }): Promise<{ workspace: AgentWorkspace; created: boolean }> {
   const dependencies = options.dependencies ?? defaultDependencies;
@@ -87,10 +89,17 @@ export async function selectWorkspace(options: {
       created: true,
     };
   }
-  if (options.mode === "continue" || active.length === 1) {
+  if (options.mode === "continue" || (options.mode === "auto" && active.length === 1)) {
     return { workspace: active[0]!, created: false };
   }
 
   const choose = options.choose ?? promptForWorkspace;
-  return { workspace: await choose(active), created: false };
+  const selected = await choose(active);
+  if (selected === "new") {
+    return {
+      workspace: await dependencies.createWorkspace(options.store, options.cwd),
+      created: true,
+    };
+  }
+  return { workspace: selected, created: false };
 }

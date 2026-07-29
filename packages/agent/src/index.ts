@@ -26,7 +26,7 @@ import {
   createSessionPointerStore,
   sessionFileExists,
 } from "./session-pointer.ts";
-import { parseLaunchCommand, selectWorkspace } from "./workspace/launch.ts";
+import { LaunchError, parseLaunchCommand, selectWorkspace } from "./workspace/launch.ts";
 import {
   assertOwnedWorkspace,
   assertWorkspacePath,
@@ -45,11 +45,18 @@ import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
 const agentDir = getAgentDir();
 const store = { stateDir: agentDir };
 const sourceCwd = process.cwd();
-const launchCommand = parseLaunchCommand(process.argv.slice(2));
-const selectedWorkspace =
-  launchCommand.kind === "goto"
-    ? await selectWorkspace({ store, cwd: sourceCwd, branch: launchCommand.branch })
-    : undefined;
+let selectedWorkspace: Awaited<ReturnType<typeof selectWorkspace>> | undefined;
+try {
+  const launchCommand = parseLaunchCommand(process.argv.slice(2));
+  selectedWorkspace =
+    launchCommand.kind === "goto"
+      ? await selectWorkspace({ store, cwd: sourceCwd, branch: launchCommand.branch })
+      : undefined;
+} catch (error) {
+  if (!(error instanceof LaunchError)) throw error;
+  console.error(`coder: ${error.message}`);
+  process.exit(1);
+}
 const runtimeCwd =
   selectedWorkspace?.workspace.worktree ?? (await resolveRegularCheckout(sourceCwd));
 const assertWorkspace = async (cwd: string) =>

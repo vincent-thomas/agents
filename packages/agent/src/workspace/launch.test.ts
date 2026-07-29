@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseLaunchCommand, selectWorkspace, workspaceLabel } from "./launch.ts";
+import { LaunchError, parseLaunchCommand, selectWorkspace, workspaceLabel } from "./launch.ts";
 import type { AgentWorkspace, WorkspaceStore } from "./logic.ts";
 
 function workspace(id: string, updatedAt: string): AgentWorkspace {
@@ -25,8 +25,12 @@ test("parses regular and goto launches", () => {
     kind: "goto",
     branch: "feature/parser",
   });
-  assert.throws(() => parseLaunchCommand(["--resume"]), /Usage/);
-  assert.throws(() => parseLaunchCommand(["goto", "one", "two"]), /Usage/);
+  assert.throws(
+    () => parseLaunchCommand(["--resume"]),
+    (error) =>
+      error instanceof LaunchError && error.message === "Usage: coder [goto [branch-name]]",
+  );
+  assert.throws(() => parseLaunchCommand(["goto", "one", "two"]), LaunchError);
 });
 
 test("formats a stable user-facing workspace label", () => {
@@ -51,7 +55,10 @@ test("goto without a branch rejects when no active workspace exists", async () =
         },
       },
     }),
-    /No active agent workspaces/,
+    (error) =>
+      error instanceof LaunchError &&
+      error.message ===
+        "No active agent workspaces exist. Create one with coder goto <branch-name>.",
   );
 });
 

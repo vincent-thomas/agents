@@ -69,16 +69,18 @@ export const commandPolicyEntries: CommandPolicyEntry[] = [
   { name: "test", status: CommandPolicyStatus.Allowed, command: "test" },
   { name: "mkdir", status: CommandPolicyStatus.Allowed, command: "mkdir" },
   {
-    name: "rm",
-    status: CommandPolicyStatus.Allowed,
-    command: "rm",
-    bannedFlags: ["-r", "-R", "-rf", "-fr", "--recursive"],
-  },
-  {
     name: "cp",
     status: CommandPolicyStatus.Allowed,
     command: "cp",
-    bannedFlags: ["-r", "-R", "--recursive", "-a", "--archive", "-t", "--target-directory"],
+    bannedFlags: [
+      "-r",
+      "-R",
+      "--recursive",
+      "-a",
+      "--archive",
+      "-t",
+      "--target-directory",
+    ],
   },
   {
     name: "mv",
@@ -117,7 +119,8 @@ export const commandPolicyEntries: CommandPolicyEntry[] = [
     status: CommandPolicyStatus.Banned,
     command: "git",
     subcommand: [["branch"]],
-    description: "Use the git_commit or push_and_check_ci tools for branch management.",
+    description:
+      "Use the git_commit or push_and_check_ci tools for branch management.",
   },
   {
     name: "git push",
@@ -132,7 +135,8 @@ export const commandPolicyEntries: CommandPolicyEntry[] = [
     status: CommandPolicyStatus.Banned,
     command: "git",
     subcommand: [["commit"]],
-    description: "Do not run git commit directly in bash. Use the git_commit tool instead.",
+    description:
+      "Do not run git commit directly in bash. Use the git_commit tool instead.",
   },
   {
     name: "git",
@@ -155,14 +159,16 @@ export const commandPolicyEntries: CommandPolicyEntry[] = [
     command: "git",
     subcommand: [["rm"]],
     bannedFlags: ["-r", "-R", "-rf", "-fr", "--recursive"],
-    description: "Recursive git rm is not allowed. Remove files individually instead.",
+    description:
+      "Recursive git rm is not allowed. Remove files individually instead.",
   },
   {
     name: "git checkout",
     status: CommandPolicyStatus.Banned,
     command: "git",
     subcommand: [["checkout"]],
-    description: "The host owns the agent branch. Use git restore for file restoration.",
+    description:
+      "The host owns the agent branch. Use git restore for file restoration.",
   },
   {
     name: "unmanaged git operation",
@@ -172,9 +178,9 @@ export const commandPolicyEntries: CommandPolicyEntry[] = [
       "Git history, refs, synchronization, and branch lifecycle are owned by dedicated tools.",
   },
   {
-    name: "workspace command",
-    status: CommandPolicyStatus.Allowed,
-    command: () => true,
+    name: "make",
+    status: CommandPolicyStatus.Allow,
+    command: "make",
   },
 ];
 

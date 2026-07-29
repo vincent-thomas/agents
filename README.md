@@ -7,7 +7,7 @@ and creating verified Git commits.
 
 ## What it adds
 
-The runtime in `packages/agent/src/index.ts` currently enables:
+The runtime in `packages/coder/src/index.ts` currently enables:
 
 - **Command policy** — shell commands are denied by default. Approved commands,
   subcommands, and flags are defined explicitly.
@@ -20,7 +20,7 @@ The runtime in `packages/agent/src/index.ts` currently enables:
 
 The `packages/fix-ci` workspace contains a push/CI/PR extension, but it is **not
 registered in the current runtime**. Do not assume a workspace dependency is an
-active agent feature; `packages/agent/src/index.ts` is the source of truth.
+active agent feature; `packages/coder/src/index.ts` is the source of truth.
 
 ## Requirements
 
@@ -41,7 +41,7 @@ bun install
 Start the interactive agent from the repository you want it to operate on:
 
 ```bash
-bun run /path/to/agents/packages/agent/src/index.ts
+bun run /path/to/agents/packages/coder/src/index.ts
 ```
 
 With no arguments, coder runs in the repository's primary checkout and resumes
@@ -87,7 +87,7 @@ Useful narrower commands:
 
 ```bash
 bun test
-bun run --filter ./packages/agent build
+bun run --filter ./packages/coder build
 bunx oxfmt --write path/to/changed-file.ts
 ```
 
@@ -97,12 +97,12 @@ CI performs `bun install` followed by `make` on Ubuntu.
 
 | Path                                              | Purpose                                                |
 | ------------------------------------------------- | ------------------------------------------------------ |
-| `packages/agent`                                  | Interactive application and host-specific extensions   |
-| `packages/agent/src/index.ts`                     | Runtime assembly and active extension registration     |
-| `packages/agent/src/workspace`                    | Agent task provisioning, registry, and TUI integration |
-| `packages/agent/src/extensions/command-policy.ts` | Allowed and banned host commands                       |
-| `packages/agent/src/extensions/write-guard`       | Protection against unsafe whole-file overwrites        |
-| `packages/agent/src/extensions/git-commit`        | Checked, non-default-branch commits                    |
+| `packages/coder`                                  | Interactive application and host-specific extensions   |
+| `packages/coder/src/index.ts`                     | Runtime assembly and active extension registration     |
+| `packages/coder/src/workspace`                    | Agent task provisioning, registry, and TUI integration |
+| `packages/coder/src/extensions/command-policy.ts` | Allowed and banned host commands                       |
+| `packages/coder/src/extensions/write-guard`       | Protection against unsafe whole-file overwrites        |
+| `packages/coder/src/extensions/git-commit`        | Checked, non-default-branch commits                    |
 | `packages/command-policy`                         | Reusable shell parsing and policy-matching engine      |
 | `packages/fix-ci`                                 | Active push, GitHub CI, and PR automation              |
 | `Makefile`                                        | Canonical build and test entry point                   |
@@ -111,7 +111,7 @@ CI performs `bun install` followed by `make` on Ubuntu.
 
 ## Architecture
 
-`packages/agent/src/index.ts` first selects or provisions a host-owned task
+`packages/coder/src/index.ts` first selects or provisions a host-owned task
 workspace, then creates Pi's services and interactive runtime in that worktree.
 The workspace identity is checked again by commit and push workflows.
 
@@ -140,7 +140,7 @@ workflow exists:
   lifecycle must use host-owned workflows.
 
 When changing policy behavior, start in
-`packages/agent/src/extensions/command-policy.ts`. Change the reusable matching
+`packages/coder/src/extensions/command-policy.ts`. Change the reusable matching
 semantics only in `packages/command-policy`, and accompany behavior changes
 with regression tests.
 
@@ -149,10 +149,10 @@ with regression tests.
 1. Read the package entry point and its colocated tests.
 2. Implement SDK registration in the entry-point or extension file.
 3. Extract pure decisions into a nearby `logic.ts` module.
-4. Register the extension factory in `packages/agent/src/index.ts`.
+4. Register the extension factory in `packages/coder/src/index.ts`.
 5. Run the narrowest relevant test, then `make`.
 
-Adding a package to `packages/agent/package.json` does not activate it by
+Adding a package to `packages/coder/package.json` does not activate it by
 itself.
 
 ## Troubleshooting

@@ -10,35 +10,35 @@ This is a Bun/TypeScript workspace for a customized [Pi coding agent](https://gi
 
 | Area                           | Start here                                           | What lives there                                                                                                                                                                                |
 | ------------------------------ | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Agent assembly/runtime         | `packages/agent/src/index.ts`                        | Selects the agent task workspace, creates the Pi session/runtime, and registers active extensions. This is the source of truth for what the shipped agent enables.                              |
-| Agent task workspaces          | `packages/agent/src/workspace/logic.ts`              | Provisions host-owned branches and worktrees, persists the workspace registry, and validates ownership. `launch.ts` owns user selection and `extension.ts` owns Pi/TUI integration.             |
-| Host command policy            | `packages/agent/src/extensions/command-policy.ts`    | Concrete safety bans, explicit Git operations, workflow redirects, and the general workspace-command fallback.                                                                                  |
+| Agent assembly/runtime         | `packages/coder/src/index.ts`                        | Selects the agent task workspace, creates the Pi session/runtime, and registers active extensions. This is the source of truth for what the shipped agent enables.                              |
+| Agent task workspaces          | `packages/coder/src/workspace/logic.ts`              | Provisions host-owned branches and worktrees, persists the workspace registry, and validates ownership. `launch.ts` owns user selection and `extension.ts` owns Pi/TUI integration.             |
+| Host command policy            | `packages/coder/src/extensions/command-policy.ts`    | Concrete safety bans, explicit Git operations, workflow redirects, and the general workspace-command fallback.                                                                                  |
 | Reusable command-policy engine | `packages/command-policy/index.ts`                   | Public exports. Follow into `extension.ts` for Pi wiring, `matching.ts` for policy decisions, `command-utils.ts` for shell tokenization, and `types.ts` for rule shapes.                        |
-| Safe-write enforcement         | `packages/agent/src/extensions/write-guard/index.ts` | Pi hook that blocks whole-file overwrites of large existing files; pure threshold logic is in `logic.ts`.                                                                                       |
-| Commit tool                    | `packages/agent/src/extensions/git-commit/index.ts`  | Registers `git_commit` and orchestrates branch checks, prechecks, staging, and commit. Helpers are split into `logic.ts`, `precheck.ts`, `git-utils.ts`, `exec-async.ts`, and `shell-quote.ts`. |
+| Safe-write enforcement         | `packages/coder/src/extensions/write-guard/index.ts` | Pi hook that blocks whole-file overwrites of large existing files; pure threshold logic is in `logic.ts`.                                                                                       |
+| Commit tool                    | `packages/coder/src/extensions/git-commit/index.ts`  | Registers `git_commit` and orchestrates branch checks, prechecks, staging, and commit. Helpers are split into `logic.ts`, `precheck.ts`, `git-utils.ts`, `exec-async.ts`, and `shell-quote.ts`. |
 | Push/CI/PR workflow            | `packages/fix-ci/index.ts`                           | Implements the active `push_and_check_ci` extension. Most Git/GitHub polling and PR logic is in `logic.ts`; process/git helpers are adjacent.                                                   |
 | Build/package                  | `Makefile`, `flake.nix`, `package.json`              | Workspace, Bun build/test entry points, and Nix packaging.                                                                                                                                      |
 | CI                             | `.github/workflows/ci.yaml`                          | Installs with Bun and runs `make`.                                                                                                                                                              |
 
 ## Route by task
 
-- Change which extensions/models the agent uses: `packages/agent/src/index.ts`.
-- Add or alter an allowed shell command: edit the host rules in `packages/agent/src/extensions/command-policy.ts`; change parsing or matching semantics only in `packages/command-policy/`.
+- Change which extensions/models the agent uses: `packages/coder/src/index.ts`.
+- Add or alter an allowed shell command: edit the host rules in `packages/coder/src/extensions/command-policy.ts`; change parsing or matching semantics only in `packages/command-policy/`.
 - Debug a command unexpectedly allowed or blocked: trace `command-utils.ts` -> `matching.ts` -> host `command-policy.ts`. Add an engine test in `matching.test.ts` or a concrete host-policy test in `command-policy.test.ts`.
-- Change overwrite thresholds or write interception: `packages/agent/src/extensions/write-guard/index.ts`; keep the decision logic in `logic.ts`.
-- Change commit orchestration/UI responses: `packages/agent/src/extensions/git-commit/index.ts`. Put testable branch/commit decisions in `logic.ts`, Makefile validation in `precheck.ts`, and process plumbing in the helper files.
+- Change overwrite thresholds or write interception: `packages/coder/src/extensions/write-guard/index.ts`; keep the decision logic in `logic.ts`.
+- Change commit orchestration/UI responses: `packages/coder/src/extensions/git-commit/index.ts`. Put testable branch/commit decisions in `logic.ts`, Makefile validation in `precheck.ts`, and process plumbing in the helper files.
 - Change push, CI polling, PR creation/review, or retry behavior: `packages/fix-ci/index.ts` for orchestration and response text; `packages/fix-ci/logic.ts` for git/GitHub operations and polling.
-- Change release/runtime packaging: inspect both `flake.nix` and `packages/agent/package.json`; the Nix wrapper runs the TypeScript entry point directly with Bun.
+- Change release/runtime packaging: inspect both `flake.nix` and `packages/coder/package.json`; the Nix wrapper runs the TypeScript entry point directly with Bun.
 
 ## Control flow and boundaries
 
-1. `packages/agent/src/index.ts` selects or provisions an agent-owned worktree before creating Pi services.
+1. `packages/coder/src/index.ts` selects or provisions an agent-owned worktree before creating Pi services.
 2. Extensions either register tools (`git_commit`) or intercept Pi events (workspace ownership, command policy, and write guard).
 3. Extension entry points own SDK integration and user-facing progress/results.
 4. Pure or mostly pure decisions belong in adjacent `logic.ts` modules so they can be tested without a Pi session.
 5. Shell execution must stay asynchronous and carry `AbortSignal` through long-running git/GitHub operations so the TUI remains responsive.
 
-Do not assume a workspace package is active merely because it is listed as a dependency. Verify registration in `packages/agent/src/index.ts`.
+Do not assume a workspace package is active merely because it is listed as a dependency. Verify registration in `packages/coder/src/index.ts`.
 
 ## Exploration workflow
 
@@ -63,7 +63,7 @@ Use Bun, not npm/yarn/pnpm. The repository's canonical checks are:
 
 ```sh
 bun install       # only when dependencies need installation/update
-make              # builds packages/agent and runs the full Bun test suite
+make              # builds packages/coder and runs the full Bun test suite
 bun test          # all tests without the build
 bun test path/to/file.test.ts
 bunx oxfmt --write path/to/changed-file.ts

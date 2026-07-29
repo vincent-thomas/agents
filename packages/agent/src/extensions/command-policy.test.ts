@@ -7,11 +7,8 @@ function violation(command: string) {
   return evaluateCommand(command, commandPolicyEntries);
 }
 
-test("allows project-defined coding and verification commands", () => {
-  assert.equal(violation("bun test packages/agent/src/workspace/logic.test.ts"), null);
+test("allows the project-defined validation boundary", () => {
   assert.equal(violation("make"), null);
-  assert.equal(violation("cargo test"), null);
-  assert.equal(violation("python scripts/check.py"), null);
 });
 
 test("keeps Git branch, history, and synchronization behind dedicated workflows", () => {

@@ -1,7 +1,7 @@
 import { execAsync, extractErrorOutput } from "./exec-async.ts";
 import { currentBranch, hasUpstream } from "./git-utils.ts";
 import { branchExistsOnRemote, gitCommit, isDefaultBranch } from "./logic.ts";
-import { runPreChecks } from "./precheck.ts";
+import { formatSuccessfulPreChecks, runPreChecks } from "./precheck.ts";
 
 export interface RunGitCommitOptions {
   cwd: string;
@@ -90,5 +90,8 @@ export async function runGitCommit(options: RunGitCommitOptions): Promise<RunGit
       output: `Commit failed:\n\`\`\`\n${result.output}\n\`\`\``,
     };
   }
-  return result;
+  return {
+    success: true,
+    output: [result.output, formatSuccessfulPreChecks(preCheck)].filter(Boolean).join("\n\n"),
+  };
 }

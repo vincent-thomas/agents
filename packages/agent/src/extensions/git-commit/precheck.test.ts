@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { test, suite } from "node:test";
-import { runPreChecks } from "./precheck.ts";
+import { formatSuccessfulPreChecks, runPreChecks } from "./precheck.ts";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -29,6 +29,23 @@ suite("runPreChecks", () => {
       assert.deepEqual(result, { passed: true, steps: [] });
     }),
   );
+
+  test("describes skipped project validation", () => {
+    assert.equal(
+      formatSuccessfulPreChecks({ passed: true, steps: [] }),
+      "Project validation skipped: no Makefile or `make` unavailable.",
+    );
+  });
+
+  test("describes passed project validation", () => {
+    assert.equal(
+      formatSuccessfulPreChecks({
+        passed: true,
+        steps: [{ command: "make", passed: true, output: "" }],
+      }),
+      "Project validation passed: `make`.",
+    );
+  });
 
   test(
     "Makefile whose default target succeeds → passed with captured output",

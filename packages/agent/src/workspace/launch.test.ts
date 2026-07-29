@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseLaunchCommand, selectWorkspace, workspaceLabel } from "./launch.ts";
 import type { AgentWorkspace, WorkspaceStore } from "./logic.ts";
+import { prepareWorkspaceStartup } from "./startup.ts";
 
 function workspace(id: string, updatedAt: string): AgentWorkspace {
   return {
@@ -32,6 +33,43 @@ test("parses regular and goto launches", () => {
 test("formats a stable user-facing workspace label", () => {
   const record = { ...workspace("one", "2026-01-02T03:04:05.000Z"), sessionName: "Fix parser" };
   assert.equal(workspaceLabel(record), "Fix parser · agent/one · 2026-01-02T03:04:05.000Z");
+});
+
+test("reconciles the primary checkout before workspace selection", async () => {
+  const calls: string[] = [];
+  const existing = workspace("existing", "2026-01-02T00:00:00.000Z");
+  const remaining = workspace("remaining", "2026-01-01T00:00:00.000Z");
+  let available = [existing, remaining];
+
+  const result = await prepareWorkspaceStartup({
+    store: {} as WorkspaceStore,
+    sourceCwd: "/managed/worktree",
+    launchCommand: { kind: "goto" },
+    sessionPointers: {
+      read: async () => undefined,
+      write: async () => undefined,
+      remove: async () => undefined,
+    },
+    dependencies: {
+      resolveRegularCheckout: async () => {
+        calls.push("resolve");
+        return "/primary";
+      },
+      reconcileMergedWorkspaces: async (options) => {
+        calls.push(`reconcile:${options.cwd}`);
+        available = available.filter((candidate) => candidate.id !== existing.id);
+        return { removed: [{ workspaceId: existing.id, branch: existing.branch }], retained: [] };
+      },
+      selectWorkspace: async (options) => {
+        calls.push(`select:${options.cwd}`);
+        assert.deepEqual(available, [remaining]);
+        return { workspace: available[0]!, created: false };
+      },
+    },
+  });
+
+  assert.deepEqual(calls, ["resolve", "reconcile:/primary", "select:/primary"]);
+  assert.equal(result.selectedWorkspace?.workspace.id, "remaining");
 });
 
 test("goto without a branch rejects when no active workspace exists", async () => {

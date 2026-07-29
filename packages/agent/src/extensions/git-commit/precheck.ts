@@ -15,9 +15,16 @@ import { execAsync, extractErrorOutput } from "./exec-async.ts";
 // Types
 // ---------------------------------------------------------------------------
 
-interface PreCheckResult {
+export interface PreCheckResult {
   passed: boolean;
   steps: { command: string; passed: boolean; output: string; elapsed?: string }[];
+}
+
+export function formatSuccessfulPreChecks(result: PreCheckResult): string {
+  if (result.steps.length === 0) {
+    return "Project validation skipped: no Makefile or `make` unavailable.";
+  }
+  return `Project validation passed: ${result.steps.map((step) => `\`${step.command}\``).join(", ")}.`;
 }
 
 // ---------------------------------------------------------------------------

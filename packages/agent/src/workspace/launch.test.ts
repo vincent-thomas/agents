@@ -76,19 +76,36 @@ test("interactive selection resumes the chosen active workspace", async () => {
   assert.equal(selected.created, false);
 });
 
-test("goto with a branch creates a workspace without listing existing ones", async () => {
+test("goto with a branch resumes its active workspace", async () => {
+  const existing = {
+    ...workspace("existing", "2026-01-02T00:00:00.000Z"),
+    branch: "feature/parser",
+  };
+  const selected = await selectWorkspace({
+    store: {} as WorkspaceStore,
+    cwd: "/repo",
+    branch: "feature/parser",
+    dependencies: {
+      resolveRepository: async () => ({ repository: "/repo/.git", sourceRoot: "/repo", head: "x" }),
+      listWorkspaces: async () => [existing],
+      createWorkspace: async () => {
+        throw new Error("must not create");
+      },
+    },
+  });
+  assert.equal(selected.workspace.id, existing.id);
+  assert.equal(selected.created, false);
+});
+
+test("goto with an unregistered branch creates a workspace", async () => {
   const created = workspace("created", "2026-01-02T00:00:00.000Z");
   const selected = await selectWorkspace({
     store: {} as WorkspaceStore,
     cwd: "/repo",
     branch: "feature/parser",
     dependencies: {
-      resolveRepository: async () => {
-        throw new Error("must not resolve before creation");
-      },
-      listWorkspaces: async () => {
-        throw new Error("must not list");
-      },
+      resolveRepository: async () => ({ repository: "/repo/.git", sourceRoot: "/repo", head: "x" }),
+      listWorkspaces: async () => [],
       createWorkspace: async (_store, _cwd, branch) => {
         assert.equal(branch, "feature/parser");
         return created;

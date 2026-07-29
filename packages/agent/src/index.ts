@@ -26,7 +26,7 @@ import {
   createSessionPointerStore,
   sessionFileExists,
 } from "./session-pointer.ts";
-import { parseLaunchCommand } from "./workspace/launch.ts";
+import { LaunchError, parseLaunchCommand } from "./workspace/launch.ts";
 import { assertOwnedWorkspace, assertWorkspacePath } from "./workspace/logic.ts";
 import { prepareWorkspaceStartup } from "./workspace/startup.ts";
 import { createSubagentCatalog } from "./subagents/index.ts";
@@ -42,14 +42,22 @@ import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
 const agentDir = getAgentDir();
 const store = { stateDir: agentDir };
 const sourceCwd = process.cwd();
-const launchCommand = parseLaunchCommand(process.argv.slice(2));
 const sessionPointerStore = createSessionPointerStore(agentDir);
-const startup = await prepareWorkspaceStartup({
-  store,
-  sourceCwd,
-  launchCommand,
-  sessionPointers: sessionPointerStore,
-});
+const startup = await (async () => {
+  try {
+    const launchCommand = parseLaunchCommand(process.argv.slice(2));
+    return await prepareWorkspaceStartup({
+      store,
+      sourceCwd,
+      launchCommand,
+      sessionPointers: sessionPointerStore,
+    });
+  } catch (error) {
+    if (!(error instanceof LaunchError)) throw error;
+    console.error(`coder: ${error.message}`);
+    process.exit(1);
+  }
+})();
 for (const removed of startup.reconciliation.removed) {
   const pullRequest = removed.prNumber === undefined ? "" : ` (PR #${removed.prNumber})`;
   console.log(`Removed merged workspace ${removed.branch}${pullRequest}.`);

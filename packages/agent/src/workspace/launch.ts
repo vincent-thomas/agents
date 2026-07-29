@@ -10,10 +10,12 @@ import {
 
 export type LaunchCommand = { kind: "regular" } | { kind: "goto"; branch?: string };
 
+export class LaunchError extends Error {}
+
 export function parseLaunchCommand(args: string[]): LaunchCommand {
   if (args.length === 0) return { kind: "regular" };
   if (args[0] !== "goto" || args.length > 2) {
-    throw new Error("Usage: coder [goto [branch-name]]");
+    throw new LaunchError("Usage: coder [goto [branch-name]]");
   }
   return args[1] === undefined ? { kind: "goto" } : { kind: "goto", branch: args[1] };
 }
@@ -25,8 +27,8 @@ export function workspaceLabel(workspace: AgentWorkspace): string {
 
 async function promptForWorkspace(workspaces: AgentWorkspace[]): Promise<AgentWorkspace> {
   if (!stdin.isTTY || !stdout.isTTY) {
-    throw new Error(
-      "Workspace selection requires an interactive terminal. Use goto <branch-name> instead.",
+    throw new LaunchError(
+      "Workspace selection requires an interactive terminal. Use coder goto <branch-name> instead.",
     );
   }
 
@@ -38,7 +40,7 @@ async function promptForWorkspace(workspaces: AgentWorkspace[]): Promise<AgentWo
   try {
     const answer = await readline.question("\nSelect workspace: ");
     const selected = workspaces[Number.parseInt(answer, 10) - 1];
-    if (!selected) throw new Error("No workspace selected.");
+    if (!selected) throw new LaunchError("No workspace selected.");
     return selected;
   } finally {
     readline.close();
@@ -80,7 +82,9 @@ export async function selectWorkspace(options: {
   }
 
   if (active.length === 0) {
-    throw new Error("No active agent workspaces exist. Create one with goto <branch-name>.");
+    throw new LaunchError(
+      "No active agent workspaces exist. Create one with coder goto <branch-name>.",
+    );
   }
 
   const selected = await (options.choose ?? promptForWorkspace)(active);

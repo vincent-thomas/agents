@@ -1,9 +1,9 @@
 /**
  * git-commit extension
  *
- * `git_commit` tool — checks default branch, runs pre-checks (static
- * analysis only), then commits the currently-staged changes with
- * a structured subject, what, and why. Does NOT stage anything itself.
+ * `git_commit` tool — checks the default branch, runs project-defined
+ * validation, then commits with a structured subject, what, and why.
+ * It can optionally stage all changes first.
  *
  * Manual `git commit` in bash is blocked by the command-policy extension
  * (its `entries` array bans the "git commit" subcommand), not here.
@@ -24,7 +24,7 @@ export function gitCommitExtension(
     description:
       "Commit the currently-staged changes with a structured subject, what, and why. " +
       "Pass `add_all: true` to auto-stage all tracked file changes first. " +
-      "Runs pre-commit checks (static analysis only) before committing. " +
+      "Runs project-defined validation (`make`, when available) before committing. " +
       "Blocks commits on default branches (main/master).",
     parameters: Type.Object({
       subject: Type.String({

@@ -71,6 +71,8 @@ When a tool call fails or is blocked, treat it as debugging input:
 
 ---
 
-## Trust, but verify
+## Verification ownership
 
-Always verify your changes took effect and the result is valid. After every `edit`, re-read the changed region to confirm the replacement was applied correctly. After every commit, confirm the tree is in the expected state. This applies doubly to edits and commits - everything this file is about.
+Use dedicated tools as validation boundaries. `git_commit` runs the project's pre-commit checks; do not independently run build, test, lint, or type-check commands before committing unless you are diagnosing a reported failure or the user explicitly asks you to. Trust a successful `git_commit` result.
+
+After an edit, re-read only as needed to confirm that the requested replacement was applied correctly. This confirms the edit itself; it does not duplicate project validation.

@@ -24,9 +24,7 @@ export function createSessionPointerStore(stateDir: string): SessionPointerStore
         const pointer = JSON.parse(
           await readFile(pointerPath(stateDir, cwd), "utf8"),
         ) as SessionPointer;
-        return typeof pointer.sessionFile === "string"
-          ? pointer.sessionFile
-          : undefined;
+        return typeof pointer.sessionFile === "string" ? pointer.sessionFile : undefined;
       } catch {
         return undefined;
       }

@@ -6,6 +6,20 @@ import {
   type WorkspaceStore,
 } from "./logic.ts";
 
+export function workspaceStartupNotice(workspace: AgentWorkspace, created: boolean): string {
+  if (!created) return `Resumed agent workspace ${workspace.branch}\n${workspace.worktree}`;
+
+  const branchNotice =
+    workspace.branchSetup === "reused-local"
+      ? `Reused existing local branch ${workspace.branch}.`
+      : workspace.branchSetup === "fetched-origin"
+        ? `Fetched origin/${workspace.branch} and created a local tracking branch.`
+        : undefined;
+  return [branchNotice, `Created agent workspace ${workspace.branch}`, workspace.worktree]
+    .filter((line): line is string => line !== undefined)
+    .join("\n");
+}
+
 function workspaceSummary(workspace: AgentWorkspace): string {
   return [
     `Task: ${workspace.sessionName ?? "unnamed"}`,
@@ -43,11 +57,7 @@ export function createWorkspaceExtension(options: {
       const label = workspace.sessionName ?? workspace.id.slice(0, 8);
       ctx.ui.setStatus("agent-workspace", `${label} · ${workspace.branch}`);
       if (event.reason === "startup") {
-        ctx.ui.notify(
-          `${options.created ? "Created" : "Resumed"} agent workspace ${workspace.branch}\n` +
-            workspace.worktree,
-          "info",
-        );
+        ctx.ui.notify(workspaceStartupNotice(workspace, options.created), "info");
       }
     });
 

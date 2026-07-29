@@ -65,17 +65,20 @@ export async function selectWorkspace(options: {
   dependencies?: WorkspaceSelectionDependencies;
 }): Promise<{ workspace: AgentWorkspace; created: boolean }> {
   const dependencies = options.dependencies ?? defaultDependencies;
+  const repository = await dependencies.resolveRepository(options.cwd);
+  const active = (await dependencies.listWorkspaces(options.store, repository.repository)).filter(
+    (workspace) => workspace.status === "active",
+  );
+
   if (options.branch !== undefined) {
+    const existing = active.find((workspace) => workspace.branch === options.branch);
+    if (existing) return { workspace: existing, created: false };
     return {
       workspace: await dependencies.createWorkspace(options.store, options.cwd, options.branch),
       created: true,
     };
   }
 
-  const repository = await dependencies.resolveRepository(options.cwd);
-  const active = (await dependencies.listWorkspaces(options.store, repository.repository)).filter(
-    (workspace) => workspace.status === "active",
-  );
   if (active.length === 0) {
     throw new Error("No active agent workspaces exist. Create one with goto <branch-name>.");
   }

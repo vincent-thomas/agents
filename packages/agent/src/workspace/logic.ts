@@ -17,6 +17,7 @@ export interface AgentWorkspace {
   createdAt: string;
   updatedAt: string;
   status: "active" | "completed";
+  branchSetup?: "created" | "reused-local" | "fetched-origin";
   sessionFile?: string;
   sessionName?: string;
 }
@@ -60,7 +61,11 @@ function parseWorkspace(value: unknown, path: string): AgentWorkspace {
     typeof record.baseSha !== "string" ||
     typeof record.createdAt !== "string" ||
     typeof record.updatedAt !== "string" ||
-    (record.status !== "active" && record.status !== "completed")
+    (record.status !== "active" && record.status !== "completed") ||
+    (record.branchSetup !== undefined &&
+      record.branchSetup !== "created" &&
+      record.branchSetup !== "reused-local" &&
+      record.branchSetup !== "fetched-origin")
   ) {
     throw new Error(`Invalid workspace record: ${path}`);
   }
@@ -137,15 +142,37 @@ export async function listWorkspaces(
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
-async function assertNewBranch(cwd: string, branch: string): Promise<void> {
-  await git(cwd, ["check-ref-format", "--branch", branch]);
+function gitErrorMessage(error: unknown): string {
+  const stderr = (error as { stderr?: unknown }).stderr;
+  if (typeof stderr === "string" && stderr.trim()) return stderr.trim();
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function refExists(cwd: string, ref: string): Promise<boolean> {
   try {
-    await git(cwd, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+    await git(cwd, ["show-ref", "--verify", "--quiet", ref]);
+    return true;
   } catch (error: unknown) {
-    if ((error as { code?: number }).code === 1) return;
+    if ((error as { code?: number }).code === 1) return false;
     throw error;
   }
-  throw new Error(`Branch already exists: ${branch}`);
+}
+
+async function originBranchExists(cwd: string, branch: string): Promise<boolean> {
+  try {
+    await git(cwd, ["remote", "get-url", "origin"]);
+  } catch (error: unknown) {
+    if ((error as { code?: number }).code === 2) return false;
+    throw error;
+  }
+
+  try {
+    await git(cwd, ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`]);
+    return true;
+  } catch (error: unknown) {
+    if ((error as { code?: number }).code === 2) return false;
+    throw error;
+  }
 }
 
 export async function createWorkspace(
@@ -154,7 +181,11 @@ export async function createWorkspace(
   branch: string,
 ): Promise<AgentWorkspace> {
   const repo = await resolveRepository(cwd);
-  await assertNewBranch(repo.sourceRoot, branch);
+  await git(repo.sourceRoot, ["check-ref-format", "--branch", branch]);
+  const localBranchExists = await refExists(repo.sourceRoot, `refs/heads/${branch}`);
+  const remoteBranchExists = localBranchExists
+    ? false
+    : await originBranchExists(repo.sourceRoot, branch);
   const id = randomUUID();
   const repoKey = `${basename(repo.sourceRoot)}-${createHash("sha256")
     .update(repo.repository)
@@ -162,8 +193,41 @@ export async function createWorkspace(
     .slice(0, 12)}`;
   const worktree = join(store.stateDir, "workspaces", "worktrees", repoKey, id);
   await mkdir(dirname(worktree), { recursive: true });
-  await git(repo.sourceRoot, ["worktree", "add", "-b", branch, worktree, repo.head]);
 
+  let branchSetup: AgentWorkspace["branchSetup"];
+  if (localBranchExists) {
+    try {
+      await git(repo.sourceRoot, ["worktree", "add", worktree, branch]);
+    } catch (error: unknown) {
+      throw new Error(
+        `Cannot create agent workspace from local branch ${branch}. ` +
+          `It may already be checked out in another worktree.\n${gitErrorMessage(error)}`,
+        { cause: error },
+      );
+    }
+    branchSetup = "reused-local";
+  } else if (remoteBranchExists) {
+    await git(repo.sourceRoot, [
+      "fetch",
+      "origin",
+      `refs/heads/${branch}:refs/remotes/origin/${branch}`,
+    ]);
+    await git(repo.sourceRoot, [
+      "worktree",
+      "add",
+      "--track",
+      "-b",
+      branch,
+      worktree,
+      `refs/remotes/origin/${branch}`,
+    ]);
+    branchSetup = "fetched-origin";
+  } else {
+    await git(repo.sourceRoot, ["worktree", "add", "-b", branch, worktree, repo.head]);
+    branchSetup = "created";
+  }
+
+  const baseSha = (await git(worktree, ["rev-parse", "HEAD"])).stdout.trim();
   const now = new Date().toISOString();
   const workspace: AgentWorkspace = {
     version: 1,
@@ -172,10 +236,11 @@ export async function createWorkspace(
     sourceRoot: repo.sourceRoot,
     worktree,
     branch,
-    baseSha: repo.head,
+    baseSha,
     createdAt: now,
     updatedAt: now,
     status: "active",
+    branchSetup,
   };
   await saveWorkspace(store, workspace);
   return workspace;

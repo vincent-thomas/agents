@@ -2,7 +2,10 @@
 
 .PHONY: all test format audit
 
-all: format-check test
+all: deps-install format-check test
+
+deps-install:
+	bun install
 
 audit:
 	bun audit

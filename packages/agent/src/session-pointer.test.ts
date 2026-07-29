@@ -39,10 +39,13 @@ test("records the replacement session at session start", async () => {
     },
   } as never);
 
-  await sessionStart?.({}, {
-    cwd: "/repo",
-    sessionManager: { getSessionFile: () => "/sessions/replacement.jsonl" },
-  });
+  await sessionStart?.(
+    {},
+    {
+      cwd: "/repo",
+      sessionManager: { getSessionFile: () => "/sessions/replacement.jsonl" },
+    },
+  );
 
   assert.deepEqual(writes, [["/repo", "/sessions/replacement.jsonl"]]);
 });

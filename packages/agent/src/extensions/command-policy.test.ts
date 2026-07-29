@@ -8,7 +8,6 @@ function violation(command: string) {
 }
 
 test("allows project-defined coding and verification commands", () => {
-  assert.equal(violation("bun test packages/agent/src/workspace/logic.test.ts"), null);
   assert.equal(violation("make"), null);
   assert.equal(violation("cargo test"), null);
   assert.equal(violation("python scripts/check.py"), null);

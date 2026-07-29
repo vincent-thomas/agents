@@ -9,7 +9,7 @@
         "oxfmt": "^0.60.0",
       },
     },
-    "packages/agent": {
+    "packages/coder": {
       "name": "@vt-agent/agent",
       "bin": {
         "coder": "./src/index.ts",
@@ -343,7 +343,7 @@
 
     "@typescript/typescript-win32-x64": ["@typescript/typescript-win32-x64@7.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g=="],
 
-    "@vt-agent/agent": ["@vt-agent/agent@workspace:packages/agent"],
+    "@vt-agent/agent": ["@vt-agent/agent@workspace:packages/coder"],
 
     "@vt-agent/command-policy": ["@vt-agent/command-policy@workspace:packages/command-policy"],
 

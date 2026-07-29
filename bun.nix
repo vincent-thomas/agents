@@ -553,7 +553,7 @@
     url = "https://registry.npmjs.org/@typescript/typescript-win32-x64/-/typescript-win32-x64-7.0.2.tgz";
     hash = "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g==";
   };
-  "@vt-agent/agent" = copyPathToStore ./packages/agent;
+  "@vt-agent/agent" = copyPathToStore ./packages/coder;
   "@vt-agent/command-policy" = copyPathToStore ./packages/command-policy;
   "@vt-agent/git_push" = copyPathToStore ./packages/fix-ci;
   "@vt-agent/standup" = copyPathToStore ./packages/standup;

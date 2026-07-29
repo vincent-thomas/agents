@@ -3,7 +3,7 @@
 Launch the interactive coder for the current repository:
 
 ```bash
-bun run /path/to/agents/packages/agent/src/index.ts
+bun run /path/to/agents/packages/coder/src/index.ts
 ```
 
 A plain launch runs in the repository's primary checkout and resumes its current
@@ -12,8 +12,8 @@ remains true when coder is invoked from a linked worktree. To create or enter an
 isolated, host-owned Git worktree, use `goto`:
 
 ```bash
-bun run /path/to/agents/packages/agent/src/index.ts goto feature/parser
-bun run /path/to/agents/packages/agent/src/index.ts goto
+bun run /path/to/agents/packages/coder/src/index.ts goto feature/parser
+bun run /path/to/agents/packages/coder/src/index.ts goto
 ```
 
 - `goto <branch-name>` creates a worktree on that exact new branch. It fails if

@@ -14,7 +14,7 @@
 #     bunNix = ./bun.nix;
 #   };
 #
-#   module = "packages/agent/src/index.ts";
+#   module = "packages/coder/src/index.ts";
 # }
 #
 let
@@ -25,7 +25,7 @@ let
     src = ./..;
 
     startScript = ''
-      bun run ./packages/agent/src/index.ts
+      bun run ./packages/coder/src/index.ts
     '';
 
     buildPhase = ":";
@@ -39,6 +39,6 @@ writeShellApplication {
   name = "coder";
   runtimeInputs = [ bun ];
   text = ''
-    exec bun run ${application}/share/coder/packages/agent/src/index.ts "$@"
+    exec bun run ${application}/share/coder/packages/coder/src/index.ts "$@"
   '';
 }

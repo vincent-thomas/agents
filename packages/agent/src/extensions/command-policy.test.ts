@@ -37,6 +37,6 @@ test("allows explicit Git inspection and worktree checkpoint preparation", () =>
 
 test("retains direct safety bans before the workspace fallback", () => {
   assert.ok(violation("sudo make install"));
-  assert.ok(violation("rm -rf build"));
+  assert.match(violation("rm -rf build")?.reason ?? "", /Use git rm/);
   assert.ok(violation("cat .env"));
 });

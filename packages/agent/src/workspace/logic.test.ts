@@ -8,7 +8,9 @@ import {
   assertOwnedWorkspace,
   assertWorkspacePath,
   createWorkspace,
+  deleteWorkspace,
   listWorkspaces,
+  removeWorkspaceWorktree,
   resolveRegularCheckout,
   resolveRepository,
   updateWorkspace,
@@ -88,6 +90,61 @@ test("lists repository workspaces and persists session metadata", async () => {
     assert.equal(persisted?.sessionFile, "/sessions/one.jsonl");
     assert.equal(persisted?.sessionName, "Refactor auth");
     assert.ok(records.some((record) => record.id === second.id));
+  } finally {
+    cleanup();
+  }
+});
+
+test("deletes only the requested workspace record", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const first = await createWorkspace(store, repo, "feature/delete-one");
+    const second = await createWorkspace(store, repo, "feature/keep-two");
+    const repository = await resolveRepository(repo);
+
+    await deleteWorkspace(store, first.id);
+
+    assert.deepEqual(
+      (await listWorkspaces(store, repository.repository)).map((record) => record.id),
+      [second.id],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("removes a clean managed worktree normally", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/remove-clean");
+
+    assert.equal(await removeWorkspaceWorktree(store, workspace, repo), true);
+    assert.throws(() => readFileSync(join(workspace.worktree, "tracked.txt")), /ENOENT/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("rejects dirty managed worktrees before removal", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/retain-dirty");
+    writeFileSync(join(workspace.worktree, "tracked.txt"), "dirty\n");
+
+    await assert.rejects(removeWorkspaceWorktree(store, workspace, repo), /uncommitted changes/);
+    assert.equal(readFileSync(join(workspace.worktree, "tracked.txt"), "utf8"), "dirty\n");
+  } finally {
+    cleanup();
+  }
+});
+
+test("treats an already-missing managed worktree as removed", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/remove-retry");
+    git(repo, "worktree", "remove", workspace.worktree);
+
+    assert.equal(await removeWorkspaceWorktree(store, workspace, repo), false);
   } finally {
     cleanup();
   }

@@ -7,7 +7,7 @@ function violation(command: string) {
   return evaluateCommand(command, commandPolicyEntries);
 }
 
-test("allows project-defined coding and verification commands", () => {
+test("allows the project-defined validation boundary", () => {
   assert.equal(violation("make"), null);
 });
 

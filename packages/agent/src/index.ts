@@ -26,12 +26,9 @@ import {
   createSessionPointerStore,
   sessionFileExists,
 } from "./session-pointer.ts";
-import { LaunchError, parseLaunchCommand, selectWorkspace } from "./workspace/launch.ts";
-import {
-  assertOwnedWorkspace,
-  assertWorkspacePath,
-  resolveRegularCheckout,
-} from "./workspace/logic.ts";
+import { LaunchError, parseLaunchCommand } from "./workspace/launch.ts";
+import { assertOwnedWorkspace, assertWorkspacePath } from "./workspace/logic.ts";
+import { prepareWorkspaceStartup } from "./workspace/startup.ts";
 import { createSubagentCatalog } from "./subagents/index.ts";
 import { mergeConflictsPrompt } from "./subagents/prompts/merge-conflicts.ts";
 import { createMergeConflictsWorkflow } from "./subagents/workflows/merge-conflicts.ts";
@@ -45,27 +42,39 @@ import appendSystemPrompt from "../APPEND_SYSTEM.md" with { type: "text" };
 const agentDir = getAgentDir();
 const store = { stateDir: agentDir };
 const sourceCwd = process.cwd();
-let selectedWorkspace: Awaited<ReturnType<typeof selectWorkspace>> | undefined;
-try {
-  const launchCommand = parseLaunchCommand(process.argv.slice(2));
-  selectedWorkspace =
-    launchCommand.kind === "goto"
-      ? await selectWorkspace({ store, cwd: sourceCwd, branch: launchCommand.branch })
-      : undefined;
-} catch (error) {
-  if (!(error instanceof LaunchError)) throw error;
-  console.error(`coder: ${error.message}`);
-  process.exit(1);
+const sessionPointerStore = createSessionPointerStore(agentDir);
+const startup = await (async () => {
+  try {
+    const launchCommand = parseLaunchCommand(process.argv.slice(2));
+    return await prepareWorkspaceStartup({
+      store,
+      sourceCwd,
+      launchCommand,
+      sessionPointers: sessionPointerStore,
+    });
+  } catch (error) {
+    if (!(error instanceof LaunchError)) throw error;
+    console.error(`coder: ${error.message}`);
+    process.exit(1);
+  }
+})();
+for (const removed of startup.reconciliation.removed) {
+  const pullRequest = removed.prNumber === undefined ? "" : ` (PR #${removed.prNumber})`;
+  console.log(`Removed merged workspace ${removed.branch}${pullRequest}.`);
 }
-const runtimeCwd =
-  selectedWorkspace?.workspace.worktree ?? (await resolveRegularCheckout(sourceCwd));
+for (const retained of startup.reconciliation.retained) {
+  if (retained.actionable) {
+    console.error(`Could not clean up workspace ${retained.branch}: ${retained.reason}.`);
+  }
+}
+const selectedWorkspace = startup.selectedWorkspace;
+const runtimeCwd = selectedWorkspace?.workspace.worktree ?? startup.primaryCheckout;
 const assertWorkspace = async (cwd: string) =>
   selectedWorkspace
     ? assertOwnedWorkspace(selectedWorkspace.workspace, cwd)
     : assertWorkspacePath(runtimeCwd, cwd);
 await assertWorkspace(runtimeCwd);
 
-const sessionPointerStore = createSessionPointerStore(agentDir);
 const currentSessionFile = await sessionPointerStore.read(runtimeCwd);
 const sessionManager =
   currentSessionFile && (await sessionFileExists(currentSessionFile))

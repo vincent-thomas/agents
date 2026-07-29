@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
@@ -10,6 +10,7 @@ interface SessionPointer {
 export interface SessionPointerStore {
   read(cwd: string): Promise<string | undefined>;
   write(cwd: string, sessionFile: string): Promise<void>;
+  remove(cwd: string): Promise<void>;
 }
 
 function pointerPath(stateDir: string, cwd: string): string {
@@ -36,6 +37,10 @@ export function createSessionPointerStore(stateDir: string): SessionPointerStore
       const temporaryPath = `${path}.${process.pid}.tmp`;
       await writeFile(temporaryPath, JSON.stringify({ sessionFile }) + "\n");
       await rename(temporaryPath, path);
+    },
+
+    async remove(cwd) {
+      await rm(pointerPath(stateDir, cwd), { force: true });
     },
   };
 }

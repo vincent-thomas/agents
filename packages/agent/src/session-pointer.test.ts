@@ -25,12 +25,31 @@ test("stores one current session for each checkout", async () => {
   }
 });
 
+test("removes only the requested current-session pointer", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "session-pointer-remove-"));
+  const store = createSessionPointerStore(stateDir);
+
+  try {
+    await store.write("/repo/one", "/sessions/one.jsonl");
+    await store.write("/repo/two", "/sessions/two.jsonl");
+
+    await store.remove("/repo/one");
+    await store.remove("/repo/missing");
+
+    assert.equal(await store.read("/repo/one"), undefined);
+    assert.equal(await store.read("/repo/two"), "/sessions/two.jsonl");
+  } finally {
+    await rm(stateDir, { recursive: true });
+  }
+});
+
 test("records the replacement session at session start", async () => {
   const writes: Array<[string, string]> = [];
   let sessionStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   const extension = createSessionPointerExtension({
     read: async () => undefined,
     write: async (cwd, sessionFile) => void writes.push([cwd, sessionFile]),
+    remove: async () => undefined,
   });
 
   extension({

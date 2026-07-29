@@ -53,6 +53,12 @@ export const commandPolicyEntries: CommandPolicyEntry[] = [
     command: "sed",
     description: "Use the edit tool for find-and-replace edits.",
   },
+  {
+    name: "rm",
+    status: CommandPolicyStatus.Banned,
+    command: "rm",
+    description: "Use git rm to remove tracked files instead.",
+  },
   { name: "ls", status: CommandPolicyStatus.Allowed, command: "ls" },
   { name: "pwd", status: CommandPolicyStatus.Allowed, command: "pwd" },
   { name: "echo", status: CommandPolicyStatus.Allowed, command: "echo" },

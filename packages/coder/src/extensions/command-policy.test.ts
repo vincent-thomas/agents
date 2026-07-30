@@ -29,6 +29,7 @@ test("keeps Git branch, history, and synchronization behind dedicated workflows"
 
 test("allows explicit Git inspection and worktree checkpoint preparation", () => {
   assert.equal(violation("git status --short"), null);
+  assert.equal(violation("git status --branch"), null);
   assert.equal(violation("git diff --check"), null);
   assert.equal(violation("git log -5"), null);
   assert.equal(violation("git add -- src/index.ts"), null);

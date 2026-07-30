@@ -8,15 +8,23 @@ import {
   type WorkspaceStore,
 } from "./logic.ts";
 
-export type LaunchCommand = { kind: "regular" } | { kind: "goto"; branch?: string };
+export type LaunchCommand =
+  | { kind: "regular" }
+  | { kind: "goto"; branch?: string }
+  | { kind: "delete"; branch: string };
 
 export class LaunchError extends Error {}
 
+const usage = "Usage: coder [goto [branch-name] | goto --delete <branch-name>]";
+
 export function parseLaunchCommand(args: string[]): LaunchCommand {
   if (args.length === 0) return { kind: "regular" };
-  if (args[0] !== "goto" || args.length > 2) {
-    throw new LaunchError("Usage: coder [goto [branch-name]]");
+  if (args[0] !== "goto") throw new LaunchError(usage);
+  if (args[1] === "--delete") {
+    if (args.length !== 3) throw new LaunchError(usage);
+    return { kind: "delete", branch: args[2]! };
   }
+  if (args.length > 2) throw new LaunchError(usage);
   return args[1] === undefined ? { kind: "goto" } : { kind: "goto", branch: args[1] };
 }
 

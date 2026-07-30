@@ -2,6 +2,7 @@ import {
   runGitCommit,
   type RunGitCommitOptions,
 } from "../../extensions/git-commit/orchestration.ts";
+import { refExists } from "../../git-operation.ts";
 import type { SubagentWorkflowFn } from "../catalog.ts";
 import { defaultCommandOutput, type CommandOutputFn } from "../prompts/merge-conflicts.ts";
 
@@ -50,6 +51,10 @@ export function createMergeConflictsWorkflow(
         continue;
       }
 
+      if (!(await refExists("MERGE_HEAD", cwd, commandOutput, signal))) {
+        throw new Error("The merge ended before merge_conflicts could create the merge commit");
+      }
+
       const result = await commit({
         cwd,
         addAll: false,
@@ -61,6 +66,10 @@ export function createMergeConflictsWorkflow(
         onProgress("Required checks or commit failed; resuming the merge resolver…");
         prompt = failedCommitPrompt(result.output);
         continue;
+      }
+
+      if (await refExists("MERGE_HEAD", cwd, commandOutput, signal)) {
+        throw new Error("The commit completed without finishing the in-progress merge");
       }
 
       const report = subagent.session.getLastAssistantText()?.trim();

@@ -110,7 +110,7 @@ export const commandPolicyEntries: CommandPolicyEntry[] = [
     status: CommandPolicyStatus.Allowed,
     command: "git",
     subcommand: [["status"]],
-    allowedFlags: ["--short", "--porcelain", "-s"],
+    allowedFlags: ["--short", "--porcelain", "--branch", "-s"],
   },
   {
     name: "git branch",

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { detectGitOperation, refExists } from "../../git-operation.ts";
 import type { SubagentPromptContext, SubagentPromptFn } from "../catalog.ts";
 
 const execFileAsync = promisify(execFile);
@@ -61,17 +62,8 @@ function processOutput(error: unknown): string {
     .join("\n");
 }
 
-async function hasMergeState(cwd: string, commandOutput: CommandOutputFn): Promise<boolean> {
-  try {
-    await commandOutput("git", ["rev-parse", "--verify", "-q", "MERGE_HEAD"], cwd);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function abortMerge(cwd: string, commandOutput: CommandOutputFn): Promise<void> {
-  if (!(await hasMergeState(cwd, commandOutput))) return;
+  if (!(await refExists("MERGE_HEAD", cwd, commandOutput))) return;
   try {
     await commandOutput("git", ["merge", "--abort"], cwd);
   } catch (error) {
@@ -87,12 +79,21 @@ async function buildMergeConflictsPrompt(
 ): Promise<string> {
   const existingUnmergedEntries = await commandOutput("git", ["ls-files", "-u"], cwd, signal);
   if (existingUnmergedEntries.trim() !== "") {
+    const operation = await detectGitOperation(cwd, commandOutput, signal);
+    if (operation !== "merge") {
+      throw new Error(
+        operation === "none"
+          ? "Unmerged index entries exist, but no merge is in progress"
+          : `merge_conflicts cannot continue an in-progress ${operation}`,
+      );
+    }
+
     const [status, conflictDiff] = await Promise.all([
       commandOutput("git", ["status", "--short"], cwd, signal),
       commandOutput("git", ["diff", "--no-ext-diff", "--cc", "--diff-filter=U"], cwd, signal),
     ]);
     return formatMergeConflictsPrompt({
-      targetRef: "the current Git operation",
+      targetRef: "the current merge",
       mergeOutput: "Conflicts were already present when merge_conflicts was invoked.",
       status,
       unmergedEntries: existingUnmergedEntries,

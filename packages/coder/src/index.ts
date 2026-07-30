@@ -67,6 +67,10 @@ for (const retained of startup.reconciliation.retained) {
     console.error(`Could not clean up workspace ${retained.branch}: ${retained.reason}.`);
   }
 }
+if (startup.deletedWorkspace) {
+  console.log(`Deleted workspace ${startup.deletedWorkspace.branch}.`);
+  process.exit(0);
+}
 const selectedWorkspace = startup.selectedWorkspace;
 const runtimeCwd = selectedWorkspace?.workspace.worktree ?? startup.primaryCheckout;
 const assertWorkspace = async (cwd: string) =>

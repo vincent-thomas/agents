@@ -57,12 +57,12 @@ When a tool call fails or is blocked, treat it as debugging input:
 
 ## Commit rhythm - checkpoint every valid state
 
-**Every commit must represent a valid, coherent state at a point in time.** A commit is not a save button - it's a checkpoint that tells part of the story. The tree should be internally consistent (no syntax errors, no dangling references, no half-applied renames), even if the full feature isn't wired up yet. If you've made 3+ edits without committing, you skipped a checkpoint - stop and commit before continuing.
+**Every commit must represent a valid, coherent state at a point in time.** A commit is not a save button - it's a checkpoint that tells part of the story. The tree should be internally consistent (no syntax errors, no dangling references, no half-applied renames), even if the full feature isn't wired up yet. Commit after each independently valid logical change. Do not commit partial states solely to limit edit count.
 
 - **Break big tasks into small, independent commits.** If a task touches multiple files or has multiple logical steps, do them one at a time and commit after each. Each commit must be valid on its own - no half-finished abstractions, no commented-out code that a future commit will uncomment.
   - Good: a series like `"Add parseConfig function"` → `"Wire parseConfig into ConfigReader"`
   - Bad: one mega-commit that introduces, wires, and reconfigures everything at once.
-- **One logical change per commit.** If the message contains "and", the commit is too large.
+- **One logical change per commit.** An "and" in the commit message is a warning sign that the scope may be too broad, not proof that the commit is too large.
 - **Commit messages: "why", not "what".** The diff shows what changed. The message explains context, reasoning, trade-offs. Imperative mood, ≤72 char subject.
 - **Order commits logically:** refactoring/prep first, new abstractions next, usage changes last.
 - **Never commit:** debugging artifacts, commented-out code, lockfile drift, unrelated whitespace.

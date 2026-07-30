@@ -10,6 +10,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { execAsync, extractErrorOutput } from "./exec-async.ts";
+import { shellQuote } from "./shell-quote.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,8 +29,95 @@ export function formatSuccessfulPreChecks(result: PreCheckResult): string {
 }
 
 // ---------------------------------------------------------------------------
-// Pre-check runner
+// Pre-check runners
 // ---------------------------------------------------------------------------
+
+/** Validate the exact repository state that is about to be committed. */
+export async function runGitPreChecks(
+  cwd: string,
+  signal?: AbortSignal,
+  onStep?: (step: PreCheckResult["steps"][0]) => void,
+): Promise<PreCheckResult> {
+  const steps: PreCheckResult["steps"] = [];
+
+  const report = (command: string, passed: boolean, output: string, start: number) => {
+    const step = {
+      command,
+      passed,
+      output,
+      elapsed: ((Date.now() - start) / 1000).toFixed(1),
+    };
+    steps.push(step);
+    onStep?.(step);
+    return step;
+  };
+
+  let start = Date.now();
+  try {
+    const { stdout, stderr } = await execAsync("git ls-files -u", {
+      cwd,
+      timeout: 15_000,
+      signal,
+    });
+    if (stdout.trim()) {
+      report("git ls-files -u", false, stdout + stderr, start);
+      return { passed: false, steps };
+    }
+    report("git ls-files -u", true, stdout + stderr, start);
+  } catch (error: unknown) {
+    report("git ls-files -u", false, extractErrorOutput(error), start);
+    return { passed: false, steps };
+  }
+
+  for (const command of ["git diff --check", "git diff --cached --check"]) {
+    start = Date.now();
+    try {
+      const { stdout, stderr } = await execAsync(command, { cwd, timeout: 15_000, signal });
+      report(command, true, stdout + stderr, start);
+    } catch (error: unknown) {
+      report(command, false, extractErrorOutput(error), start);
+      return { passed: false, steps };
+    }
+  }
+
+  const markerCommand = "conflict-marker scan";
+  start = Date.now();
+  let changedPaths: string[];
+  try {
+    const { stdout } = await execAsync("git diff --cached --name-only --diff-filter=ACMR -z", {
+      cwd,
+      timeout: 15_000,
+      signal,
+    });
+    changedPaths = stdout.split("\0").filter(Boolean);
+  } catch (error: unknown) {
+    report(markerCommand, false, extractErrorOutput(error), start);
+    return { passed: false, steps };
+  }
+
+  if (changedPaths.length === 0) {
+    report(markerCommand, true, "", start);
+    return { passed: true, steps };
+  }
+
+  const markerPattern = "^(<<<<<<<($| )|=======$|>>>>>>>($| ))";
+  const command =
+    `git grep --cached -n -I -E ${shellQuote(markerPattern)} -- ` +
+    changedPaths.map(shellQuote).join(" ");
+  try {
+    const { stdout, stderr } = await execAsync(command, { cwd, timeout: 15_000, signal });
+    report(markerCommand, false, stdout + stderr, start);
+    return { passed: false, steps };
+  } catch (error: unknown) {
+    const exitCode = (error as { code?: number | string }).code;
+    if (exitCode === 1) {
+      report(markerCommand, true, "", start);
+      return { passed: true, steps };
+    }
+    report(markerCommand, false, extractErrorOutput(error), start);
+    return { passed: false, steps };
+  }
+}
 
 /**
  * Run `make` as a pre-check if a Makefile exists and make is available.

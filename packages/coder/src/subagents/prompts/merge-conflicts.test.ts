@@ -67,12 +67,13 @@ test("aborts a clean no-commit merge", async () => {
   assert.equal(calls.filter((call) => call === "git merge --abort").length, 1);
 });
 
-test("adopts conflicts from an existing Git operation", async () => {
+test("adopts conflicts from an existing merge", async () => {
   const calls: string[] = [];
   const commandOutput: CommandOutputFn = async (command, args) => {
     const call = `${command} ${args.join(" ")}`;
     calls.push(call);
     if (call === "git ls-files -u") return "100644 abc 2\tsrc/index.ts\n";
+    if (call === "git rev-parse --verify -q MERGE_HEAD") return "merge-head\n";
     if (call === "git status --short") return "UU src/index.ts\n";
     if (call === "git diff --no-ext-diff --cc --diff-filter=U") {
       return "diff --cc src/index.ts\n";
@@ -85,10 +86,28 @@ test("adopts conflicts from an existing Git operation", async () => {
     definition: {} as never,
   });
 
-  assert.match(prompt, /current Git operation/);
+  assert.match(prompt, /current merge/);
   assert.match(prompt, /Conflicts were already present/);
   assert.ok(!calls.some((call) => call.startsWith("gh ")));
   assert.ok(!calls.some((call) => call.startsWith("git merge ")));
+});
+
+test("rejects conflicts outside a merge", async () => {
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    if (call === "git ls-files -u") return "100644 abc 2\tsrc/index.ts\n";
+    if (call === "git rev-parse --verify -q MERGE_HEAD") throw new Error("missing");
+    if (call === "git rev-parse --verify -q CHERRY_PICK_HEAD") return "cherry-pick-head\n";
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  await assert.rejects(
+    createMergeConflictsPrompt(commandOutput)({
+      cwd: "/repo",
+      definition: {} as never,
+    }),
+    /merge_conflicts cannot continue an in-progress cherry-pick/,
+  );
 });
 
 test("includes exact Git conflict output without parent instructions", () => {

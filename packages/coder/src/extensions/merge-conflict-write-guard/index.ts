@@ -1,8 +1,21 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { detectGitOperation, type GitOperation } from "../../git-operation.ts";
 
-const BLOCK_REASON =
-  "Unresolved Git conflicts are present. Use the merge_conflicts sub-agent to resolve them before calling write.";
+export function mergeConflictWriteBlockReason(operation: GitOperation): string {
+  switch (operation) {
+    case "merge":
+      return "Unresolved merge conflicts are present. Use merge_conflicts before calling write.";
+    case "rebase":
+      return "A rebase conflict is in progress; resolve it outside this merge-only workflow before calling write.";
+    case "cherry-pick":
+      return "A cherry-pick conflict is in progress; resolve it outside this merge-only workflow before calling write.";
+    case "revert":
+      return "A revert conflict is in progress; resolve it outside this merge-only workflow before calling write.";
+    case "none":
+      return "The index contains unmerged entries without a recognized Git operation; resolve them before calling write.";
+  }
+}
 
 export function mergeConflictWriteGuardExtension(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
@@ -17,7 +30,21 @@ export function mergeConflictWriteGuardExtension(pi: ExtensionAPI) {
     });
     if (result.code !== 0 || result.stdout.trim() === "") return;
 
-    if (ctx.hasUI) ctx.ui.notify(BLOCK_REASON, "warning");
-    return { block: true, reason: BLOCK_REASON };
+    const operation = await detectGitOperation(
+      ctx.cwd,
+      async (command, args, cwd, signal) => {
+        const operationResult = await pi.exec(command, args, {
+          cwd,
+          signal,
+          timeout: 5_000,
+        });
+        if (operationResult.code !== 0) throw new Error(operationResult.stderr);
+        return operationResult.stdout;
+      },
+      ctx.signal,
+    );
+    const blockReason = mergeConflictWriteBlockReason(operation);
+    if (ctx.hasUI) ctx.ui.notify(blockReason, "warning");
+    return { block: true, reason: blockReason };
   });
 }

@@ -13,7 +13,11 @@ import {
   type AgentWorkspace,
   type WorkspaceStore,
 } from "./logic.ts";
-import { reconcileMergedWorkspaces, type MergedPullRequest } from "./reconcile.ts";
+import {
+  reconcileMergedWorkspaces,
+  removeWorkspaceByBranch,
+  type MergedPullRequest,
+} from "./reconcile.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -96,6 +100,35 @@ test("removes every artifact for a clean merged workspace", async () => {
     assert.equal(existsSync(workspace.sessionFile!), false);
     assert.equal(await pointers.read(workspace.worktree), undefined);
     assert.deepEqual(await records(store, repo), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("removes every artifact for an explicitly deleted branch workspace", async () => {
+  const { root, repo, store, pointers, cleanup } = fixture();
+  try {
+    const workspace = await attachSession(
+      store,
+      pointers,
+      await createWorkspace(store, repo, "feature/delete"),
+      root,
+    );
+
+    const removed = await removeWorkspaceByBranch(
+      { store, cwd: repo, sessionPointers: pointers },
+      workspace.branch,
+    );
+
+    assert.deepEqual(removed, { workspaceId: workspace.id, branch: workspace.branch });
+    assert.equal(existsSync(workspace.worktree), false);
+    assert.equal(existsSync(workspace.sessionFile!), false);
+    assert.equal(await pointers.read(workspace.worktree), undefined);
+    assert.deepEqual(await records(store, repo), []);
+    assert.equal(
+      git(repo, "show-ref", "--verify", `refs/heads/${workspace.branch}`).length > 0,
+      true,
+    );
   } finally {
     cleanup();
   }

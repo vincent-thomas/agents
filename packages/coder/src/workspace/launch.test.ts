@@ -26,11 +26,17 @@ test("parses regular and goto launches", () => {
     kind: "goto",
     branch: "feature/parser",
   });
+  assert.deepEqual(parseLaunchCommand(["goto", "--delete", "feature/parser"]), {
+    kind: "delete",
+    branch: "feature/parser",
+  });
   assert.throws(
     () => parseLaunchCommand(["--resume"]),
     (error) =>
-      error instanceof LaunchError && error.message === "Usage: coder [goto [branch-name]]",
+      error instanceof LaunchError &&
+      error.message === "Usage: coder [goto [branch-name] | goto --delete <branch-name>]",
   );
+  assert.throws(() => parseLaunchCommand(["goto", "--delete"]), LaunchError);
   assert.throws(() => parseLaunchCommand(["goto", "one", "two"]), LaunchError);
 });
 
@@ -64,6 +70,9 @@ test("reconciles the primary checkout before workspace selection", async () => {
         available = available.filter((candidate) => candidate.id !== existing.id);
         return { removed: [{ workspaceId: existing.id, branch: existing.branch }], retained: [] };
       },
+      removeWorkspaceByBranch: async () => {
+        throw new Error("must not delete");
+      },
       selectWorkspace: async (options) => {
         calls.push(`select:${options.cwd}`);
         assert.deepEqual(available, [remaining]);
@@ -74,6 +83,69 @@ test("reconciles the primary checkout before workspace selection", async () => {
 
   assert.deepEqual(calls, ["resolve", "reconcile:/primary", "select:/primary"]);
   assert.equal(result.selectedWorkspace?.workspace.id, "remaining");
+});
+
+test("deletes a branch workspace without reconciling or selecting", async () => {
+  const calls: string[] = [];
+  const deleted = workspace("deleted", "2026-01-02T00:00:00.000Z");
+  const result = await prepareWorkspaceStartup({
+    store: {} as WorkspaceStore,
+    sourceCwd: "/managed/worktree",
+    launchCommand: { kind: "delete", branch: deleted.branch },
+    sessionPointers: {
+      read: async () => undefined,
+      write: async () => undefined,
+      remove: async () => undefined,
+    },
+    dependencies: {
+      resolveRegularCheckout: async () => "/primary",
+      reconcileMergedWorkspaces: async () => {
+        throw new Error("must not reconcile");
+      },
+      removeWorkspaceByBranch: async (options, branch) => {
+        calls.push(`${options.cwd}:${branch}`);
+        return { workspaceId: deleted.id, branch: deleted.branch };
+      },
+      selectWorkspace: async () => {
+        throw new Error("must not select");
+      },
+    },
+  });
+
+  assert.deepEqual(calls, [`/primary:${deleted.branch}`]);
+  assert.deepEqual(result.deletedWorkspace, {
+    workspaceId: deleted.id,
+    branch: deleted.branch,
+  });
+  assert.deepEqual(result.reconciliation, { removed: [], retained: [] });
+});
+
+test("rejects deletion when the branch has no workspace", async () => {
+  await assert.rejects(
+    prepareWorkspaceStartup({
+      store: {} as WorkspaceStore,
+      sourceCwd: "/repo",
+      launchCommand: { kind: "delete", branch: "feature/missing" },
+      sessionPointers: {
+        read: async () => undefined,
+        write: async () => undefined,
+        remove: async () => undefined,
+      },
+      dependencies: {
+        resolveRegularCheckout: async () => "/repo",
+        reconcileMergedWorkspaces: async () => {
+          throw new Error("must not reconcile");
+        },
+        removeWorkspaceByBranch: async () => undefined,
+        selectWorkspace: async () => {
+          throw new Error("must not select");
+        },
+      },
+    }),
+    (error) =>
+      error instanceof LaunchError &&
+      error.message === "No workspace exists for branch feature/missing.",
+  );
 });
 
 test("goto without a branch rejects when no active workspace exists", async () => {

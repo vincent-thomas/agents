@@ -238,6 +238,17 @@ async function reconcileWorkspace(
   }
 }
 
+export async function removeWorkspaceByBranch(
+  options: ReconcileMergedWorkspacesOptions,
+  branch: string,
+): Promise<WorkspaceReconciliationEntry | undefined> {
+  const repository = await resolveRepository(options.cwd);
+  const workspace = (await listWorkspaces(options.store, repository.repository)).find(
+    (candidate) => candidate.branch === branch,
+  );
+  return workspace ? finishCleanup(options, workspace) : undefined;
+}
+
 export async function reconcileMergedWorkspaces(
   options: ReconcileMergedWorkspacesOptions,
 ): Promise<WorkspaceReconciliationResult> {

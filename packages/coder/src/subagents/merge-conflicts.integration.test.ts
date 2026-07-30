@@ -133,6 +133,40 @@ suite("merge-only conflict workflow in real repositories", () => {
     }),
   );
 
+  test(
+    "fails safely when MERGE_HEAD disappears before commit",
+    withConflict("merge", async (cwd) => {
+      const headBefore = git(cwd, ["rev-parse", "HEAD"]);
+      const mergeHeadPath = git(cwd, ["rev-parse", "--git-path", "MERGE_HEAD"]).trim();
+      const workflow = createMergeConflictsWorkflow({ assertWorkspace: async () => {} });
+
+      await assert.rejects(
+        workflow({
+          cwd,
+          definition,
+          prompt: "Resolve the conflict.",
+          subagent: {
+            definition,
+            session: {
+              async prompt() {
+                writeFileSync(join(cwd, "conflict.txt"), "resolved\n");
+                git(cwd, ["add", "conflict.txt"]);
+                unlinkSync(join(cwd, mergeHeadPath));
+              },
+              getLastAssistantText() {
+                return "Resolved the conflict.";
+              },
+            } as never,
+            dispose() {},
+          },
+          onProgress() {},
+        }),
+        /merge ended before merge_conflicts could create the merge commit/,
+      );
+      assert.equal(git(cwd, ["rev-parse", "HEAD"]), headBefore);
+    }),
+  );
+
   for (const [operation, message] of [
     ["rebase", "merge_conflicts cannot continue an in-progress rebase"],
     ["cherry-pick", "merge_conflicts cannot continue an in-progress cherry-pick"],

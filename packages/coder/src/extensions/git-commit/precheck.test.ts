@@ -5,7 +5,8 @@
  */
 import assert from "node:assert/strict";
 import { test, suite } from "node:test";
-import { formatSuccessfulPreChecks, runPreChecks } from "./precheck.ts";
+import { formatSuccessfulPreChecks, runGitPreChecks, runPreChecks } from "./precheck.ts";
+import { execSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -19,6 +20,24 @@ function withTmpDir(fn: (dir: string) => void | Promise<void>): () => Promise<vo
       rmSync(dir, { recursive: true, force: true });
     }
   };
+}
+
+function git(command: string, cwd: string): string {
+  return execSync(command, { cwd, stdio: ["pipe", "pipe", "pipe"] })
+    .toString()
+    .trim();
+}
+
+function withGitRepo(fn: (dir: string) => void | Promise<void>): () => Promise<void> {
+  return withTmpDir(async (dir) => {
+    git("git init", dir);
+    git("git config user.email test@test.com", dir);
+    git("git config user.name test", dir);
+    writeFileSync(join(dir, "tracked.txt"), "initial\n");
+    git("git add tracked.txt", dir);
+    git("git commit -m init", dir);
+    await fn(dir);
+  });
 }
 
 suite("runPreChecks", () => {
@@ -80,6 +99,85 @@ suite("runPreChecks", () => {
       const result = await runPreChecks(dir, undefined, (step) => seen.push(step));
       assert.equal(seen.length, 1);
       assert.deepEqual(seen[0], result.steps[0]);
+    }),
+  );
+});
+
+suite("runGitPreChecks", () => {
+  test(
+    "passes a clean staged change",
+    withGitRepo(async (dir) => {
+      writeFileSync(join(dir, "tracked.txt"), "changed\n");
+      git("git add tracked.txt", dir);
+
+      const result = await runGitPreChecks(dir);
+
+      assert.equal(result.passed, true);
+      assert.deepEqual(
+        result.steps.map((step) => step.command),
+        [
+          "git ls-files -u",
+          "git diff --check",
+          "git diff --cached --check",
+          "conflict-marker scan",
+        ],
+      );
+    }),
+  );
+
+  test(
+    "rejects unmerged index entries",
+    withGitRepo(async (dir) => {
+      git("git checkout -b conflicting", dir);
+      writeFileSync(join(dir, "tracked.txt"), "branch\n");
+      git("git commit -am branch", dir);
+      git("git checkout -", dir);
+      writeFileSync(join(dir, "tracked.txt"), "main\n");
+      git("git commit -am main", dir);
+      try {
+        git("git merge conflicting", dir);
+      } catch {
+        // The conflict is the state under test.
+      }
+
+      const result = await runGitPreChecks(dir);
+
+      assert.equal(result.passed, false);
+      assert.equal(result.steps.at(-1)?.command, "git ls-files -u");
+      assert.match(result.steps.at(-1)?.output ?? "", /tracked\.txt/);
+    }),
+  );
+
+  test(
+    "rejects whitespace errors",
+    withGitRepo(async (dir) => {
+      writeFileSync(join(dir, "tracked.txt"), "trailing whitespace \n");
+
+      const result = await runGitPreChecks(dir);
+
+      assert.equal(result.passed, false);
+      assert.equal(result.steps.at(-1)?.command, "git diff --check");
+      assert.match(result.steps.at(-1)?.output ?? "", /trailing whitespace/);
+    }),
+  );
+
+  test(
+    "rejects conflict markers in changed staged text files",
+    withGitRepo(async (dir) => {
+      writeFileSync(join(dir, "tracked.txt"), "<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> side\n");
+      git("git add tracked.txt", dir);
+      git("git commit -m fixture", dir);
+      writeFileSync(
+        join(dir, "tracked.txt"),
+        "<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> side\nchanged\n",
+      );
+      git("git add tracked.txt", dir);
+
+      const result = await runGitPreChecks(dir);
+
+      assert.equal(result.passed, false);
+      assert.equal(result.steps.at(-1)?.command, "conflict-marker scan");
+      assert.match(result.steps.at(-1)?.output ?? "", /<<<<<<< HEAD/);
     }),
   );
 });

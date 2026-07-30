@@ -1,7 +1,7 @@
 import { execAsync, extractErrorOutput } from "./exec-async.ts";
 import { currentBranch, hasUpstream } from "./git-utils.ts";
 import { branchExistsOnRemote, gitCommit, isDefaultBranch } from "./logic.ts";
-import { formatSuccessfulPreChecks, runPreChecks } from "./precheck.ts";
+import { formatSuccessfulPreChecks, runGitPreChecks, runPreChecks } from "./precheck.ts";
 
 export interface RunGitCommitOptions {
   cwd: string;
@@ -79,6 +79,28 @@ export async function runGitCommit(options: RunGitCommitOptions): Promise<RunGit
         output: `Staging failed:\n\`\`\`\n${extractErrorOutput(error)}\n\`\`\``,
       };
     }
+  }
+
+  const gitPreCheck = await runGitPreChecks(cwd, signal, (step) => {
+    const icon = step.passed ? "✅" : "❌";
+    const time = step.elapsed ? ` (${step.elapsed}s)` : "";
+    completedSteps.push(`${icon} ${step.command}${time}`);
+    options.onProgress?.(completedSteps.join("\n"));
+  });
+
+  if (!gitPreCheck.passed) {
+    const failedStep = gitPreCheck.steps.find((step) => !step.passed)!;
+    const passedSteps = gitPreCheck.steps
+      .filter((step) => step.passed)
+      .map((step) => `✅ ${step.command}`)
+      .join("\n");
+    return {
+      success: false,
+      output:
+        "Pre-commit check failed. Fix the errors before committing.\n\n" +
+        (passedSteps ? `${passedSteps}\n` : "") +
+        `❌ \`${failedStep.command}\`:\n\`\`\`\n${failedStep.output}\n\`\`\``,
+    };
   }
 
   completedSteps.push("Committing…");

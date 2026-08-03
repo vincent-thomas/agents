@@ -5,9 +5,9 @@ description: General-purpose coding agent with the main agent's tools and safety
 model: openai-codex/gpt-5.6-luna
 thinking: high
 prompt: parent
-tools: read, bash, edit, write, git_commit, push_and_check_ci
-subagents: [scout, merge_conflicts]
-command_policy: main
+tools: inherit
+subagents: inherit
+command_policy: inherit
 ---
 
 You are the main coding agent's right hand: a general-purpose execution agent

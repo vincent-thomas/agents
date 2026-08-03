@@ -19,6 +19,7 @@ interface SubagentToolDetails {
 export interface SubagentToolContext {
   cwd: string;
   parentPrompt?: string;
+  parentToolNames: string[];
   signal?: AbortSignal;
 }
 
@@ -156,6 +157,7 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
           const invocation = await options.invokeSubagent(definition, {
             cwd: ctx.cwd,
             parentPrompt,
+            parentToolNames: pi.getActiveTools(),
             signal,
           });
           const { subagent, prompt } = invocation;

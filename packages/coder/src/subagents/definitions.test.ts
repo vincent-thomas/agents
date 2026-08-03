@@ -45,16 +45,11 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   const rightHand = definitions.find((definition) => definition.name === "right_hand")!;
   assert.equal(rightHand.model, "openai-codex/gpt-5.6-luna");
   assert.equal(rightHand.thinking, "high");
-  assert.equal(rightHand.commandPolicySource, "main");
-  assert.deepEqual(rightHand.subagents, ["scout", "merge_conflicts"]);
-  assert.deepEqual(rightHand.tools, [
-    "read",
-    "bash",
-    "edit",
-    "write",
-    "git_commit",
-    "push_and_check_ci",
-  ]);
+  assert.equal(rightHand.inheritTools, true);
+  assert.equal(rightHand.inheritSubagents, true);
+  assert.equal(rightHand.inheritCommandPolicy, true);
+  assert.deepEqual(rightHand.tools, []);
+  assert.deepEqual(rightHand.subagents, []);
 });
 
 test("parses frontmatter as metadata and the body as the system prompt", () => {
@@ -66,8 +61,11 @@ test("parses frontmatter as metadata and the body as the system prompt", () => {
     thinking: "low",
     prompt: "parent",
     tools: ["read", "grep", "find", "ls"],
+    inheritTools: false,
     subagents: [],
+    inheritSubagents: false,
     commandPolicy: [],
+    inheritCommandPolicy: false,
     maxTurns: 15,
     systemPrompt: "You are a read-only codebase scout.",
     filePath: "scout.md",
@@ -111,11 +109,18 @@ test("rejects missing nested agents and cycles", () => {
   );
 });
 
-test("parses a named command policy", () => {
-  const definition = validDefinition.replace("maxTurns: 15", "command_policy: main\nmaxTurns: 15");
+test("parses inherited tools, sub-agents, and command policy", () => {
+  const definition = validDefinition
+    .replace("tools: read, grep, find, ls", "tools: inherit")
+    .replace("subagents: []", "subagents: inherit")
+    .replace("maxTurns: 15", "command_policy: inherit\nmaxTurns: 15");
 
   const parsed = parseSubagentDefinition(definition, "worker.md");
-  assert.equal(parsed.commandPolicySource, "main");
+  assert.equal(parsed.inheritTools, true);
+  assert.equal(parsed.inheritSubagents, true);
+  assert.equal(parsed.inheritCommandPolicy, true);
+  assert.deepEqual(parsed.tools, []);
+  assert.deepEqual(parsed.subagents, []);
   assert.deepEqual(parsed.commandPolicy, []);
 });
 

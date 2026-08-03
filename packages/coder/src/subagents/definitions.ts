@@ -29,9 +29,11 @@ export interface SubagentDefinition {
   thinking: SubagentThinkingLevel;
   prompt: string;
   tools: string[];
+  inheritTools: boolean;
   subagents: string[];
+  inheritSubagents: boolean;
   commandPolicy: CommandPolicyEntry[];
-  commandPolicySource?: string;
+  inheritCommandPolicy: boolean;
   maxTurns?: number;
   systemPrompt: string;
   filePath: string;
@@ -80,37 +82,42 @@ function stringArray(
   return value.map((item) => item.trim());
 }
 
-function parseSubagentNames(value: unknown, filePath: string): string[] {
-  if (value === undefined) return [];
+function parseSubagentNames(
+  value: unknown,
+  filePath: string,
+): { names: string[]; inherit: boolean } {
+  if (value === "inherit") return { names: [], inherit: true };
+  if (value === undefined) return { names: [], inherit: false };
   if (!Array.isArray(value)) {
-    throw definitionError(filePath, "frontmatter field 'subagents' must be an array");
+    throw definitionError(filePath, "frontmatter field 'subagents' must be an array or 'inherit'");
   }
 
   const names = new Set<string>();
-  return value.map((rawName) => {
-    if (typeof rawName !== "string" || !AGENT_NAME.test(rawName)) {
-      throw definitionError(filePath, `'${String(rawName)}' is not a valid sub-agent name`);
-    }
-    if (names.has(rawName)) {
-      throw definitionError(filePath, `sub-agent '${rawName}' is listed more than once`);
-    }
-    names.add(rawName);
-    return rawName;
-  });
+  return {
+    names: value.map((rawName) => {
+      if (typeof rawName !== "string" || !AGENT_NAME.test(rawName)) {
+        throw definitionError(filePath, `'${String(rawName)}' is not a valid sub-agent name`);
+      }
+      if (names.has(rawName)) {
+        throw definitionError(filePath, `sub-agent '${rawName}' is listed more than once`);
+      }
+      names.add(rawName);
+      return rawName;
+    }),
+    inherit: false,
+  };
 }
 
 function parseCommandPolicy(
   value: unknown,
   filePath: string,
-): { entries: CommandPolicyEntry[]; source?: string } {
-  if (value === undefined) return { entries: [] };
-  if (typeof value === "string" && value.trim() !== "") {
-    return { entries: [], source: value.trim() };
-  }
+): { entries: CommandPolicyEntry[]; inherit: boolean } {
+  if (value === "inherit") return { entries: [], inherit: true };
+  if (value === undefined) return { entries: [], inherit: false };
   if (!Array.isArray(value)) {
     throw definitionError(
       filePath,
-      "frontmatter field 'command_policy' must be an array or a named policy",
+      "frontmatter field 'command_policy' must be an array or 'inherit'",
     );
   }
 
@@ -179,6 +186,7 @@ function parseCommandPolicy(
       if (bannedFlags) return { ...base, status, bannedFlags };
       return { ...base, status };
     }),
+    inherit: false,
   };
 }
 
@@ -204,11 +212,15 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
     throw definitionError(filePath, `unsupported thinking level '${thinking}'`);
   }
 
-  const tools = requiredString(frontmatter, "tools", filePath)
-    .split(",")
-    .map((tool) => tool.trim())
-    .filter(Boolean);
-  if (tools.length === 0) {
+  const rawTools = requiredString(frontmatter, "tools", filePath);
+  const inheritTools = rawTools === "inherit";
+  const tools = inheritTools
+    ? []
+    : rawTools
+        .split(",")
+        .map((tool) => tool.trim())
+        .filter(Boolean);
+  if (!inheritTools && tools.length === 0) {
     throw definitionError(filePath, "frontmatter field 'tools' must not be empty");
   }
   const uniqueTools = new Set<string>();
@@ -235,6 +247,7 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
     throw definitionError(filePath, "frontmatter field 'maxTurns' must be a positive integer");
   }
 
+  const subagents = parseSubagentNames(frontmatter.subagents, filePath);
   const commandPolicy = parseCommandPolicy(frontmatter.command_policy, filePath);
   const systemPrompt = body.trim();
   if (systemPrompt === "") {
@@ -249,9 +262,11 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
     thinking: thinking as SubagentThinkingLevel,
     prompt: requiredString(frontmatter, "prompt", filePath),
     tools,
-    subagents: parseSubagentNames(frontmatter.subagents, filePath),
+    inheritTools,
+    subagents: subagents.names,
+    inheritSubagents: subagents.inherit,
     commandPolicy: commandPolicy.entries,
-    ...(commandPolicy.source === undefined ? {} : { commandPolicySource: commandPolicy.source }),
+    inheritCommandPolicy: commandPolicy.inherit,
     ...(maxTurns === undefined ? {} : { maxTurns }),
     systemPrompt,
     filePath,

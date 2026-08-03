@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createSubagentCatalog } from "./catalog.ts";
+import { createSubagentCatalog, resolveInheritedDefinition } from "./catalog.ts";
 
 test("requires code-owned functions for generated prompt sources", () => {
   assert.throws(
@@ -16,7 +16,7 @@ test("requires code-owned functions for generated prompt sources", () => {
   );
 });
 
-test("requires code-owned named command policies", () => {
+test("requires the host policy for inherited command policies", () => {
   assert.throws(
     () =>
       createSubagentCatalog({
@@ -28,11 +28,11 @@ test("requires code-owned named command policies", () => {
         getModelFn: () => ({}) as never,
         promptFns: { merge_conflicts: () => "resolve conflicts" },
       }),
-    /Unknown command policy 'main'/,
+    /No inherited command policy supplied/,
   );
 });
 
-test("resolves named command policies supplied by the host", () => {
+test("accepts an inherited command policy supplied by the host", () => {
   const mainPolicy = [{ name: "make", status: "allowed" as const, command: "make" }];
   const catalog = createSubagentCatalog({
     paths: [
@@ -42,13 +42,20 @@ test("resolves named command policies supplied by the host", () => {
     ],
     getModelFn: () => ({}) as never,
     promptFns: { merge_conflicts: () => "resolve conflicts" },
-    commandPolicies: { main: mainPolicy },
+    inheritedCommandPolicy: mainPolicy,
   });
 
-  assert.equal(
-    catalog.definitions.find((definition) => definition.name === "right_hand")!.commandPolicy,
-    mainPolicy,
-  );
+  const rightHand = catalog.definitions.find((definition) => definition.name === "right_hand")!;
+  const resolved = resolveInheritedDefinition({
+    definition: rightHand,
+    parentToolNames: ["read", "bash", "git_commit", "scout", "merge_conflicts", "right_hand"],
+    subagentNames: new Set(["scout", "merge_conflicts", "right_hand"]),
+    inheritedCommandPolicy: mainPolicy,
+  });
+
+  assert.deepEqual(resolved.tools, ["read", "bash", "git_commit"]);
+  assert.deepEqual(resolved.subagents, ["scout", "merge_conflicts"]);
+  assert.equal(resolved.commandPolicy, mainPolicy);
 });
 
 test("resolves frontmatter models through the supplied provider lookup", () => {

@@ -26,7 +26,7 @@ export interface CreateSubagentCatalogOptions {
   getModelFn(provider: string, model: string): Model<any>;
   promptFns?: Record<string, SubagentPromptFn>;
   workflowFns?: Record<string, SubagentWorkflowFn>;
-  commandPolicies?: Record<string, CommandPolicyEntry[]>;
+  inheritedCommandPolicy?: CommandPolicyEntry[];
   extensionFactories?: ExtensionFactory[];
   customTools?: ToolDefinition[];
 }
@@ -37,6 +37,7 @@ export interface CreateCatalogSubagentOptions {
   agentDir?: string;
   extensionFactories?: ExtensionFactory[];
   customTools?: ToolDefinition[];
+  parentToolNames?: string[];
   signal?: AbortSignal;
 }
 
@@ -47,17 +48,39 @@ export interface SubagentCatalog {
   createToolsExtension(names?: string[]): ExtensionFactory;
 }
 
+export function resolveInheritedDefinition(options: {
+  definition: SubagentDefinition;
+  parentToolNames?: string[];
+  subagentNames: ReadonlySet<string>;
+  inheritedCommandPolicy?: CommandPolicyEntry[];
+}): SubagentDefinition {
+  const { definition, parentToolNames, subagentNames } = options;
+  if ((definition.inheritTools || definition.inheritSubagents) && !parentToolNames) {
+    throw new Error(
+      `Inherited capabilities require a parent tool context for '${definition.name}'`,
+    );
+  }
+
+  const inherited = parentToolNames ?? [];
+  return {
+    ...definition,
+    tools: definition.inheritTools
+      ? inherited.filter((name) => !subagentNames.has(name))
+      : definition.tools,
+    subagents: definition.inheritSubagents
+      ? inherited.filter((name) => name !== definition.name && subagentNames.has(name))
+      : definition.subagents,
+    commandPolicy: definition.inheritCommandPolicy
+      ? (options.inheritedCommandPolicy ?? [])
+      : definition.commandPolicy,
+  };
+}
+
 export function createSubagentCatalog(options: CreateSubagentCatalogOptions): SubagentCatalog {
   const definitions = loadSubagentDefinitions(options.paths);
   for (const definition of definitions) {
-    if (definition.commandPolicySource !== undefined) {
-      const commandPolicy = options.commandPolicies?.[definition.commandPolicySource];
-      if (!commandPolicy) {
-        throw new Error(
-          `Unknown command policy '${definition.commandPolicySource}' in ${definition.filePath}`,
-        );
-      }
-      definition.commandPolicy = commandPolicy;
+    if (definition.inheritCommandPolicy && !options.inheritedCommandPolicy) {
+      throw new Error(`No inherited command policy supplied for ${definition.filePath}`);
     }
     if (definition.prompt !== "parent" && !options.promptFns?.[definition.prompt]) {
       throw new Error(`Unknown prompt source '${definition.prompt}' in ${definition.filePath}`);
@@ -65,6 +88,7 @@ export function createSubagentCatalog(options: CreateSubagentCatalogOptions): Su
   }
 
   const byName = new Map(definitions.map((definition) => [definition.name, definition]));
+  const subagentNames = new Set(byName.keys());
   const models = new Map(
     definitions.map((definition) => {
       const separator = definition.model.indexOf("/");
@@ -102,7 +126,13 @@ export function createSubagentCatalog(options: CreateSubagentCatalogOptions): Su
     definition: SubagentDefinition,
     createOptions: CreateCatalogSubagentOptions,
   ): Promise<Subagent> => {
-    const nestedDefinitions = definition.subagents.map(requireDefinition);
+    const resolvedDefinition = resolveInheritedDefinition({
+      definition,
+      parentToolNames: createOptions.parentToolNames,
+      subagentNames,
+      inheritedCommandPolicy: options.inheritedCommandPolicy,
+    });
+    const nestedDefinitions = resolvedDefinition.subagents.map(requireDefinition);
     const nestedExtension =
       nestedDefinitions.length === 0
         ? []
@@ -114,7 +144,7 @@ export function createSubagentCatalog(options: CreateSubagentCatalogOptions): Su
           ];
 
     return createSubagentSession({
-      definition,
+      definition: resolvedDefinition,
       cwd: createOptions.cwd,
       model: models.get(definition.name)!,
       agentDir: createOptions.agentDir,

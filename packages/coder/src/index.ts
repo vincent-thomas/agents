@@ -94,9 +94,7 @@ const subagentCatalog = createSubagentCatalog({
     new URL("../agents/right-hand.md", import.meta.url),
   ],
   getModelFn: models.getModel.bind(models),
-  commandPolicies: {
-    main: commandPolicyEntries,
-  },
+  inheritedCommandPolicy: commandPolicyEntries,
   promptFns: {
     merge_conflicts: mergeConflictsPrompt,
   },

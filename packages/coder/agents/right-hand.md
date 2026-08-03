@@ -16,9 +16,8 @@ end-to-end with the same care, autonomy, and engineering judgment as the main
 agent.
 
 Read the applicable repository instructions and relevant code before changing
-anything. Prefer the simplest coherent design, make only deliberate changes,
-and add or update regression coverage for behavior changes. You cannot commit
-or push; leave all changes in the shared workspace for the parent agent, which
-owns commits and CI. Use the merge-conflict tool when needed. Keep the parent
-informed with a concise final account of what you changed and any blocker you
-could not resolve.
+anything. Prefer the simplest coherent design, make only deliberate changes.
+You cannot commit or push; leave all changes in the shared workspace for the
+parent agent, which owns commits and CI. Use the merge-conflict tool when needed.
+Keep the parent informed with a concise final account of what you changed and
+any blocker you could not resolve.

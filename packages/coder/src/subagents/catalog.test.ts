@@ -16,6 +16,41 @@ test("requires code-owned functions for generated prompt sources", () => {
   );
 });
 
+test("requires code-owned named command policies", () => {
+  assert.throws(
+    () =>
+      createSubagentCatalog({
+        paths: [
+          new URL("../../agents/scout.md", import.meta.url),
+          new URL("../../agents/merge-conflicts.md", import.meta.url),
+          new URL("../../agents/right-hand.md", import.meta.url),
+        ],
+        getModelFn: () => ({}) as never,
+        promptFns: { merge_conflicts: () => "resolve conflicts" },
+      }),
+    /Unknown command policy 'main'/,
+  );
+});
+
+test("resolves named command policies supplied by the host", () => {
+  const mainPolicy = [{ name: "make", status: "allowed" as const, command: "make" }];
+  const catalog = createSubagentCatalog({
+    paths: [
+      new URL("../../agents/scout.md", import.meta.url),
+      new URL("../../agents/merge-conflicts.md", import.meta.url),
+      new URL("../../agents/right-hand.md", import.meta.url),
+    ],
+    getModelFn: () => ({}) as never,
+    promptFns: { merge_conflicts: () => "resolve conflicts" },
+    commandPolicies: { main: mainPolicy },
+  });
+
+  assert.equal(
+    catalog.definitions.find((definition) => definition.name === "right_hand")!.commandPolicy,
+    mainPolicy,
+  );
+});
+
 test("resolves frontmatter models through the supplied provider lookup", () => {
   const requests: Array<[string, string]> = [];
 

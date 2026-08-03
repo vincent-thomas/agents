@@ -25,11 +25,12 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   const definitions = loadSubagentDefinitions([
     new URL("../../agents/scout.md", import.meta.url),
     new URL("../../agents/merge-conflicts.md", import.meta.url),
+    new URL("../../agents/right-hand.md", import.meta.url),
   ]);
 
   assert.deepEqual(
     definitions.map((definition) => definition.name),
-    ["scout", "merge_conflicts"],
+    ["scout", "merge_conflicts", "right_hand"],
   );
   const scout = definitions.find((definition) => definition.name === "scout")!;
   assert.match(scout.description, /factual lookup, not analysis/);
@@ -40,6 +41,20 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   const gitAdd = mergeConflicts.commandPolicy.find((entry) => entry.name === "git add")!;
   assert.ok("allowedFlags" in gitAdd);
   assert.deepEqual(gitAdd.allowedFlags, []);
+
+  const rightHand = definitions.find((definition) => definition.name === "right_hand")!;
+  assert.equal(rightHand.model, "openai-codex/gpt-5.6-luna");
+  assert.equal(rightHand.thinking, "high");
+  assert.equal(rightHand.commandPolicySource, "main");
+  assert.deepEqual(rightHand.subagents, ["scout", "merge_conflicts"]);
+  assert.deepEqual(rightHand.tools, [
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "git_commit",
+    "push_and_check_ci",
+  ]);
 });
 
 test("parses frontmatter as metadata and the body as the system prompt", () => {
@@ -94,6 +109,14 @@ test("rejects missing nested agents and cycles", () => {
       validateSubagentDefinitions([agent("worker", ["reviewer"]), agent("reviewer", ["worker"])]),
     /nested sub-agent cycle: worker -> reviewer -> worker/,
   );
+});
+
+test("parses a named command policy", () => {
+  const definition = validDefinition.replace("maxTurns: 15", "command_policy: main\nmaxTurns: 15");
+
+  const parsed = parseSubagentDefinition(definition, "worker.md");
+  assert.equal(parsed.commandPolicySource, "main");
+  assert.deepEqual(parsed.commandPolicy, []);
 });
 
 test("parses an agent-specific command policy", () => {

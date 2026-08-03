@@ -1,5 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionFactory, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { CommandPolicyEntry } from "@vt-agent/command-policy";
 import { loadSubagentDefinitions, type SubagentDefinition } from "./definitions.ts";
 import { createSubagentToolsExtension, type SubagentInvocation } from "./extension.ts";
 import { createSubagentSession, type Subagent } from "./session.ts";
@@ -25,6 +26,7 @@ export interface CreateSubagentCatalogOptions {
   getModelFn(provider: string, model: string): Model<any>;
   promptFns?: Record<string, SubagentPromptFn>;
   workflowFns?: Record<string, SubagentWorkflowFn>;
+  commandPolicies?: Record<string, CommandPolicyEntry[]>;
   extensionFactories?: ExtensionFactory[];
   customTools?: ToolDefinition[];
 }
@@ -48,6 +50,15 @@ export interface SubagentCatalog {
 export function createSubagentCatalog(options: CreateSubagentCatalogOptions): SubagentCatalog {
   const definitions = loadSubagentDefinitions(options.paths);
   for (const definition of definitions) {
+    if (definition.commandPolicySource !== undefined) {
+      const commandPolicy = options.commandPolicies?.[definition.commandPolicySource];
+      if (!commandPolicy) {
+        throw new Error(
+          `Unknown command policy '${definition.commandPolicySource}' in ${definition.filePath}`,
+        );
+      }
+      definition.commandPolicy = commandPolicy;
+    }
     if (definition.prompt !== "parent" && !options.promptFns?.[definition.prompt]) {
       throw new Error(`Unknown prompt source '${definition.prompt}' in ${definition.filePath}`);
     }

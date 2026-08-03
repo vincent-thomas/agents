@@ -31,6 +31,7 @@ export interface SubagentDefinition {
   tools: string[];
   subagents: string[];
   commandPolicy: CommandPolicyEntry[];
+  commandPolicySource?: string;
   maxTurns?: number;
   systemPrompt: string;
   filePath: string;
@@ -98,76 +99,87 @@ function parseSubagentNames(value: unknown, filePath: string): string[] {
   });
 }
 
-function parseCommandPolicy(value: unknown, filePath: string): CommandPolicyEntry[] {
-  if (value === undefined) return [];
+function parseCommandPolicy(
+  value: unknown,
+  filePath: string,
+): { entries: CommandPolicyEntry[]; source?: string } {
+  if (value === undefined) return { entries: [] };
+  if (typeof value === "string" && value.trim() !== "") {
+    return { entries: [], source: value.trim() };
+  }
   if (!Array.isArray(value)) {
-    throw definitionError(filePath, "frontmatter field 'command_policy' must be an array");
+    throw definitionError(
+      filePath,
+      "frontmatter field 'command_policy' must be an array or a named policy",
+    );
   }
 
-  return value.map((rawEntry, index) => {
-    const field = `command_policy[${index}]`;
-    if (typeof rawEntry !== "object" || rawEntry === null || Array.isArray(rawEntry)) {
-      throw definitionError(filePath, `'${field}' must be an object`);
-    }
-    const entry = rawEntry as Record<string, unknown>;
-    for (const key of Object.keys(entry)) {
-      if (!COMMAND_POLICY_FIELDS.has(key)) {
-        throw definitionError(filePath, `unknown field '${field}.${key}'`);
+  return {
+    entries: value.map((rawEntry, index) => {
+      const field = `command_policy[${index}]`;
+      if (typeof rawEntry !== "object" || rawEntry === null || Array.isArray(rawEntry)) {
+        throw definitionError(filePath, `'${field}' must be an object`);
       }
-    }
-
-    const name = requiredString(entry, "name", filePath);
-    const command = requiredString(entry, "command", filePath);
-    const status = requiredString(entry, "status", filePath);
-    if (status !== "allowed" && status !== "banned") {
-      throw definitionError(filePath, `'${field}.status' must be 'allowed' or 'banned'`);
-    }
-
-    const descriptionValue = entry.description;
-    const description =
-      descriptionValue === undefined ? undefined : requiredString(entry, "description", filePath);
-    const subcommandValue = entry.subcommand;
-    const subcommand =
-      subcommandValue === undefined
-        ? undefined
-        : Array.isArray(subcommandValue) && subcommandValue.length > 0
-          ? subcommandValue.map((part, partIndex) =>
-              stringArray(part, `${field}.subcommand[${partIndex}]`, filePath),
-            )
-          : (() => {
-              throw definitionError(
-                filePath,
-                `'${field}.subcommand' must be a non-empty array of string arrays`,
-              );
-            })();
-    const bannedFlags =
-      entry.bannedFlags === undefined
-        ? undefined
-        : stringArray(entry.bannedFlags, `${field}.bannedFlags`, filePath, true);
-    const allowedFlags =
-      entry.allowedFlags === undefined
-        ? undefined
-        : stringArray(entry.allowedFlags, `${field}.allowedFlags`, filePath, true);
-
-    const base = {
-      name,
-      command,
-      ...(subcommand ? { subcommand } : {}),
-      ...(description ? { description } : {}),
-    };
-    if (status === "banned") {
-      if (bannedFlags || allowedFlags) {
-        throw definitionError(filePath, `'${field}' cannot set flags when status is 'banned'`);
+      const entry = rawEntry as Record<string, unknown>;
+      for (const key of Object.keys(entry)) {
+        if (!COMMAND_POLICY_FIELDS.has(key)) {
+          throw definitionError(filePath, `unknown field '${field}.${key}'`);
+        }
       }
+
+      const name = requiredString(entry, "name", filePath);
+      const command = requiredString(entry, "command", filePath);
+      const status = requiredString(entry, "status", filePath);
+      if (status !== "allowed" && status !== "banned") {
+        throw definitionError(filePath, `'${field}.status' must be 'allowed' or 'banned'`);
+      }
+
+      const descriptionValue = entry.description;
+      const description =
+        descriptionValue === undefined ? undefined : requiredString(entry, "description", filePath);
+      const subcommandValue = entry.subcommand;
+      const subcommand =
+        subcommandValue === undefined
+          ? undefined
+          : Array.isArray(subcommandValue) && subcommandValue.length > 0
+            ? subcommandValue.map((part, partIndex) =>
+                stringArray(part, `${field}.subcommand[${partIndex}]`, filePath),
+              )
+            : (() => {
+                throw definitionError(
+                  filePath,
+                  `'${field}.subcommand' must be a non-empty array of string arrays`,
+                );
+              })();
+      const bannedFlags =
+        entry.bannedFlags === undefined
+          ? undefined
+          : stringArray(entry.bannedFlags, `${field}.bannedFlags`, filePath, true);
+      const allowedFlags =
+        entry.allowedFlags === undefined
+          ? undefined
+          : stringArray(entry.allowedFlags, `${field}.allowedFlags`, filePath, true);
+
+      const base = {
+        name,
+        command,
+        ...(subcommand ? { subcommand } : {}),
+        ...(description ? { description } : {}),
+      };
+      if (status === "banned") {
+        if (bannedFlags || allowedFlags) {
+          throw definitionError(filePath, `'${field}' cannot set flags when status is 'banned'`);
+        }
+        return { ...base, status };
+      }
+      if (bannedFlags && allowedFlags) {
+        throw definitionError(filePath, `'${field}' cannot set both bannedFlags and allowedFlags`);
+      }
+      if (allowedFlags) return { ...base, status, allowedFlags };
+      if (bannedFlags) return { ...base, status, bannedFlags };
       return { ...base, status };
-    }
-    if (bannedFlags && allowedFlags) {
-      throw definitionError(filePath, `'${field}' cannot set both bannedFlags and allowedFlags`);
-    }
-    if (allowedFlags) return { ...base, status, allowedFlags };
-    if (bannedFlags) return { ...base, status, bannedFlags };
-    return { ...base, status };
-  });
+    }),
+  };
 }
 
 export function parseSubagentDefinition(content: string, filePath: string): SubagentDefinition {
@@ -223,6 +235,7 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
     throw definitionError(filePath, "frontmatter field 'maxTurns' must be a positive integer");
   }
 
+  const commandPolicy = parseCommandPolicy(frontmatter.command_policy, filePath);
   const systemPrompt = body.trim();
   if (systemPrompt === "") {
     throw definitionError(filePath, "Markdown body must contain the system prompt");
@@ -237,7 +250,8 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
     prompt: requiredString(frontmatter, "prompt", filePath),
     tools,
     subagents: parseSubagentNames(frontmatter.subagents, filePath),
-    commandPolicy: parseCommandPolicy(frontmatter.command_policy, filePath),
+    commandPolicy: commandPolicy.entries,
+    ...(commandPolicy.source === undefined ? {} : { commandPolicySource: commandPolicy.source }),
     ...(maxTurns === undefined ? {} : { maxTurns }),
     systemPrompt,
     filePath,

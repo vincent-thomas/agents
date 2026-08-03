@@ -29,8 +29,11 @@ export interface SubagentDefinition {
   thinking: SubagentThinkingLevel;
   prompt: string;
   tools: string[];
+  inheritTools: boolean;
   subagents: string[];
+  inheritSubagents: boolean;
   commandPolicy: CommandPolicyEntry[];
+  inheritCommandPolicy: boolean;
   maxTurns?: number;
   systemPrompt: string;
   filePath: string;
@@ -79,95 +82,112 @@ function stringArray(
   return value.map((item) => item.trim());
 }
 
-function parseSubagentNames(value: unknown, filePath: string): string[] {
-  if (value === undefined) return [];
+function parseSubagentNames(
+  value: unknown,
+  filePath: string,
+): { names: string[]; inherit: boolean } {
+  if (value === "inherit") return { names: [], inherit: true };
+  if (value === undefined) return { names: [], inherit: false };
   if (!Array.isArray(value)) {
-    throw definitionError(filePath, "frontmatter field 'subagents' must be an array");
+    throw definitionError(filePath, "frontmatter field 'subagents' must be an array or 'inherit'");
   }
 
   const names = new Set<string>();
-  return value.map((rawName) => {
-    if (typeof rawName !== "string" || !AGENT_NAME.test(rawName)) {
-      throw definitionError(filePath, `'${String(rawName)}' is not a valid sub-agent name`);
-    }
-    if (names.has(rawName)) {
-      throw definitionError(filePath, `sub-agent '${rawName}' is listed more than once`);
-    }
-    names.add(rawName);
-    return rawName;
-  });
+  return {
+    names: value.map((rawName) => {
+      if (typeof rawName !== "string" || !AGENT_NAME.test(rawName)) {
+        throw definitionError(filePath, `'${String(rawName)}' is not a valid sub-agent name`);
+      }
+      if (names.has(rawName)) {
+        throw definitionError(filePath, `sub-agent '${rawName}' is listed more than once`);
+      }
+      names.add(rawName);
+      return rawName;
+    }),
+    inherit: false,
+  };
 }
 
-function parseCommandPolicy(value: unknown, filePath: string): CommandPolicyEntry[] {
-  if (value === undefined) return [];
+function parseCommandPolicy(
+  value: unknown,
+  filePath: string,
+): { entries: CommandPolicyEntry[]; inherit: boolean } {
+  if (value === "inherit") return { entries: [], inherit: true };
+  if (value === undefined) return { entries: [], inherit: false };
   if (!Array.isArray(value)) {
-    throw definitionError(filePath, "frontmatter field 'command_policy' must be an array");
+    throw definitionError(
+      filePath,
+      "frontmatter field 'command_policy' must be an array or 'inherit'",
+    );
   }
 
-  return value.map((rawEntry, index) => {
-    const field = `command_policy[${index}]`;
-    if (typeof rawEntry !== "object" || rawEntry === null || Array.isArray(rawEntry)) {
-      throw definitionError(filePath, `'${field}' must be an object`);
-    }
-    const entry = rawEntry as Record<string, unknown>;
-    for (const key of Object.keys(entry)) {
-      if (!COMMAND_POLICY_FIELDS.has(key)) {
-        throw definitionError(filePath, `unknown field '${field}.${key}'`);
+  return {
+    entries: value.map((rawEntry, index) => {
+      const field = `command_policy[${index}]`;
+      if (typeof rawEntry !== "object" || rawEntry === null || Array.isArray(rawEntry)) {
+        throw definitionError(filePath, `'${field}' must be an object`);
       }
-    }
-
-    const name = requiredString(entry, "name", filePath);
-    const command = requiredString(entry, "command", filePath);
-    const status = requiredString(entry, "status", filePath);
-    if (status !== "allowed" && status !== "banned") {
-      throw definitionError(filePath, `'${field}.status' must be 'allowed' or 'banned'`);
-    }
-
-    const descriptionValue = entry.description;
-    const description =
-      descriptionValue === undefined ? undefined : requiredString(entry, "description", filePath);
-    const subcommandValue = entry.subcommand;
-    const subcommand =
-      subcommandValue === undefined
-        ? undefined
-        : Array.isArray(subcommandValue) && subcommandValue.length > 0
-          ? subcommandValue.map((part, partIndex) =>
-              stringArray(part, `${field}.subcommand[${partIndex}]`, filePath),
-            )
-          : (() => {
-              throw definitionError(
-                filePath,
-                `'${field}.subcommand' must be a non-empty array of string arrays`,
-              );
-            })();
-    const bannedFlags =
-      entry.bannedFlags === undefined
-        ? undefined
-        : stringArray(entry.bannedFlags, `${field}.bannedFlags`, filePath, true);
-    const allowedFlags =
-      entry.allowedFlags === undefined
-        ? undefined
-        : stringArray(entry.allowedFlags, `${field}.allowedFlags`, filePath, true);
-
-    const base = {
-      name,
-      command,
-      ...(subcommand ? { subcommand } : {}),
-      ...(description ? { description } : {}),
-    };
-    if (status === "banned") {
-      if (bannedFlags || allowedFlags) {
-        throw definitionError(filePath, `'${field}' cannot set flags when status is 'banned'`);
+      const entry = rawEntry as Record<string, unknown>;
+      for (const key of Object.keys(entry)) {
+        if (!COMMAND_POLICY_FIELDS.has(key)) {
+          throw definitionError(filePath, `unknown field '${field}.${key}'`);
+        }
       }
+
+      const name = requiredString(entry, "name", filePath);
+      const command = requiredString(entry, "command", filePath);
+      const status = requiredString(entry, "status", filePath);
+      if (status !== "allowed" && status !== "banned") {
+        throw definitionError(filePath, `'${field}.status' must be 'allowed' or 'banned'`);
+      }
+
+      const descriptionValue = entry.description;
+      const description =
+        descriptionValue === undefined ? undefined : requiredString(entry, "description", filePath);
+      const subcommandValue = entry.subcommand;
+      const subcommand =
+        subcommandValue === undefined
+          ? undefined
+          : Array.isArray(subcommandValue) && subcommandValue.length > 0
+            ? subcommandValue.map((part, partIndex) =>
+                stringArray(part, `${field}.subcommand[${partIndex}]`, filePath),
+              )
+            : (() => {
+                throw definitionError(
+                  filePath,
+                  `'${field}.subcommand' must be a non-empty array of string arrays`,
+                );
+              })();
+      const bannedFlags =
+        entry.bannedFlags === undefined
+          ? undefined
+          : stringArray(entry.bannedFlags, `${field}.bannedFlags`, filePath, true);
+      const allowedFlags =
+        entry.allowedFlags === undefined
+          ? undefined
+          : stringArray(entry.allowedFlags, `${field}.allowedFlags`, filePath, true);
+
+      const base = {
+        name,
+        command,
+        ...(subcommand ? { subcommand } : {}),
+        ...(description ? { description } : {}),
+      };
+      if (status === "banned") {
+        if (bannedFlags || allowedFlags) {
+          throw definitionError(filePath, `'${field}' cannot set flags when status is 'banned'`);
+        }
+        return { ...base, status };
+      }
+      if (bannedFlags && allowedFlags) {
+        throw definitionError(filePath, `'${field}' cannot set both bannedFlags and allowedFlags`);
+      }
+      if (allowedFlags) return { ...base, status, allowedFlags };
+      if (bannedFlags) return { ...base, status, bannedFlags };
       return { ...base, status };
-    }
-    if (bannedFlags && allowedFlags) {
-      throw definitionError(filePath, `'${field}' cannot set both bannedFlags and allowedFlags`);
-    }
-    if (allowedFlags) return { ...base, status, allowedFlags };
-    if (bannedFlags) return { ...base, status, bannedFlags };
-    return { ...base, status };
-  });
+    }),
+    inherit: false,
+  };
 }
 
 export function parseSubagentDefinition(content: string, filePath: string): SubagentDefinition {
@@ -192,11 +212,15 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
     throw definitionError(filePath, `unsupported thinking level '${thinking}'`);
   }
 
-  const tools = requiredString(frontmatter, "tools", filePath)
-    .split(",")
-    .map((tool) => tool.trim())
-    .filter(Boolean);
-  if (tools.length === 0) {
+  const rawTools = requiredString(frontmatter, "tools", filePath);
+  const inheritTools = rawTools === "inherit";
+  const tools = inheritTools
+    ? []
+    : rawTools
+        .split(",")
+        .map((tool) => tool.trim())
+        .filter(Boolean);
+  if (!inheritTools && tools.length === 0) {
     throw definitionError(filePath, "frontmatter field 'tools' must not be empty");
   }
   const uniqueTools = new Set<string>();
@@ -223,6 +247,8 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
     throw definitionError(filePath, "frontmatter field 'maxTurns' must be a positive integer");
   }
 
+  const subagents = parseSubagentNames(frontmatter.subagents, filePath);
+  const commandPolicy = parseCommandPolicy(frontmatter.command_policy, filePath);
   const systemPrompt = body.trim();
   if (systemPrompt === "") {
     throw definitionError(filePath, "Markdown body must contain the system prompt");
@@ -236,8 +262,11 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
     thinking: thinking as SubagentThinkingLevel,
     prompt: requiredString(frontmatter, "prompt", filePath),
     tools,
-    subagents: parseSubagentNames(frontmatter.subagents, filePath),
-    commandPolicy: parseCommandPolicy(frontmatter.command_policy, filePath),
+    inheritTools,
+    subagents: subagents.names,
+    inheritSubagents: subagents.inherit,
+    commandPolicy: commandPolicy.entries,
+    inheritCommandPolicy: commandPolicy.inherit,
     ...(maxTurns === undefined ? {} : { maxTurns }),
     systemPrompt,
     filePath,

@@ -40,30 +40,37 @@ test("runs a code-owned workflow instead of a single prompt", async () => {
   let registered: { execute: (...args: any[]) => Promise<any> } | undefined;
   let workflowRuns = 0;
   let disposed = false;
+  let inheritedTools: string[] | undefined;
   const definition = loadSubagentDefinitions([
     new URL("../../agents/scout.md", import.meta.url),
     new URL("../../agents/merge-conflicts.md", import.meta.url),
   ]).find((candidate) => candidate.name === "merge_conflicts")!;
   const extension = createSubagentToolsExtension({
     definitions: [definition],
-    invokeSubagent: async () => ({
-      prompt: "initial prompt",
-      subagent: {
-        definition,
-        session: {
-          subscribe: () => () => {},
-        } as never,
-        dispose: () => {
-          disposed = true;
+    invokeSubagent: async (_definition, context) => {
+      inheritedTools = context.parentToolNames;
+      return {
+        prompt: "initial prompt",
+        subagent: {
+          definition,
+          session: {
+            subscribe: () => () => {},
+          } as never,
+          dispose: () => {
+            disposed = true;
+          },
         },
-      },
-      run: async () => {
-        workflowRuns++;
-        return "workflow complete";
-      },
-    }),
+        run: async () => {
+          workflowRuns++;
+          return "workflow complete";
+        },
+      };
+    },
   });
   extension({
+    getActiveTools() {
+      return ["read", "merge_conflicts"];
+    },
     registerTool(tool) {
       registered = tool as typeof registered;
     },
@@ -72,6 +79,7 @@ test("runs a code-owned workflow instead of a single prompt", async () => {
   const result = await registered!.execute("call", {}, undefined, undefined, { cwd: "." });
 
   assert.equal(workflowRuns, 1);
+  assert.deepEqual(inheritedTools, ["read", "merge_conflicts"]);
   assert.equal(disposed, true);
   assert.equal(result.content[0].text, "workflow complete");
 });

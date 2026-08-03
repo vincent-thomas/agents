@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { createCommandPolicyExtension } from "@vt-agent/command-policy";
-import commandPolicyExtension from "./extensions/command-policy.ts";
+import commandPolicyExtension, { commandPolicyEntries } from "./extensions/command-policy.ts";
 import { createwriteGuardExtension } from "./extensions/write-guard";
 import { mergeConflictWriteGuardExtension } from "./extensions/merge-conflict-write-guard/index.ts";
 import { gitCommitExtension } from "./extensions/git-commit";
@@ -91,8 +91,10 @@ const subagentCatalog = createSubagentCatalog({
   paths: [
     new URL("../agents/scout.md", import.meta.url),
     new URL("../agents/merge-conflicts.md", import.meta.url),
+    new URL("../agents/right-hand.md", import.meta.url),
   ],
   getModelFn: models.getModel.bind(models),
+  inheritedCommandPolicy: commandPolicyEntries,
   promptFns: {
     merge_conflicts: mergeConflictsPrompt,
   },
@@ -101,6 +103,12 @@ const subagentCatalog = createSubagentCatalog({
       assertWorkspace,
     }),
   },
+  extensionFactories: [
+    mergeConflictWriteGuardExtension,
+    createwriteGuardExtension({ overwriteFileThreshold: 50 }),
+    (pi) => gitCommitExtension(pi, { assertWorkspace }),
+    createFixCiExtension({ assertWorkspace }),
+  ],
 });
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({

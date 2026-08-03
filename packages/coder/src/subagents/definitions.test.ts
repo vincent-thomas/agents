@@ -45,10 +45,11 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   const rightHand = definitions.find((definition) => definition.name === "right_hand")!;
   assert.equal(rightHand.model, "openai-codex/gpt-5.6-luna");
   assert.equal(rightHand.thinking, "high");
-  assert.equal(rightHand.inheritTools, true);
+  assert.match(rightHand.description, /cannot commit or push/);
+  assert.equal(rightHand.inheritTools, false);
   assert.equal(rightHand.inheritSubagents, true);
   assert.equal(rightHand.inheritCommandPolicy, true);
-  assert.deepEqual(rightHand.tools, []);
+  assert.deepEqual(rightHand.tools, ["read", "write", "bash", "edit"]);
   assert.deepEqual(rightHand.subagents, []);
 });
 

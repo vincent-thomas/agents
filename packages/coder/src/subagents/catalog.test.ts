@@ -47,7 +47,7 @@ test("accepts an inherited command policy supplied by the host", () => {
 
   const rightHand = catalog.definitions.find((definition) => definition.name === "right_hand")!;
   const resolved = resolveInheritedDefinition({
-    definition: rightHand,
+    definition: { ...rightHand, tools: [], inheritTools: true },
     parentToolNames: ["read", "bash", "git_commit", "scout", "merge_conflicts", "right_hand"],
     subagentNames: new Set(["scout", "merge_conflicts", "right_hand"]),
     inheritedCommandPolicy: mainPolicy,

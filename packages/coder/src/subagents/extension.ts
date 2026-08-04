@@ -218,9 +218,7 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
             content: [
               {
                 type: "text",
-                text:
-                  workflowStatus ??
-                  (parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label),
+                text: workflowStatus ?? parentPrompt ?? definition.label,
               },
             ],
             details: details(),
@@ -285,10 +283,7 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
           acceptsParentPrompt && "prompt" in context.args && typeof context.args.prompt === "string"
             ? context.args.prompt
             : undefined;
-        let text = theme.fg(
-          "toolOutput",
-          parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label,
-        );
+        let text = theme.fg("toolOutput", parentPrompt ?? definition.label);
         if (details?.toolTrace.length) {
           text += `\n\n${theme.fg("muted", "Sub-agent tools:")}`;
           for (const execution of details.toolTrace) {

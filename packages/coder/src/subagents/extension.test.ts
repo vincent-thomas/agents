@@ -25,6 +25,7 @@ test("registers one agent tool with an actor-specific prompt schema", () => {
       theme: unknown,
       context: unknown,
     ) => { render(width: number): string[] };
+    renderResult: (...args: any[]) => { render(width: number): string[] };
   }> = [];
   const extension = createSubagentToolsExtension({
     definitions,
@@ -54,6 +55,18 @@ test("registers one agent tool with an actor-specific prompt schema", () => {
     {},
   );
   assert.deepEqual(call.render("agent scout".length), ["agent scout"]);
+
+  const prompt = "Survey this repository";
+  const partialResult = registered[0]!.renderResult(
+    {
+      content: [{ type: "text", text: "Working..." }],
+      details: { toolTrace: [] },
+    },
+    { expanded: true, isPartial: true },
+    { fg: (_color: string, text: string) => text },
+    { args: { actor: "scout", prompt } },
+  );
+  assert.deepEqual(partialResult.render(prompt.length), [prompt]);
 });
 
 test("exposes a parent-prompted sub-agent as a slash command", async () => {

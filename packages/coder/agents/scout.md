@@ -9,7 +9,7 @@ prompt: parent
 tools: read, grep, find, ls
 available_to:
   root: true
-  subagents: [merge_conflicts, right_hand]
+  subagents: [merge_conflicts, review, right_hand]
 maxTurns: 15
 ---
 

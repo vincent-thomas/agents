@@ -38,6 +38,7 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   const scout = definitions.find((definition) => definition.name === "scout")!;
   assert.match(scout.description, /factual lookup, not analysis/);
   assert.match(scout.systemPrompt, /leave the reasoning to the parent agent/);
+  assert.deepEqual(scout.availableToSubagents, ["merge_conflicts", "review", "right_hand"]);
 
   const mergeConflicts = definitions.find((definition) => definition.name === "merge_conflicts")!;
   assert.equal(mergeConflicts.maxTurns, undefined);

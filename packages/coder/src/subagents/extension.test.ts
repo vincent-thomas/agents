@@ -14,6 +14,7 @@ test("registers one agent tool with an actor-specific prompt schema", () => {
   const definitions = loadSubagentDefinitions([
     new URL("../../agents/scout.md", import.meta.url),
     new URL("../../agents/merge-conflicts.md", import.meta.url),
+    new URL("../../agents/review.md", import.meta.url),
     new URL("../../agents/right-hand.md", import.meta.url),
   ]);
   const registered: Array<{
@@ -36,7 +37,7 @@ test("registers one agent tool with an actor-specific prompt schema", () => {
   assert.equal(registered[0]!.name, "agent");
   assert.deepEqual(
     registered[0]!.parameters.anyOf.map((variant) => Object.keys(variant.properties)),
-    [["actor", "prompt"], ["actor"], ["actor", "prompt"]],
+    [["actor", "prompt"], ["actor"], ["actor", "prompt"], ["actor", "prompt"]],
   );
 });
 
@@ -118,6 +119,7 @@ test("runs a code-owned workflow instead of a single prompt", async () => {
   const definition = loadSubagentDefinitions([
     new URL("../../agents/scout.md", import.meta.url),
     new URL("../../agents/merge-conflicts.md", import.meta.url),
+    new URL("../../agents/review.md", import.meta.url),
     new URL("../../agents/right-hand.md", import.meta.url),
   ]).find((candidate) => candidate.name === "merge_conflicts")!;
   const extension = createSubagentToolsExtension({

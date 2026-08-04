@@ -9,6 +9,7 @@ test("requires code-owned functions for generated prompt sources", () => {
         paths: [
           new URL("../../agents/scout.md", import.meta.url),
           new URL("../../agents/merge-conflicts.md", import.meta.url),
+          new URL("../../agents/review.md", import.meta.url),
           new URL("../../agents/right-hand.md", import.meta.url),
         ],
         getModelFn: () => ({}) as never,
@@ -25,6 +26,7 @@ test("requires the host policy for inherited command policies", () => {
         paths: [
           new URL("../../agents/scout.md", import.meta.url),
           new URL("../../agents/merge-conflicts.md", import.meta.url),
+          new URL("../../agents/review.md", import.meta.url),
           new URL("../../agents/right-hand.md", import.meta.url),
         ],
         getModelFn: () => ({}) as never,
@@ -40,6 +42,7 @@ test("accepts an inherited command policy supplied by the host", () => {
     paths: [
       new URL("../../agents/scout.md", import.meta.url),
       new URL("../../agents/merge-conflicts.md", import.meta.url),
+      new URL("../../agents/review.md", import.meta.url),
       new URL("../../agents/right-hand.md", import.meta.url),
     ],
     getModelFn: () => ({}) as never,
@@ -65,6 +68,7 @@ test("resolves frontmatter models through the supplied provider lookup", () => {
     paths: [
       new URL("../../agents/scout.md", import.meta.url),
       new URL("../../agents/merge-conflicts.md", import.meta.url),
+      new URL("../../agents/review.md", import.meta.url),
       new URL("../../agents/right-hand.md", import.meta.url),
     ],
     getModelFn(provider, model) {
@@ -79,9 +83,10 @@ test("resolves frontmatter models through the supplied provider lookup", () => {
     ["openai-codex", "gpt-5.6-luna"],
     ["openai-codex", "gpt-5.6-luna"],
     ["openai-codex", "gpt-5.6-luna"],
+    ["openai-codex", "gpt-5.6-luna"],
   ]);
   assert.deepEqual(
     catalog.definitions.map((definition) => definition.name),
-    ["scout", "merge_conflicts", "right_hand"],
+    ["scout", "merge_conflicts", "review", "right_hand"],
   );
 });

@@ -56,25 +56,20 @@ export interface SubagentCatalog {
 export function resolveInheritedDefinition(options: {
   definition: SubagentDefinition;
   parentToolNames?: string[];
-  subagentNames: ReadonlySet<string>;
   inheritedCommandPolicy?: CommandPolicyEntry[];
 }): SubagentDefinition {
-  const { definition, parentToolNames, subagentNames } = options;
-  if ((definition.inheritTools || definition.inheritSubagents) && !parentToolNames) {
+  const { definition, parentToolNames } = options;
+  if (definition.inheritTools && !parentToolNames) {
     throw new Error(
       `Inherited capabilities require a parent tool context for '${definition.name}'`,
     );
   }
 
-  const inherited = parentToolNames ?? [];
   return {
     ...definition,
     tools: definition.inheritTools
-      ? inherited.filter((name) => !subagentNames.has(name))
+      ? parentToolNames!.filter((name) => name !== "agent")
       : definition.tools,
-    subagents: definition.inheritSubagents
-      ? inherited.filter((name) => name !== definition.name && subagentNames.has(name))
-      : definition.subagents,
     commandPolicy: definition.inheritCommandPolicy
       ? (options.inheritedCommandPolicy ?? [])
       : definition.commandPolicy,
@@ -93,7 +88,6 @@ export function createSubagentCatalog(options: CreateSubagentCatalogOptions): Su
   }
 
   const byName = new Map(definitions.map((definition) => [definition.name, definition]));
-  const subagentNames = new Set(byName.keys());
   const models = new Map(
     definitions.map((definition) => {
       const separator = definition.model.indexOf("/");
@@ -134,10 +128,11 @@ export function createSubagentCatalog(options: CreateSubagentCatalogOptions): Su
     const resolvedDefinition = resolveInheritedDefinition({
       definition,
       parentToolNames: createOptions.parentToolNames,
-      subagentNames,
       inheritedCommandPolicy: options.inheritedCommandPolicy,
     });
-    const nestedDefinitions = resolvedDefinition.subagents.map(requireDefinition);
+    const nestedDefinitions = definitions.filter((candidate) =>
+      candidate.availableToSubagents.includes(definition.name),
+    );
     const nestedExtension =
       nestedDefinitions.length === 0
         ? []
@@ -159,6 +154,7 @@ export function createSubagentCatalog(options: CreateSubagentCatalogOptions): Su
         ...(createOptions.extensionFactories ?? []),
       ],
       customTools: [...(options.customTools ?? []), ...(createOptions.customTools ?? [])],
+      additionalToolNames: nestedDefinitions.length === 0 ? [] : ["agent"],
       signal: createOptions.signal,
     });
   };
@@ -215,7 +211,9 @@ export function createSubagentCatalog(options: CreateSubagentCatalogOptions): Su
       });
     },
     createToolsExtension(names = definitions.map((definition) => definition.name)) {
-      const exposedDefinitions = names.map(requireDefinition);
+      const exposedDefinitions = names
+        .map(requireDefinition)
+        .filter((definition) => definition.availableToRoot);
       return createSubagentToolsExtension({
         definitions: exposedDefinitions,
         invokeSubagent: (definition, context) => invokeDefinition(definition, context),

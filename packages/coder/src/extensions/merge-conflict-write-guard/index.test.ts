@@ -57,7 +57,7 @@ function setup(stdout: string, code = 0, operation: GitOperation = "merge") {
   };
 }
 
-test("blocks write and points to merge_conflicts when conflicts exist", async () => {
+test("blocks write and points to the merge_conflicts agent call when conflicts exist", async () => {
   const guard = setup("100644 abc 2\tsrc/index.ts\n");
 
   const result = await guard.invoke({
@@ -68,7 +68,8 @@ test("blocks write and points to merge_conflicts when conflicts exist", async ()
 
   assert.deepEqual(result, {
     block: true,
-    reason: "Unresolved merge conflicts are present. Use merge_conflicts before calling write.",
+    reason:
+      'Unresolved merge conflicts are present. Call agent with actor: "merge_conflicts" before calling write.',
   });
   assert.deepEqual(guard.execCalls, [
     ["git", ["ls-files", "-u"], { cwd: "/repo", signal: undefined, timeout: 5_000 }],
@@ -80,7 +81,7 @@ test("blocks write and points to merge_conflicts when conflicts exist", async ()
   ]);
   assert.deepEqual(guard.notifications, [
     [
-      "Unresolved merge conflicts are present. Use merge_conflicts before calling write.",
+      'Unresolved merge conflicts are present. Call agent with actor: "merge_conflicts" before calling write.',
       "warning",
     ],
   ]);

@@ -91,6 +91,7 @@ const subagentCatalog = createSubagentCatalog({
   paths: [
     new URL("../agents/scout.md", import.meta.url),
     new URL("../agents/merge-conflicts.md", import.meta.url),
+    new URL("../agents/review.md", import.meta.url),
     new URL("../agents/right-hand.md", import.meta.url),
   ],
   getModelFn: models.getModel.bind(models),

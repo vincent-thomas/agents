@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseSubagentDefinition } from "./definitions.ts";
-import { createSubagentSession, subagentToolNames } from "./session.ts";
+import { advanceSubagentTurnLimit, createSubagentSession, subagentToolNames } from "./session.ts";
 
 const definition = parseSubagentDefinition(
   `---
@@ -30,6 +30,23 @@ test("additional agent tools are enabled without duplicating metadata", () => {
     "custom_tool",
     "agent",
   ]);
+});
+
+test("reserves a final answer turn before enforcing the turn limit", () => {
+  let state = { turnCount: 0, finalTurnRequested: false };
+
+  for (let turn = 1; turn < 10; turn++) {
+    const transition = advanceSubagentTurnLimit(state, 10);
+    state = transition.state;
+    assert.equal(transition.action, "continue");
+  }
+
+  const finalRequest = advanceSubagentTurnLimit(state, 10);
+  assert.deepEqual(finalRequest, {
+    state: { turnCount: 10, finalTurnRequested: true },
+    action: "request_final",
+  });
+  assert.equal(advanceSubagentTurnLimit(finalRequest.state, 10).action, "abort");
 });
 
 test("session creation rejects an already-aborted invocation", async () => {

@@ -29,6 +29,28 @@ export interface Subagent {
   dispose(): void;
 }
 
+export interface SubagentTurnLimitState {
+  turnCount: number;
+  finalTurnRequested: boolean;
+}
+
+export type SubagentTurnLimitAction = "continue" | "request_final" | "abort";
+
+export function advanceSubagentTurnLimit(
+  state: SubagentTurnLimitState,
+  maxTurns: number,
+): { state: SubagentTurnLimitState; action: SubagentTurnLimitAction } {
+  const next = { ...state, turnCount: state.turnCount + 1 };
+  if (next.turnCount < maxTurns) return { state: next, action: "continue" };
+  if (!next.finalTurnRequested) {
+    return {
+      state: { ...next, finalTurnRequested: true },
+      action: "request_final",
+    };
+  }
+  return { state: next, action: "abort" };
+}
+
 export function subagentToolNames(
   definition: SubagentDefinition,
   additionalToolNames: string[] = [],
@@ -85,11 +107,26 @@ export async function createSubagentSession(
     throw new DOMException("Sub-agent invocation aborted", "AbortError");
   }
 
-  let turnCount = 0;
+  let turnLimitState: SubagentTurnLimitState = {
+    turnCount: 0,
+    finalTurnRequested: false,
+  };
   const unsubscribe = session.subscribe((event) => {
     if (event.type !== "turn_end" || definition.maxTurns === undefined) return;
-    turnCount++;
-    if (turnCount >= definition.maxTurns) void session.abort();
+    const transition = advanceSubagentTurnLimit(turnLimitState, definition.maxTurns);
+    turnLimitState = transition.state;
+    if (transition.action === "request_final") {
+      void session.sendCustomMessage(
+        {
+          customType: "subagent-turn-limit",
+          content: "Stop using tools and return your best final answer now.",
+          display: false,
+        },
+        { deliverAs: "steer" },
+      );
+    } else if (transition.action === "abort") {
+      void session.abort();
+    }
   });
 
   let disposed = false;

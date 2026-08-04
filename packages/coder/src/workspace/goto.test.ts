@@ -44,108 +44,92 @@ test("goto creates a workspace for a new branch", async () => {
   assert.equal(result, created);
 });
 
-test("goto command recovers a queued transition after extension state resets", async () => {
+test("goto tool moves the current session after the agent settles", async () => {
   const created = workspace("feature/parser");
   let tool: any;
-  let command: any;
-  let followUp: { content: string; options: unknown } | undefined;
+  let agentSettled: (() => void) | undefined;
+  let deferredTransition: (() => Promise<void>) | undefined;
+  let scheduled = 0;
   let transition: { workspace: AgentWorkspace; sessionFile: string } | undefined;
-  let persisted = false;
   const extension = createGotoExtension({
     store: {} as WorkspaceStore,
     cwd: "/repo",
     dependencies: {
       resolveRepository: repository,
-      listWorkspaces: async () => (persisted ? [created] : []),
-      createWorkspace: async () => {
-        persisted = true;
-        return created;
-      },
+      listWorkspaces: async () => [],
+      createWorkspace: async () => created,
+    },
+    scheduleTransition(callback) {
+      scheduled += 1;
+      deferredTransition = callback;
     },
     async transition(workspace, sessionFile) {
       transition = { workspace, sessionFile };
     },
   });
   extension({
+    on(event, handler) {
+      if (event === "agent_settled") agentSettled = handler as () => void;
+    },
     registerTool(definition) {
       tool = definition;
     },
-    registerCommand(_name, definition) {
-      command = definition;
-    },
-    sendUserMessage(content, options) {
-      followUp = { content: content as string, options };
-    },
   } as never);
 
-  const result = await tool.execute("call", { branch: created.branch });
-  assert.deepEqual(followUp, {
-    content: `/goto-workspace ${created.id}`,
-    options: { deliverAs: "followUp" },
-  });
-  assert.equal(result.terminate, true);
-
-  extension({
-    registerTool() {},
-    registerCommand(_name, definition) {
-      command = definition;
-    },
-    sendUserMessage() {},
-  } as never);
-
-  await command.handler(created.id, {
-    waitForIdle: async () => undefined,
+  const result = await tool.execute("call", { branch: created.branch }, undefined, undefined, {
     sessionManager: { getSessionFile: () => "/sessions/source.jsonl" },
   });
+  assert.equal(result.terminate, true);
+  assert.equal(transition, undefined);
+  await assert.rejects(
+    tool.execute("second-call", { branch: "feature/other" }, undefined, undefined, {
+      sessionManager: { getSessionFile: () => "/sessions/source.jsonl" },
+    }),
+    new Error("A workspace transition is already pending."),
+  );
+
+  agentSettled!();
+  agentSettled!();
+  assert.equal(scheduled, 1);
+  assert.equal(transition, undefined);
+
+  await deferredTransition!();
   assert.deepEqual(transition, {
     workspace: created,
     sessionFile: "/sessions/source.jsonl",
   });
 });
 
-test("goto command only recovers a matching active workspace", async () => {
-  const cases = [
-    { ...workspace("feature/parser"), id: "another-workspace" },
-    { ...workspace("feature/parser"), status: "completed" as const },
-    { ...workspace("feature/parser"), repository: "/other/.git" },
-  ];
+test("goto rejects an unsaved session before creating a workspace", async () => {
+  let tool: any;
+  let created = false;
+  const extension = createGotoExtension({
+    store: {} as WorkspaceStore,
+    cwd: "/repo",
+    dependencies: {
+      resolveRepository: repository,
+      listWorkspaces: async () => [],
+      createWorkspace: async () => {
+        created = true;
+        return workspace("feature/parser");
+      },
+    },
+    async transition() {},
+  });
+  extension({
+    on() {},
+    registerTool(definition) {
+      tool = definition;
+    },
+  } as never);
 
-  for (const candidate of cases) {
-    let command: any;
-    let transitioned = false;
-    const extension = createGotoExtension({
-      store: {} as WorkspaceStore,
-      cwd: "/repo",
-      dependencies: {
-        resolveRepository: repository,
-        listWorkspaces: async (_store, repositoryPath) => {
-          assert.equal(repositoryPath, "/repo/.git");
-          return [candidate];
-        },
-        createWorkspace: async () => {
-          throw new Error("must not create");
-        },
-      },
-      async transition() {
-        transitioned = true;
-      },
-    });
-    extension({
-      registerTool() {},
-      registerCommand(_name, definition) {
-        command = definition;
-      },
-    } as never);
-
-    await assert.rejects(
-      command.handler("workspace-id", {
-        waitForIdle: async () => undefined,
-        sessionManager: { getSessionFile: () => "/sessions/source.jsonl" },
-      }),
-      new Error("No matching workspace transition is pending."),
-    );
-    assert.equal(transitioned, false);
-  }
+  await assert.rejects(
+    tool.execute("call", { branch: "feature/parser" }, undefined, undefined, {
+      sessionManager: { getSessionFile: () => undefined },
+    }),
+    new Error("The current session has not been saved yet."),
+  );
+  assert.equal(created, false);
 });
 
 test("goto rejects an already existing workspace", async () => {

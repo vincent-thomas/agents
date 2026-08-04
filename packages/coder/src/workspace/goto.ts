@@ -41,37 +41,43 @@ export function createGotoExtension(options: {
   store: WorkspaceStore;
   cwd: string;
   transition: (workspace: AgentWorkspace, sessionFile: string) => Promise<void>;
+  scheduleTransition?: (transition: () => Promise<void>) => void;
   dependencies?: GotoDependencies;
 }) {
+  const scheduleTransition =
+    options.scheduleTransition ??
+    ((transition: () => Promise<void>) => {
+      setTimeout(() => void transition(), 0);
+    });
+
   return function gotoExtension(pi: ExtensionAPI) {
-    let pending: AgentWorkspace | undefined;
+    let pending:
+      | {
+          workspace: AgentWorkspace;
+          sessionFile: string;
+        }
+      | undefined;
+    let transitionScheduled = false;
     let queue = Promise.resolve();
 
-    pi.registerCommand("goto-workspace", {
-      description: "Complete a pending agent workspace transition",
-      handler: async (args, ctx) => {
-        const id = args.trim();
-        let workspace = pending;
-        if (!workspace) {
-          const dependencies = options.dependencies ?? defaultDependencies;
-          const repository = await dependencies.resolveRepository(options.cwd);
-          workspace = (
-            await dependencies.listWorkspaces(options.store, repository.repository)
-          ).find(
-            (candidate) =>
-              candidate.id === id &&
-              candidate.status === "active" &&
-              candidate.repository === repository.repository,
-          );
+    pi.on("agent_settled", () => {
+      if (!pending || transitionScheduled) return;
+      transitionScheduled = true;
+      const transition = pending;
+      scheduleTransition(async () => {
+        try {
+          await options.transition(transition.workspace, transition.sessionFile);
+          pending = undefined;
+        } catch (error) {
+          transitionScheduled = false;
+          const message = `Workspace transition failed: ${error instanceof Error ? error.message : String(error)}`;
+          try {
+            pi.sendMessage({ customType: "goto-workspace-error", content: message, display: true });
+          } catch {
+            console.error(message);
+          }
         }
-        if (!workspace || id !== workspace.id) {
-          throw new Error("No matching workspace transition is pending.");
-        }
-        await ctx.waitForIdle();
-        const sessionFile = ctx.sessionManager.getSessionFile();
-        if (!sessionFile) throw new Error("The current session has not been saved yet.");
-        await options.transition(workspace, sessionFile);
-      },
+      });
     });
 
     pi.registerTool({
@@ -83,7 +89,7 @@ export function createGotoExtension(options: {
       parameters: Type.Object({
         branch: Type.String({ description: "Git branch name for the new workspace" }),
       }),
-      async execute(_toolCallId, params) {
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         const previous = queue;
         let release!: () => void;
         queue = new Promise<void>((resolve) => {
@@ -92,21 +98,23 @@ export function createGotoExtension(options: {
         await previous;
         try {
           if (pending) throw new Error("A workspace transition is already pending.");
-          pending = await createGotoWorkspace({
+          const sessionFile = ctx.sessionManager.getSessionFile();
+          if (!sessionFile) throw new Error("The current session has not been saved yet.");
+          const workspace = await createGotoWorkspace({
             store: options.store,
             cwd: options.cwd,
             branch: params.branch,
             dependencies: options.dependencies,
           });
-          pi.sendUserMessage(`/goto-workspace ${pending.id}`, { deliverAs: "followUp" });
+          pending = { workspace, sessionFile };
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Created agent workspace ${pending.branch}. The session will continue in ${pending.worktree}.`,
+                text: `Created agent workspace ${workspace.branch}. The session will continue in ${workspace.worktree}.`,
               },
             ],
-            details: { branch: pending.branch, worktree: pending.worktree },
+            details: { branch: workspace.branch, worktree: workspace.worktree },
             terminate: true,
           };
         } finally {

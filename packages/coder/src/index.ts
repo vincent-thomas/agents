@@ -226,14 +226,22 @@ const initialRuntime = await createAgentSessionRuntime(createRuntime, {
 runtimeHost = new MutableAgentSessionRuntimeHost(initialRuntime);
 
 if (currentWorkspace && recoveredTransition) {
-  const recovered = await updateWorkspace(store, currentWorkspace, {
-    transition: {
-      phase: "active",
-      sourceSessionFile: recoveredTransition.sourceSessionFile,
-      targetSessionFile: sessionManager.getSessionFile(),
-    },
-  });
-  Object.assign(currentWorkspace, recovered);
+  const activeTransition = {
+    phase: "active" as const,
+    sourceSessionFile: recoveredTransition.sourceSessionFile,
+    targetSessionFile: sessionManager.getSessionFile(),
+  };
+  try {
+    const recovered = await updateWorkspace(store, currentWorkspace, {
+      transition: activeTransition,
+    });
+    Object.assign(currentWorkspace, recovered);
+  } catch (error) {
+    currentWorkspace.transition = activeTransition;
+    console.error(
+      `Could not persist recovered workspace transition: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 transitionCoordinator = new WorkspaceTransitionCoordinator({

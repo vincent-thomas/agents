@@ -17,6 +17,7 @@ export interface CreateSubagentSessionOptions {
   agentDir?: string;
   extensionFactories?: ExtensionFactory[];
   customTools?: ToolDefinition[];
+  additionalToolNames?: string[];
   signal?: AbortSignal;
 }
 
@@ -28,8 +29,11 @@ export interface Subagent {
   dispose(): void;
 }
 
-export function subagentToolNames(definition: SubagentDefinition): string[] {
-  return [...new Set([...definition.tools, ...definition.subagents])];
+export function subagentToolNames(
+  definition: SubagentDefinition,
+  additionalToolNames: string[] = [],
+): string[] {
+  return [...new Set([...definition.tools, ...additionalToolNames])];
 }
 
 /**
@@ -67,7 +71,7 @@ export async function createSubagentSession(
     agentDir,
     model: options.model,
     thinkingLevel: definition.thinking,
-    tools: subagentToolNames(definition),
+    tools: subagentToolNames(definition, options.additionalToolNames),
     customTools: options.customTools,
     resourceLoader,
     sessionManager: SessionManager.inMemory(options.cwd),

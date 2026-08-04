@@ -17,7 +17,7 @@ Treat requests as intent rather than exact implementation instructions. Prefer t
 Before touching any tool, take a moment to orient:
 
 - **Name the goal.** What exactly am I being asked to do? Restate it briefly to yourself.
-- **Survey first.** What files exist? What's the structure? Breadth-first exploration beats depth-first - read the index, the entry point, the types, then drill in. Use `scout` for broad, factual codebase discovery. Do not delegate analysis, design decisions, or recommendations.
+- **Survey first.** What files exist? What's the structure? Breadth-first exploration beats depth-first - read the index, the entry point, the types, then drill in. Use the `scout` actor through the `agent` tool for broad, factual codebase discovery. Do not delegate analysis, design decisions, or recommendations.
 - **Outline the plan.** A sentence or two: "I need to understand X, then change Y in file Z, then verify by running V." State it plainly at the start of a complex task - it becomes part of the recorded trace.
 - **Handle ambiguity proportionately.** Resolve ordinary ambiguity using repository evidence and state material assumptions. Stop only when competing interpretations would produce meaningfully different or unsafe outcomes.
 

@@ -116,126 +116,138 @@ export function formatSubagentResult(text: string | undefined): string {
 
 export function createSubagentToolsExtension(options: SubagentToolsExtensionOptions) {
   return function (pi: ExtensionAPI) {
-    for (const definition of options.definitions) {
-      const acceptsParentPrompt = definition.prompt === "parent";
-      const parameters = acceptsParentPrompt
+    if (options.definitions.length === 0) return;
+
+    const byName = new Map(options.definitions.map((definition) => [definition.name, definition]));
+    const variants = options.definitions.map((definition) =>
+      definition.prompt === "parent"
         ? Type.Object({
-            task: Type.String({
+            actor: Type.Literal(definition.name),
+            prompt: Type.String({
               description: `The task to delegate to the ${definition.name} sub-agent`,
             }),
           })
-        : Type.Object({});
+        : Type.Object({ actor: Type.Literal(definition.name) }),
+    ) as [ReturnType<typeof Type.Object>, ...ReturnType<typeof Type.Object>[]];
 
-      pi.registerTool({
-        name: definition.name,
-        label: definition.label,
-        description: definition.description,
-        promptSnippet: definition.description,
-        parameters,
-        async execute(_toolCallId, params, signal, onUpdate, ctx) {
-          const parentPrompt =
-            acceptsParentPrompt && "task" in params && typeof params.task === "string"
-              ? params.task
-              : undefined;
-          let toolTrace: SubagentToolExecution[] = [];
-          let workflowStatus: string | undefined;
-          const details = (): SubagentToolDetails => ({ toolTrace });
-          const notify = () =>
-            onUpdate?.({
-              content: [
-                {
-                  type: "text",
-                  text:
-                    workflowStatus ??
-                    (parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label),
-                },
-              ],
-              details: details(),
-            });
-          notify();
-
-          const invocation = await options.invokeSubagent(definition, {
-            cwd: ctx.cwd,
-            parentPrompt,
-            parentToolNames: pi.getActiveTools(),
-            signal,
-          });
-          const { subagent, prompt } = invocation;
-          const { session } = subagent;
-
-          const unsubscribe = session.subscribe((event) => {
-            if (event.type === "tool_execution_start") {
-              toolTrace = startSubagentToolExecution(
-                toolTrace,
-                event.toolCallId,
-                event.toolName,
-                event.args,
-              );
-              notify();
-            } else if (event.type === "tool_execution_end") {
-              toolTrace = finishSubagentToolExecution(toolTrace, event.toolCallId, event.isError);
-              notify();
-            }
-          });
-
-          let resultText: string | undefined;
-          try {
-            if (invocation.run) {
-              resultText = await invocation.run((text) => {
-                workflowStatus = text;
-                notify();
-              });
-            } else {
-              await session.prompt(prompt);
-              resultText = session.getLastAssistantText();
-            }
-          } finally {
-            unsubscribe();
-            subagent.dispose();
-          }
-
-          return {
+    pi.registerTool({
+      name: "agent",
+      label: "Agent",
+      description: [
+        "Delegate work to an available sub-agent.",
+        ...options.definitions.map((definition) => `${definition.name}: ${definition.description}`),
+      ].join("\n"),
+      parameters: Type.Union(variants),
+      async execute(_toolCallId, params, signal, onUpdate, ctx) {
+        const definition = byName.get(params.actor);
+        if (!definition) throw new Error(`Sub-agent '${params.actor}' is not available`);
+        const acceptsParentPrompt = definition.prompt === "parent";
+        const parentPrompt =
+          acceptsParentPrompt && "prompt" in params && typeof params.prompt === "string"
+            ? params.prompt
+            : undefined;
+        let toolTrace: SubagentToolExecution[] = [];
+        let workflowStatus: string | undefined;
+        const details = (): SubagentToolDetails => ({ toolTrace });
+        const notify = () =>
+          onUpdate?.({
             content: [
               {
-                type: "text" as const,
-                text: formatSubagentResult(resultText),
+                type: "text",
+                text:
+                  workflowStatus ??
+                  (parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label),
               },
             ],
             details: details(),
-          };
-        },
-        renderResult(result, { expanded, isPartial }, theme, context) {
-          const content = result.content.find((item) => item.type === "text");
-          const resultText = content?.type === "text" ? theme.fg("toolOutput", content.text) : "";
-          const details = result.details as SubagentToolDetails | undefined;
+          });
+        notify();
 
-          if (!expanded) return new SubagentResultText(resultText);
+        const invocation = await options.invokeSubagent(definition, {
+          cwd: ctx.cwd,
+          parentPrompt,
+          parentToolNames: pi.getActiveTools(),
+          signal,
+        });
+        const { subagent, prompt } = invocation;
+        const { session } = subagent;
 
-          const parentPrompt =
-            acceptsParentPrompt && "task" in context.args && typeof context.args.task === "string"
-              ? context.args.task
-              : undefined;
-          let text = theme.fg(
-            "toolOutput",
-            parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label,
-          );
-          if (details?.toolTrace.length) {
-            text += `\n\n${theme.fg("muted", "Sub-agent tools:")}`;
-            for (const execution of details.toolTrace) {
-              const marker =
-                execution.status === "running"
-                  ? theme.fg("warning", "…")
-                  : execution.status === "failed"
-                    ? theme.fg("error", "✗")
-                    : theme.fg("success", "✓");
-              text += `\n${marker} ${theme.fg("toolOutput", formatSubagentToolExecution(execution))}`;
-            }
+        const unsubscribe = session.subscribe((event) => {
+          if (event.type === "tool_execution_start") {
+            toolTrace = startSubagentToolExecution(
+              toolTrace,
+              event.toolCallId,
+              event.toolName,
+              event.args,
+            );
+            notify();
+          } else if (event.type === "tool_execution_end") {
+            toolTrace = finishSubagentToolExecution(toolTrace, event.toolCallId, event.isError);
+            notify();
           }
-          if (!isPartial && resultText) text += `\n\n${resultText}`;
+        });
 
-          return new SubagentResultText(text);
-        },
-      });
-    }
+        let resultText: string | undefined;
+        try {
+          if (invocation.run) {
+            resultText = await invocation.run((text) => {
+              workflowStatus = text;
+              notify();
+            });
+          } else {
+            await session.prompt(prompt);
+            resultText = session.getLastAssistantText();
+          }
+        } finally {
+          unsubscribe();
+          subagent.dispose();
+        }
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: formatSubagentResult(resultText),
+            },
+          ],
+          details: details(),
+        };
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        const content = result.content.find((item) => item.type === "text");
+        const resultText = content?.type === "text" ? theme.fg("toolOutput", content.text) : "";
+        const details = result.details as SubagentToolDetails | undefined;
+
+        if (!expanded) return new SubagentResultText(resultText);
+
+        const actor = context.args.actor;
+        const definition = typeof actor === "string" ? byName.get(actor) : undefined;
+        if (!definition) return new SubagentResultText(resultText);
+        const acceptsParentPrompt = definition.prompt === "parent";
+        const parentPrompt =
+          acceptsParentPrompt && "prompt" in context.args && typeof context.args.prompt === "string"
+            ? context.args.prompt
+            : undefined;
+        let text = theme.fg(
+          "toolOutput",
+          parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label,
+        );
+        if (details?.toolTrace.length) {
+          text += `\n\n${theme.fg("muted", "Sub-agent tools:")}`;
+          for (const execution of details.toolTrace) {
+            const marker =
+              execution.status === "running"
+                ? theme.fg("warning", "…")
+                : execution.status === "failed"
+                  ? theme.fg("error", "✗")
+                  : theme.fg("success", "✓");
+            text += `\n${marker} ${theme.fg("toolOutput", formatSubagentToolExecution(execution))}`;
+          }
+        }
+        if (!isPartial && resultText) text += `\n\n${resultText}`;
+
+        return new SubagentResultText(text);
+      },
+    });
   };
 }

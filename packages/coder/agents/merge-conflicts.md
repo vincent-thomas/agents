@@ -6,7 +6,9 @@ model: openai-codex/gpt-5.6-luna
 thinking: medium
 prompt: merge_conflicts
 tools: read, edit, grep, find, ls, bash
-subagents: [scout]
+available_to:
+  root: true
+  subagents: [right_hand]
 command_policy:
   - name: git status
     status: allowed
@@ -51,7 +53,7 @@ existing conflicted Git operation or fetched the PR target and started a
 non-committing merge before invoking you.
 
 Start by identifying every unmerged file and understanding the purpose of both
-sides. Use the scout when broader codebase context is needed. Read neighboring
+sides. Use the `scout` actor when broader codebase context is needed. Read neighboring
 code, types, and tests before editing a conflict whose intended composition is
 not obvious.
 

@@ -7,7 +7,9 @@ model: openai-codex/gpt-5.6-luna
 thinking: low
 prompt: parent
 tools: read, grep, find, ls
-subagents: []
+available_to:
+  root: true
+  subagents: [merge_conflicts, right_hand]
 maxTurns: 15
 ---
 

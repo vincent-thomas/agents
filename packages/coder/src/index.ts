@@ -13,10 +13,7 @@ import {
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { createCommandPolicyExtension } from "@vt-agent/command-policy";
 import commandPolicyExtension, { commandPolicyEntries } from "./extensions/command-policy.ts";
-import { createwriteGuardExtension } from "./extensions/write-guard";
-import { mergeConflictWriteGuardExtension } from "./extensions/merge-conflict-write-guard/index.ts";
-import { gitCommitExtension } from "./extensions/git-commit";
-import { createFixCiExtension } from "@vt-agent/git_push";
+import { createExtensionProfiles } from "./extensions/profiles.ts";
 import { createStandupExtension } from "@vt-agent/standup";
 import rootCauseExtension from "./extensions/root-cause/index.ts";
 import clearExtension from "./extensions/clear/index.ts";
@@ -80,6 +77,9 @@ const assertWorkspace = async (cwd: string) =>
     ? assertOwnedWorkspace(currentWorkspace, cwd)
     : assertWorkspacePath(runtimeCwd, cwd);
 await assertWorkspace(runtimeCwd);
+const { safetyExtensions, workspaceExtensions, subagentExtensions } = createExtensionProfiles({
+  assertWorkspace,
+});
 
 const currentSessionFile = await sessionPointerStore.read(runtimeCwd);
 const sessionManager =
@@ -106,12 +106,7 @@ const subagentCatalog = createSubagentCatalog({
       assertWorkspace,
     }),
   },
-  extensionFactories: [
-    mergeConflictWriteGuardExtension,
-    createwriteGuardExtension({ overwriteFileThreshold: 50 }),
-    (pi) => gitCommitExtension(pi, { assertWorkspace }),
-    createFixCiExtension({ assertWorkspace }),
-  ],
+  extensionFactories: subagentExtensions,
 });
 
 let runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>;
@@ -161,17 +156,8 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         createSessionPointerExtension(sessionPointerStore),
         subagentCatalog.createToolsExtension(),
         subagentCatalog.createCommandExtension("review"),
-        mergeConflictWriteGuardExtension,
-        createwriteGuardExtension({
-          overwriteFileThreshold: 50,
-        }),
-        (pi) =>
-          gitCommitExtension(pi, {
-            assertWorkspace,
-          }),
-        createFixCiExtension({
-          assertWorkspace,
-        }),
+        ...safetyExtensions,
+        ...workspaceExtensions,
         createStandupExtension({
           repositories: (
             await execAsync(

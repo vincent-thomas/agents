@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { loadSubagentDefinitions } from "./definitions.ts";
 import {
+  createSubagentCommandExtension,
   createSubagentToolsExtension,
   finishSubagentToolExecution,
   formatSubagentResult,
@@ -34,6 +35,76 @@ test("only parent-prompted agents expose a task parameter", () => {
     Object.keys(registered.find((tool) => tool.name === name)!.parameters.properties ?? {});
   assert.deepEqual(parameterNames("scout"), ["task"]);
   assert.deepEqual(parameterNames("merge_conflicts"), []);
+});
+
+test("exposes a parent-prompted sub-agent as a slash command", async () => {
+  const definition = loadSubagentDefinitions([
+    new URL("../../agents/review.md", import.meta.url),
+  ])[0]!;
+  let command: { name: string; handler: (args: string, context: any) => Promise<void> } | undefined;
+  let delegatedContext: unknown;
+  let promptedWith: string | undefined;
+  let disposed = false;
+  const sent: unknown[] = [];
+  const statuses: unknown[][] = [];
+  const extension = createSubagentCommandExtension({
+    definition,
+    invokeSubagent: async (context) => {
+      delegatedContext = context;
+      return {
+        prompt: context.parentPrompt!,
+        subagent: {
+          definition,
+          session: {
+            prompt: async (prompt: string) => {
+              promptedWith = prompt;
+            },
+            getLastAssistantText: () => "No findings.",
+          } as never,
+          dispose: () => {
+            disposed = true;
+          },
+        },
+      };
+    },
+  });
+  extension({
+    getActiveTools: () => ["read", "review"],
+    registerCommand(name, options) {
+      command = { name, handler: options.handler };
+    },
+    sendMessage(message, options) {
+      sent.push(message, options);
+    },
+  } as never);
+
+  await command!.handler("focus on cancellation", {
+    cwd: "/workspace",
+    waitForIdle: async () => {},
+    ui: {
+      setStatus: (...args: unknown[]) => statuses.push(args),
+      notify: () => {},
+    },
+  });
+
+  assert.equal(command!.name, "review");
+  assert.deepEqual(delegatedContext, {
+    cwd: "/workspace",
+    parentPrompt: "focus on cancellation",
+    parentToolNames: ["read", "review"],
+  });
+  assert.equal(promptedWith, "focus on cancellation");
+  assert.equal(disposed, true);
+  assert.deepEqual(sent, [
+    {
+      customType: "subagent-feedback",
+      content: "Review sub-agent feedback:\n\nNo findings.",
+      display: true,
+      details: { name: "review", task: "focus on cancellation" },
+    },
+    { triggerTurn: true },
+  ]);
+  assert.deepEqual(statuses.at(-1), ["subagent:review", undefined]);
 });
 
 test("runs a code-owned workflow instead of a single prompt", async () => {

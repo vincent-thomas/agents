@@ -8,6 +8,7 @@ import {
   formatSubagentResult,
   formatSubagentToolExecution,
   startSubagentToolExecution,
+  updateSubagentToolExecution,
 } from "./extension.ts";
 
 test("registers one agent tool with an actor-specific prompt schema", () => {
@@ -185,6 +186,175 @@ test("tracks nested tool executions without mutating earlier snapshots", () => {
   assert.equal(running[0]?.status, "running");
   assert.equal(finished[0]?.status, "succeeded");
   assert.equal(formatSubagentToolExecution(finished[0]!), "read src/index.ts:10-14");
+});
+
+test("attaches recursively propagated sub-agent details to tool snapshots", () => {
+  const running = startSubagentToolExecution([], "call-1", "agent", {
+    actor: "review",
+    prompt: "inspect tests",
+  });
+  const child = {
+    name: "review",
+    label: "Review",
+    prompt: "inspect tests",
+    toolTrace: [startSubagentToolExecution([], "call-2", "grep", { pattern: "nested" })[0]!],
+  };
+  const updated = updateSubagentToolExecution(running, "call-1", {
+    details: { subagent: child },
+  });
+  const finished = finishSubagentToolExecution(updated, "call-1", false, {
+    details: { subagent: { ...child, result: "No findings." } },
+  });
+
+  assert.equal(running[0]?.subagent, undefined);
+  assert.equal(updated[0]?.subagent?.toolTrace[0]?.name, "grep");
+  assert.equal(finished[0]?.subagent?.result, "No findings.");
+  assert.equal(
+    updateSubagentToolExecution(running, "call-1", {
+      details: { subagent: { label: "Malformed", toolTrace: null } },
+    }),
+    running,
+  );
+});
+
+test("renders nested sub-agents as an indented recursive tree", () => {
+  const definition = loadSubagentDefinitions([
+    new URL("../../agents/right-hand.md", import.meta.url),
+  ])[0]!;
+  let registered:
+    | { renderResult: (...args: any[]) => { render(width: number): string[] } }
+    | undefined;
+  createSubagentToolsExtension({
+    definitions: [definition],
+    invokeSubagent: async () => {
+      throw new Error("not invoked");
+    },
+  })({
+    registerTool(tool) {
+      registered = tool as typeof registered;
+    },
+  } as never);
+  const theme = {
+    fg: (_color: string, text: string) => text,
+  };
+  const result = {
+    content: [{ type: "text", text: "Done." }],
+    details: {
+      subagent: {
+        name: "right_hand",
+        label: "Right hand",
+        prompt: "implement feature",
+        result: "Done.",
+        toolTrace: [
+          {
+            id: "read-1",
+            name: "read",
+            args: { path: "src/index.ts" },
+            status: "succeeded",
+          },
+          {
+            id: "agent-1",
+            name: "agent",
+            args: { actor: "review", prompt: "inspect tests\ncarefully" },
+            status: "succeeded",
+            subagent: {
+              name: "review",
+              label: "Review",
+              prompt: "inspect tests\ncarefully",
+              result: "No findings.",
+              toolTrace: [
+                {
+                  id: "grep-1",
+                  name: "grep",
+                  args: { pattern: "nested", path: "packages" },
+                  status: "succeeded",
+                },
+              ],
+            },
+          },
+        ],
+      },
+    },
+  };
+
+  const rendered = registered!.renderResult(result, { expanded: true, isPartial: false }, theme, {
+    args: { actor: "right_hand", prompt: "implement feature" },
+  });
+
+  assert.equal(
+    rendered
+      .render(120)
+      .map((line) => line.trimEnd())
+      .join("\n"),
+    [
+      "Right hand: implement feature",
+      "",
+      "Sub-agent tools:",
+      "✓ read src/index.ts",
+      "✓ Review: inspect tests",
+      "  carefully",
+      "",
+      "  Sub-agent tools:",
+      "  ✓ grep /nested/ in packages",
+      "",
+      "  No findings.",
+      "",
+      "Done.",
+    ].join("\n"),
+  );
+});
+
+test("renders persisted flat traces with their final result", () => {
+  const definition = loadSubagentDefinitions([
+    new URL("../../agents/right-hand.md", import.meta.url),
+  ])[0]!;
+  let registered:
+    | { renderResult: (...args: any[]) => { render(width: number): string[] } }
+    | undefined;
+  createSubagentToolsExtension({
+    definitions: [definition],
+    invokeSubagent: async () => {
+      throw new Error("not invoked");
+    },
+  })({
+    registerTool(tool) {
+      registered = tool as typeof registered;
+    },
+  } as never);
+
+  const rendered = registered!.renderResult(
+    {
+      content: [{ type: "text", text: "Legacy response." }],
+      details: {
+        toolTrace: [
+          {
+            id: "read-1",
+            name: "read",
+            args: { path: "src/legacy.ts" },
+            status: "succeeded",
+          },
+        ],
+      },
+    },
+    { expanded: true, isPartial: false },
+    { fg: (_color: string, text: string) => text },
+    { args: { actor: "right_hand", prompt: "old task" } },
+  );
+
+  assert.equal(
+    rendered
+      .render(120)
+      .map((line) => line.trimEnd())
+      .join("\n"),
+    [
+      "Right Hand: old task",
+      "",
+      "Sub-agent tools:",
+      "✓ read src/legacy.ts",
+      "",
+      "Legacy response.",
+    ].join("\n"),
+  );
 });
 
 test("formats every permitted nested tool", () => {

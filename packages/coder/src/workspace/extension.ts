@@ -1,10 +1,23 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   assertOwnedWorkspace,
+  loadWorkspace,
   updateWorkspace,
   type AgentWorkspace,
   type WorkspaceStore,
 } from "./logic.ts";
+
+interface WorkspaceExtensionDependencies {
+  assertOwnedWorkspace: typeof assertOwnedWorkspace;
+  loadWorkspace: typeof loadWorkspace;
+  updateWorkspace: typeof updateWorkspace;
+}
+
+const defaultDependencies: WorkspaceExtensionDependencies = {
+  assertOwnedWorkspace,
+  loadWorkspace,
+  updateWorkspace,
+};
 
 export function workspaceStartupNotice(workspace: AgentWorkspace, created: boolean): string {
   if (!created) return `Resumed agent workspace ${workspace.branch}\n${workspace.worktree}`;
@@ -37,19 +50,23 @@ export function createWorkspaceExtension(options: {
   store: WorkspaceStore;
   initialWorkspace: AgentWorkspace;
   created: boolean;
+  dependencies?: WorkspaceExtensionDependencies;
 }) {
+  const dependencies = options.dependencies ?? defaultDependencies;
   return function workspaceExtension(pi: ExtensionAPI) {
     let workspace = options.initialWorkspace;
 
     const persistSession = async (sessionFile: string | undefined, sessionName?: string) => {
-      workspace = await updateWorkspace(options.store, workspace, {
+      const latest = await dependencies.loadWorkspace(options.store, workspace.id);
+      const updated = await dependencies.updateWorkspace(options.store, latest, {
         sessionFile,
         sessionName,
       });
+      Object.assign(workspace, updated);
     };
 
     pi.on("session_start", async (event, ctx) => {
-      await assertOwnedWorkspace(workspace);
+      await dependencies.assertOwnedWorkspace(workspace);
       await persistSession(
         ctx.sessionManager.getSessionFile(),
         ctx.sessionManager.getSessionName() ?? undefined,
@@ -78,7 +95,7 @@ export function createWorkspaceExtension(options: {
     pi.registerCommand("workspace", {
       description: "Show the current host-owned Git workspace",
       handler: async (_args, ctx) => {
-        await assertOwnedWorkspace(workspace);
+        await dependencies.assertOwnedWorkspace(workspace);
         ctx.ui.notify(workspaceSummary(workspace), "info");
       },
     });

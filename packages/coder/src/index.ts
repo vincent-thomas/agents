@@ -94,10 +94,46 @@ const recoveredWorkspace =
   (startup.selectedWorkspace
     ? undefined
     : findRecoverableWorkspaceTransition(await listWorkspaces(store, repository.repository)));
+let recoveredTransition = recoveredWorkspace?.transition;
+const recoveredTargetSession = recoveredTransition?.targetSessionFile;
+const recoveredTargetExists =
+  recoveredTargetSession !== undefined && (await sessionFileExists(recoveredTargetSession));
+let failedRecoveryWorkspaceId: string | undefined;
+if (
+  recoveredWorkspace &&
+  recoveredTransition &&
+  !recoveredTargetExists &&
+  !(await sessionFileExists(recoveredTransition.sourceSessionFile))
+) {
+  const message = `Transition source session does not exist: ${recoveredTransition.sourceSessionFile}`;
+  const failedTransition = {
+    phase: "failed" as const,
+    sourceSessionFile: recoveredTransition.sourceSessionFile,
+    ...(recoveredTargetSession === undefined ? {} : { targetSessionFile: recoveredTargetSession }),
+    error: message,
+  };
+  try {
+    const failed = await updateWorkspace(store, recoveredWorkspace, {
+      transition: failedTransition,
+    });
+    Object.assign(recoveredWorkspace, failed);
+  } catch (error) {
+    recoveredWorkspace.transition = failedTransition;
+    console.error(
+      `Could not persist failed workspace transition: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  console.error(`Could not recover workspace ${recoveredWorkspace.branch}: ${message}.`);
+  failedRecoveryWorkspaceId = recoveredWorkspace.id;
+  recoveredTransition = undefined;
+}
 const selectedWorkspace =
-  startup.selectedWorkspace ??
-  (recoveredWorkspace ? { workspace: recoveredWorkspace, created: false } : undefined);
-const recoveredTransition = recoveredWorkspace?.transition;
+  startup.selectedWorkspace?.workspace.id === failedRecoveryWorkspaceId
+    ? undefined
+    : (startup.selectedWorkspace ??
+      (recoveredWorkspace && failedRecoveryWorkspaceId === undefined
+        ? { workspace: recoveredWorkspace, created: false }
+        : undefined));
 let currentWorkspace = selectedWorkspace?.workspace;
 const runtimeCwd = currentWorkspace?.worktree ?? startup.primaryCheckout;
 const assertWorkspace = async (cwd: string) =>
@@ -107,10 +143,9 @@ const assertWorkspace = async (cwd: string) =>
 await assertWorkspace(runtimeCwd);
 
 const currentSessionFile = await sessionPointerStore.read(runtimeCwd);
-const recoveredTargetSession = recoveredTransition?.targetSessionFile;
 const sessionManager = recoveredTransition
-  ? recoveredTargetSession && (await sessionFileExists(recoveredTargetSession))
-    ? SessionManager.open(recoveredTargetSession)
+  ? recoveredTargetExists
+    ? SessionManager.open(recoveredTargetSession!)
     : SessionManager.forkFrom(recoveredTransition.sourceSessionFile, runtimeCwd)
   : currentSessionFile && (await sessionFileExists(currentSessionFile))
     ? SessionManager.open(currentSessionFile)

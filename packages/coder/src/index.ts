@@ -21,6 +21,7 @@ import { createStandupExtension } from "@vt-agent/standup";
 import rootCauseExtension from "./extensions/root-cause/index.ts";
 import clearExtension from "./extensions/clear/index.ts";
 import { createWorkspaceExtension } from "./workspace/extension.ts";
+import { createGotoExtension } from "./workspace/goto.ts";
 import {
   createSessionPointerExtension,
   createSessionPointerStore,
@@ -72,10 +73,11 @@ if (startup.deletedWorkspace) {
   process.exit(0);
 }
 const selectedWorkspace = startup.selectedWorkspace;
-const runtimeCwd = selectedWorkspace?.workspace.worktree ?? startup.primaryCheckout;
+let currentWorkspace = selectedWorkspace?.workspace;
+const runtimeCwd = currentWorkspace?.worktree ?? startup.primaryCheckout;
 const assertWorkspace = async (cwd: string) =>
-  selectedWorkspace
-    ? assertOwnedWorkspace(selectedWorkspace.workspace, cwd)
+  currentWorkspace
+    ? assertOwnedWorkspace(currentWorkspace, cwd)
     : assertWorkspacePath(runtimeCwd, cwd);
 await assertWorkspace(runtimeCwd);
 
@@ -112,6 +114,8 @@ const subagentCatalog = createSubagentCatalog({
   ],
 });
 
+let runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>;
+
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({
   cwd,
   sessionManager,
@@ -125,15 +129,34 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         return [appendSystemPrompt];
       },
       extensionFactories: [
-        ...(selectedWorkspace
+        ...(currentWorkspace
           ? [
               createWorkspaceExtension({
                 store,
-                initialWorkspace: selectedWorkspace.workspace,
-                created: selectedWorkspace.created,
+                initialWorkspace: currentWorkspace,
+                created:
+                  selectedWorkspace?.workspace.id !== currentWorkspace.id ||
+                  selectedWorkspace.created,
               }),
             ]
-          : []),
+          : [
+              createGotoExtension({
+                store,
+                cwd: startup.primaryCheckout,
+                async transition(workspace, sessionFile) {
+                  const previousWorkspace = currentWorkspace;
+                  const migratedSession = SessionManager.forkFrom(sessionFile, workspace.worktree);
+                  currentWorkspace = workspace;
+                  try {
+                    const result = await runtime.switchSession(migratedSession.getSessionFile()!);
+                    if (result.cancelled) throw new Error("Workspace transition was cancelled.");
+                  } catch (error) {
+                    currentWorkspace = previousWorkspace;
+                    throw error;
+                  }
+                },
+              }),
+            ]),
         commandPolicyExtension,
         createSessionPointerExtension(sessionPointerStore),
         subagentCatalog.createToolsExtension(),
@@ -174,7 +197,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
   };
 };
 
-const runtime = await createAgentSessionRuntime(createRuntime, {
+runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: runtimeCwd,
   agentDir,
   sessionManager,

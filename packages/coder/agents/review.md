@@ -6,7 +6,6 @@ model: openai-codex/gpt-5.6-luna
 thinking: high
 prompt: parent
 tools: read, grep, find, ls, bash
-subagents: []
 maxTurns: 25
 command_policy:
   - name: git status

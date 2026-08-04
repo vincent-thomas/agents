@@ -2,7 +2,11 @@ import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionFactory, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { CommandPolicyEntry } from "@vt-agent/command-policy";
 import { loadSubagentDefinitions, type SubagentDefinition } from "./definitions.ts";
-import { createSubagentToolsExtension, type SubagentInvocation } from "./extension.ts";
+import {
+  createSubagentCommandExtension,
+  createSubagentToolsExtension,
+  type SubagentInvocation,
+} from "./extension.ts";
 import { createSubagentSession, type Subagent } from "./session.ts";
 
 export interface SubagentPromptContext {
@@ -45,7 +49,8 @@ export interface SubagentCatalog {
   definitions: SubagentDefinition[];
   create(name: string, options: CreateCatalogSubagentOptions): Promise<Subagent>;
   invoke(name: string, options: CreateCatalogSubagentOptions): Promise<SubagentInvocation>;
-  createToolsExtension(): ExtensionFactory;
+  createCommandExtension(name: string): ExtensionFactory;
+  createToolsExtension(names?: string[]): ExtensionFactory;
 }
 
 export function resolveInheritedDefinition(options: {
@@ -195,9 +200,22 @@ export function createSubagentCatalog(options: CreateSubagentCatalogOptions): Su
     definitions,
     create: (name, createOptions) => createFromDefinition(requireDefinition(name), createOptions),
     invoke: (name, createOptions) => invokeDefinition(requireDefinition(name), createOptions),
-    createToolsExtension() {
+    createCommandExtension(name) {
+      const definition = requireDefinition(name);
+      if (definition.prompt !== "parent") {
+        throw new Error(`Sub-agent command '${name}' requires a parent-prompted definition`);
+      }
+      return createSubagentCommandExtension({
+        definition,
+        invokeSubagent: (context) => invokeDefinition(definition, context),
+      });
+    },
+    createToolsExtension(names = definitions.map((definition) => definition.name)) {
+      const exposedDefinitions = names
+        .map(requireDefinition)
+        .filter((definition) => definition.availableToRoot);
       return createSubagentToolsExtension({
-        definitions: definitions.filter((definition) => definition.availableToRoot),
+        definitions: exposedDefinitions,
         invokeSubagent: (definition, context) => invokeDefinition(definition, context),
       });
     },

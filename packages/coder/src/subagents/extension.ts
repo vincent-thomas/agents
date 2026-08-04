@@ -37,6 +37,11 @@ export interface SubagentToolsExtensionOptions {
   ): Promise<SubagentInvocation>;
 }
 
+export interface SubagentCommandExtensionOptions {
+  definition: SubagentDefinition;
+  invokeSubagent(context: SubagentToolContext): Promise<SubagentInvocation>;
+}
+
 class SubagentResultText {
   constructor(private readonly text: string) {}
 
@@ -114,6 +119,61 @@ export function formatSubagentResult(text: string | undefined): string {
   return text;
 }
 
+export async function runSubagentInvocation(
+  invocation: SubagentInvocation,
+  onProgress: (text: string) => void = () => {},
+): Promise<string> {
+  const { subagent, prompt } = invocation;
+  try {
+    if (invocation.run) {
+      return formatSubagentResult(await invocation.run(onProgress));
+    }
+    await subagent.session.prompt(prompt);
+    return formatSubagentResult(subagent.session.getLastAssistantText());
+  } finally {
+    subagent.dispose();
+  }
+}
+
+export function createSubagentCommandExtension(options: SubagentCommandExtensionOptions) {
+  return function (pi: ExtensionAPI) {
+    const { definition } = options;
+    pi.registerCommand(definition.name, {
+      description: definition.description,
+      handler: async (args, ctx) => {
+        await ctx.waitForIdle();
+        const task = args.trim() || definition.description;
+        const statusKey = `subagent:${definition.name}`;
+        ctx.ui.setStatus(statusKey, `${definition.label} running…`);
+        try {
+          const invocation = await options.invokeSubagent({
+            cwd: ctx.cwd,
+            parentPrompt: task,
+            parentToolNames: pi.getActiveTools(),
+          });
+          const result = await runSubagentInvocation(invocation, (text) => {
+            ctx.ui.setStatus(statusKey, text);
+          });
+          pi.sendMessage(
+            {
+              customType: "subagent-feedback",
+              content: `${definition.label} sub-agent feedback:\n\n${result}`,
+              display: true,
+              details: { name: definition.name, task },
+            },
+            { triggerTurn: true },
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          ctx.ui.notify(`${definition.label} failed: ${message}`, "error");
+        } finally {
+          ctx.ui.setStatus(statusKey, undefined);
+        }
+      },
+    });
+  };
+}
+
 export function createSubagentToolsExtension(options: SubagentToolsExtensionOptions) {
   return function (pi: ExtensionAPI) {
     if (options.definitions.length === 0) return;
@@ -169,8 +229,7 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
           parentToolNames: pi.getActiveTools(),
           signal,
         });
-        const { subagent, prompt } = invocation;
-        const { session } = subagent;
+        const { session } = invocation.subagent;
 
         const unsubscribe = session.subscribe((event) => {
           if (event.type === "tool_execution_start") {
@@ -189,25 +248,19 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
 
         let resultText: string | undefined;
         try {
-          if (invocation.run) {
-            resultText = await invocation.run((text) => {
-              workflowStatus = text;
-              notify();
-            });
-          } else {
-            await session.prompt(prompt);
-            resultText = session.getLastAssistantText();
-          }
+          resultText = await runSubagentInvocation(invocation, (text) => {
+            workflowStatus = text;
+            notify();
+          });
         } finally {
           unsubscribe();
-          subagent.dispose();
         }
 
         return {
           content: [
             {
               type: "text" as const,
-              text: formatSubagentResult(resultText),
+              text: resultText,
             },
           ],
           details: details(),

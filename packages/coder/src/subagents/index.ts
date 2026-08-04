@@ -23,7 +23,10 @@ export {
   type SubagentSession,
 } from "./session.ts";
 export {
+  createSubagentCommandExtension,
   createSubagentToolsExtension,
+  runSubagentInvocation,
+  type SubagentCommandExtensionOptions,
   type SubagentInvocation,
   type SubagentToolContext,
   type SubagentToolsExtensionOptions,

@@ -27,12 +27,13 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   const definitions = loadSubagentDefinitions([
     new URL("../../agents/scout.md", import.meta.url),
     new URL("../../agents/merge-conflicts.md", import.meta.url),
+    new URL("../../agents/review.md", import.meta.url),
     new URL("../../agents/right-hand.md", import.meta.url),
   ]);
 
   assert.deepEqual(
     definitions.map((definition) => definition.name),
-    ["scout", "merge_conflicts", "right_hand"],
+    ["scout", "merge_conflicts", "review", "right_hand"],
   );
   const scout = definitions.find((definition) => definition.name === "scout")!;
   assert.match(scout.description, /factual lookup, not analysis/);
@@ -43,6 +44,12 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   const gitAdd = mergeConflicts.commandPolicy.find((entry) => entry.name === "git add")!;
   assert.ok("allowedFlags" in gitAdd);
   assert.deepEqual(gitAdd.allowedFlags, []);
+
+  const review = definitions.find((definition) => definition.name === "review")!;
+  assert.equal(review.thinking, "high");
+  assert.match(review.description, /correctness, regressions, and missing tests/);
+  assert.deepEqual(review.tools, ["read", "grep", "find", "ls", "bash"]);
+  assert.match(review.systemPrompt, /Return findings first, ordered by severity/);
 
   const rightHand = definitions.find((definition) => definition.name === "right_hand")!;
   assert.equal(rightHand.model, "openai-codex/gpt-5.6-luna");

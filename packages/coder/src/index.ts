@@ -86,9 +86,14 @@ if (startup.deletedWorkspace) {
   process.exit(0);
 }
 const repository = await resolveRepository(startup.primaryCheckout);
-const recoveredWorkspace = startup.selectedWorkspace
-  ? undefined
-  : findRecoverableWorkspaceTransition(await listWorkspaces(store, repository.repository));
+const selectedRecovery = startup.selectedWorkspace
+  ? findRecoverableWorkspaceTransition([startup.selectedWorkspace.workspace])
+  : undefined;
+const recoveredWorkspace =
+  selectedRecovery ??
+  (startup.selectedWorkspace
+    ? undefined
+    : findRecoverableWorkspaceTransition(await listWorkspaces(store, repository.repository)));
 const selectedWorkspace =
   startup.selectedWorkspace ??
   (recoveredWorkspace ? { workspace: recoveredWorkspace, created: false } : undefined);
@@ -233,11 +238,12 @@ if (currentWorkspace && recoveredTransition) {
 
 transitionCoordinator = new WorkspaceTransitionCoordinator({
   initialWorkspace: currentWorkspace,
-  createWorkspace: (branch) =>
+  createWorkspace: (branch, sourceSessionFile) =>
     createGotoWorkspace({
       store,
       cwd: startup.primaryCheckout,
       branch,
+      transition: { phase: "pending", sourceSessionFile },
     }),
   async updateTransition(workspace, transition) {
     const current = await loadWorkspace(store, workspace.id);
@@ -264,6 +270,7 @@ transitionCoordinator = new WorkspaceTransitionCoordinator({
       preparingWorkspace = undefined;
     }
   },
+  isRuntimeActive: (runtime) => runtimeHost.current === runtime,
   async commitRuntime(workspace, prepared: PreparedWorkspaceRuntime) {
     const previousWorkspace = currentWorkspace;
     currentWorkspace = workspace;

@@ -73,6 +73,10 @@ function coordinator(options: {
   order?: string[];
   prepare?: () => Promise<{ runtime: AgentSessionRuntime; sessionFile: string }>;
   create?: () => Promise<AgentWorkspace>;
+  update?: (
+    current: AgentWorkspace,
+    transition: WorkspaceTransitionMetadata,
+  ) => Promise<AgentWorkspace>;
   commit?: (prepared: {
     runtime: AgentSessionRuntime;
     sessionFile: string;
@@ -80,13 +84,19 @@ function coordinator(options: {
 }) {
   const host = new MutableAgentSessionRuntimeHost(options.source);
   return new WorkspaceTransitionCoordinator({
-    createWorkspace: options.create ?? (async () => workspace("feature/demo")),
+    createWorkspace: async (_branch, sourceSessionFile) => {
+      const created = options.create ? await options.create() : workspace("feature/demo");
+      const transition = { phase: "pending" as const, sourceSessionFile };
+      options.persist.push(transition);
+      options.order?.push("persist:pending");
+      return { ...created, transition };
+    },
     updateTransition: async (current, transition) => {
       options.persist.push(transition);
       options.order?.push(
         `persist:${transition.phase}${transition.targetSessionFile ? ":target" : ""}`,
       );
-      return { ...current, transition };
+      return options.update ? options.update(current, transition) : { ...current, transition };
     },
     prepareRuntime:
       options.prepare ??
@@ -98,6 +108,7 @@ function coordinator(options: {
       options.commit
         ? options.commit(prepared)
         : host.switchPrepared(prepared.runtime, prepared.sessionFile),
+    isRuntimeActive: (runtime) => host.current === runtime,
   });
 }
 
@@ -218,6 +229,58 @@ test("cancellation disposes the prepared runtime and returns metadata to pending
     { phase: "pending", sourceSessionFile: "source.jsonl" },
   ]);
   assert.deepEqual(events, ["source:session_before_switch", "target:runtime-dispose"]);
+});
+
+test("disposes a prepared runtime when metadata persistence fails before commit", async () => {
+  const events: string[] = [];
+  const source = fakeRuntime("source", events);
+  const target = fakeRuntime("target", events);
+  const persisted: WorkspaceTransitionMetadata[] = [];
+  const coordinatorInstance = coordinator({
+    source,
+    target,
+    persist: persisted,
+    update: async (current, transition) => {
+      if (transition.phase === "switching" && transition.targetSessionFile) {
+        throw new Error("target metadata failed");
+      }
+      return { ...current, transition };
+    },
+  });
+
+  await coordinatorInstance.create("feature/metadata-failure", "source.jsonl");
+  await assert.rejects(coordinatorInstance.switchPending(), /target metadata failed/);
+
+  assert.equal(coordinatorInstance.state.phase, "failed");
+  assert.deepEqual(events, ["target:runtime-dispose"]);
+});
+
+test("keeps the adopted target active when final metadata persistence fails", async () => {
+  const events: string[] = [];
+  const source = fakeRuntime("source", events);
+  const target = fakeRuntime("target", events);
+  const persisted: WorkspaceTransitionMetadata[] = [];
+  const coordinatorInstance = coordinator({
+    source,
+    target,
+    persist: persisted,
+    update: async (current, transition) => {
+      if (transition.phase === "active") throw new Error("active metadata failed");
+      return { ...current, transition };
+    },
+  });
+
+  await coordinatorInstance.create("feature/active-metadata", "source.jsonl");
+  const result = await coordinatorInstance.switchPending();
+
+  assert.deepEqual(result, { cancelled: false });
+  assert.equal(coordinatorInstance.state.phase, "active");
+  assert.equal(coordinatorInstance.state.workspace?.id, "feature/demo-id");
+  assert.deepEqual(events, [
+    "source:session_before_switch",
+    "source:session_shutdown",
+    "source:session-dispose",
+  ]);
 });
 
 test("create failure reaches an explicit failed state", async () => {

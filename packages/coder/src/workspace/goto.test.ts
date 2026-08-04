@@ -26,22 +26,28 @@ const repository = async () => ({
 
 test("goto creates a workspace for a new branch", async () => {
   const created = workspace("feature/parser");
+  const transition = {
+    phase: "pending" as const,
+    sourceSessionFile: "/sessions/source.jsonl",
+  };
   const result = await createGotoWorkspace({
     store: {} as WorkspaceStore,
     cwd: "/repo",
     branch: created.branch,
+    transition,
     dependencies: {
       resolveRepository: repository,
       listWorkspaces: async () => [],
-      createWorkspace: async (_store, cwd, branch) => {
+      createWorkspace: async (_store, cwd, branch, initial) => {
         assert.equal(cwd, "/repo");
         assert.equal(branch, created.branch);
-        return created;
+        assert.deepEqual(initial, { transition });
+        return { ...created, ...initial };
       },
     },
   });
 
-  assert.equal(result, created);
+  assert.deepEqual(result, { ...created, transition });
 });
 
 test("goto creates a transition with the source session and switches after the agent settles", async () => {

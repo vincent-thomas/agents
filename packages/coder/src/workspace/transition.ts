@@ -29,7 +29,7 @@ export interface PreparedWorkspaceRuntime {
 
 export interface WorkspaceTransitionCoordinatorOptions {
   initialWorkspace?: AgentWorkspace;
-  createWorkspace: (branch: string) => Promise<AgentWorkspace>;
+  createWorkspace: (branch: string, sourceSessionFile: string) => Promise<AgentWorkspace>;
   updateTransition: (
     workspace: AgentWorkspace,
     transition: WorkspaceTransitionMetadata,
@@ -42,6 +42,7 @@ export interface WorkspaceTransitionCoordinatorOptions {
     workspace: AgentWorkspace,
     prepared: PreparedWorkspaceRuntime,
   ) => Promise<{ cancelled: boolean }>;
+  isRuntimeActive: (runtime: AgentSessionRuntime) => boolean;
 }
 
 export function normalizeTransitionError(error: unknown): string {
@@ -84,11 +85,13 @@ export class WorkspaceTransitionCoordinator {
     this.currentState = { phase: "creating", branch, sourceSessionFile };
     let workspace: AgentWorkspace | undefined;
     try {
-      workspace = await this.options.createWorkspace(branch);
-      workspace = await this.options.updateTransition(
-        workspace,
-        metadata("pending", sourceSessionFile),
-      );
+      workspace = await this.options.createWorkspace(branch, sourceSessionFile);
+      if (
+        workspace.transition?.phase !== "pending" ||
+        workspace.transition.sourceSessionFile !== sourceSessionFile
+      ) {
+        throw new Error("Workspace creation did not persist the pending transition.");
+      }
       this.currentState = { phase: "pending", workspace, sourceSessionFile };
       return workspace;
     } catch (error) {
@@ -113,6 +116,7 @@ export class WorkspaceTransitionCoordinator {
 
     const pending = this.currentState;
     let workspace = pending.workspace;
+    let prepared: PreparedWorkspaceRuntime | undefined;
     try {
       workspace = await this.options.updateTransition(
         workspace,
@@ -124,7 +128,7 @@ export class WorkspaceTransitionCoordinator {
         sourceSessionFile: pending.sourceSessionFile,
       };
 
-      const prepared = await this.options.prepareRuntime(workspace, pending.sourceSessionFile);
+      prepared = await this.options.prepareRuntime(workspace, pending.sourceSessionFile);
       workspace = await this.options.updateTransition(
         workspace,
         metadata("switching", pending.sourceSessionFile, prepared.sessionFile),
@@ -139,6 +143,7 @@ export class WorkspaceTransitionCoordinator {
       const result = await this.options.commitRuntime(workspace, prepared);
       if (result.cancelled) {
         await prepared.runtime.dispose();
+        prepared = undefined;
         workspace = await this.options.updateTransition(
           workspace,
           metadata("pending", pending.sourceSessionFile),
@@ -151,16 +156,41 @@ export class WorkspaceTransitionCoordinator {
         return result;
       }
 
-      workspace = await this.options.updateTransition(
-        workspace,
-        metadata("active", pending.sourceSessionFile, prepared.sessionFile),
-      );
       this.currentState = { phase: "active", workspace };
+      try {
+        workspace = await this.options.updateTransition(
+          workspace,
+          metadata("active", pending.sourceSessionFile, prepared.sessionFile),
+        );
+        this.currentState = { phase: "active", workspace };
+      } catch {
+        // The target runtime is already active. Leaving persisted state as
+        // switching makes startup recovery retry the safe side of the commit.
+      }
       return result;
     } catch (error) {
-      const targetSessionFile =
-        this.currentState.phase === "switching" ? this.currentState.targetSessionFile : undefined;
-      await this.fail(workspace, pending.sourceSessionFile, targetSessionFile, error);
+      const targetSessionFile = prepared?.sessionFile;
+      if (prepared && this.options.isRuntimeActive(prepared.runtime)) {
+        this.currentState = { phase: "active", workspace };
+        try {
+          workspace = await this.options.updateTransition(
+            workspace,
+            metadata("active", pending.sourceSessionFile, targetSessionFile),
+          );
+          this.currentState = { phase: "active", workspace };
+        } catch {
+          // Startup can recover the persisted switching record.
+        }
+      } else {
+        if (prepared) {
+          try {
+            await prepared.runtime.dispose();
+          } catch {
+            // Preserve the transition error.
+          }
+        }
+        await this.fail(workspace, pending.sourceSessionFile, targetSessionFile, error);
+      }
       throw error;
     }
   }

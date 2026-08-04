@@ -76,7 +76,13 @@ test("resolves the regular checkout from a managed worktree", async () => {
 test("lists repository workspaces and persists session metadata", async () => {
   const { repo, store, cleanup } = fixture();
   try {
-    const first = await createWorkspace(store, repo, "feature/one");
+    const first = await createWorkspace(store, repo, "feature/one", {
+      transition: {
+        phase: "pending",
+        sourceSessionFile: "/sessions/source.jsonl",
+      },
+    });
+    assert.deepEqual((await loadWorkspace(store, first.id)).transition, first.transition);
     const second = await createWorkspace(store, repo, "feature/two");
     const updated = await updateWorkspace(store, first, {
       sessionFile: "/sessions/one.jsonl",

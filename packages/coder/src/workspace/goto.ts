@@ -6,6 +6,7 @@ import {
   resolveRepository,
   type AgentWorkspace,
   type WorkspaceStore,
+  type WorkspaceTransitionMetadata,
 } from "./logic.ts";
 
 interface GotoDependencies {
@@ -24,6 +25,7 @@ export async function createGotoWorkspace(options: {
   store: WorkspaceStore;
   cwd: string;
   branch: string;
+  transition?: WorkspaceTransitionMetadata;
   dependencies?: GotoDependencies;
 }): Promise<AgentWorkspace> {
   const dependencies = options.dependencies ?? defaultDependencies;
@@ -34,7 +36,12 @@ export async function createGotoWorkspace(options: {
   if (existing) {
     throw new Error(`A workspace already exists for branch ${options.branch}.`);
   }
-  return dependencies.createWorkspace(options.store, options.cwd, options.branch);
+  return dependencies.createWorkspace(
+    options.store,
+    options.cwd,
+    options.branch,
+    options.transition ? { transition: options.transition } : undefined,
+  );
 }
 
 export function createGotoExtension(options: {

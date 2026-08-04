@@ -242,6 +242,7 @@ export async function createWorkspace(
   store: WorkspaceStore,
   cwd: string,
   branch: string,
+  initial?: Pick<AgentWorkspace, "transition">,
 ): Promise<AgentWorkspace> {
   const repo = await resolveRepository(cwd);
   await git(repo.sourceRoot, ["check-ref-format", "--branch", branch]);
@@ -304,6 +305,7 @@ export async function createWorkspace(
     updatedAt: now,
     status: "active",
     branchSetup,
+    ...initial,
   };
   await saveWorkspace(store, workspace);
   return workspace;

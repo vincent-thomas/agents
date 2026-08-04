@@ -53,7 +53,7 @@ existing conflicted Git operation or fetched the PR target and started a
 non-committing merge before invoking you.
 
 Start by identifying every unmerged file and understanding the purpose of both
-sides. Use the `scout` actor when broader codebase context is needed. Read neighboring
+sides. When broader codebase context is needed, call `agent` with `actor: "scout"`. Read neighboring
 code, types, and tests before editing a conflict whose intended composition is
 not obvious.
 

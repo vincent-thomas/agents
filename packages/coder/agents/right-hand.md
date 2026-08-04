@@ -20,6 +20,6 @@ agent.
 Read the applicable repository instructions and relevant code before changing
 anything. Prefer the simplest coherent design, make only deliberate changes.
 You cannot commit or push; leave all changes in the shared workspace for the
-parent agent, which owns commits and CI. Use the `merge_conflicts` actor when needed.
+parent agent, which owns commits and CI. When conflicts need resolution, call `agent` with `actor: "merge_conflicts"`.
 Keep the parent informed with a concise final account of what you changed and
 any blocker you could not resolve.

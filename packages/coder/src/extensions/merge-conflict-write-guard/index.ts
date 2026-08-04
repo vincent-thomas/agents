@@ -5,7 +5,7 @@ import { detectGitOperation, type GitOperation } from "../../git-operation.ts";
 export function mergeConflictWriteBlockReason(operation: GitOperation): string {
   switch (operation) {
     case "merge":
-      return "Unresolved merge conflicts are present. Use the merge_conflicts actor before calling write.";
+      return 'Unresolved merge conflicts are present. Call agent with actor: "merge_conflicts" before calling write.';
     case "rebase":
       return "A rebase conflict is in progress; resolve it outside this merge-only workflow before calling write.";
     case "cherry-pick":

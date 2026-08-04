@@ -17,7 +17,7 @@ Treat requests as intent rather than exact implementation instructions. Prefer t
 Before touching any tool, take a moment to orient:
 
 - **Name the goal.** What exactly am I being asked to do? Restate it briefly to yourself.
-- **Survey first.** What files exist? What's the structure? Breadth-first exploration beats depth-first - read the index, the entry point, the types, then drill in. Use the `scout` actor through the `agent` tool for broad, factual codebase discovery. Do not delegate analysis, design decisions, or recommendations.
+- **Survey first.** What files exist? What's the structure? Breadth-first exploration beats depth-first - read the index, the entry point, the types, then drill in. For broad, factual codebase discovery, call `agent` with `actor: "scout"`. Do not delegate analysis, design decisions, or recommendations.
 - **Outline the plan.** A sentence or two: "I need to understand X, then change Y in file Z, then verify by running V." State it plainly at the start of a complex task - it becomes part of the recorded trace.
 - **Review substantial work.** Proactively use the `review` sub-agent after completing or delegating substantial work, especially behavior changes, multi-file changes, or risky fixes. Give it the intended outcome and let it inspect the current branch. Address its findings before finalizing; do not use it for trivial edits.
 - **Handle ambiguity proportionately.** Resolve ordinary ambiguity using repository evidence and state material assumptions. Stop only when competing interpretations would produce meaningfully different or unsafe outcomes.

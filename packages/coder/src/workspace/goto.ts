@@ -50,13 +50,27 @@ export function createGotoExtension(options: {
     pi.registerCommand("goto-workspace", {
       description: "Complete a pending agent workspace transition",
       handler: async (args, ctx) => {
-        if (!pending || args.trim() !== pending.id) {
+        const id = args.trim();
+        let workspace = pending;
+        if (!workspace) {
+          const dependencies = options.dependencies ?? defaultDependencies;
+          const repository = await dependencies.resolveRepository(options.cwd);
+          workspace = (
+            await dependencies.listWorkspaces(options.store, repository.repository)
+          ).find(
+            (candidate) =>
+              candidate.id === id &&
+              candidate.status === "active" &&
+              candidate.repository === repository.repository,
+          );
+        }
+        if (!workspace || id !== workspace.id) {
           throw new Error("No matching workspace transition is pending.");
         }
         await ctx.waitForIdle();
         const sessionFile = ctx.sessionManager.getSessionFile();
         if (!sessionFile) throw new Error("The current session has not been saved yet.");
-        await options.transition(pending, sessionFile);
+        await options.transition(workspace, sessionFile);
       },
     });
 

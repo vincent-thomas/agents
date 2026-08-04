@@ -12,7 +12,9 @@ model: example/model
 thinking: low
 prompt: parent
 tools: read, write, custom_tool
-subagents: [scout]
+available_to:
+  root: false
+  subagents: [scout]
 maxTurns: 10
 ---
 
@@ -21,8 +23,13 @@ Complete the delegated task.
   "worker.md",
 );
 
-test("nested sub-agents are enabled as tools without duplicating metadata", () => {
-  assert.deepEqual(subagentToolNames(definition), ["read", "write", "custom_tool", "scout"]);
+test("additional agent tools are enabled without duplicating metadata", () => {
+  assert.deepEqual(subagentToolNames(definition, ["agent"]), [
+    "read",
+    "write",
+    "custom_tool",
+    "agent",
+  ]);
 });
 
 test("reserves a final answer turn before enforcing the turn limit", () => {

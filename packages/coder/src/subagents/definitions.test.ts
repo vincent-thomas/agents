@@ -14,7 +14,9 @@ model: openai-codex/gpt-5.6-luna
 thinking: low
 prompt: parent
 tools: read, grep, find, ls
-subagents: []
+available_to:
+  root: true
+  subagents: []
 maxTurns: 15
 ---
 
@@ -36,6 +38,7 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   const scout = definitions.find((definition) => definition.name === "scout")!;
   assert.match(scout.description, /factual lookup, not analysis/);
   assert.match(scout.systemPrompt, /leave the reasoning to the parent agent/);
+  assert.deepEqual(scout.availableToSubagents, ["merge_conflicts", "review", "right_hand"]);
 
   const mergeConflicts = definitions.find((definition) => definition.name === "merge_conflicts")!;
   assert.equal(mergeConflicts.maxTurns, undefined);
@@ -54,10 +57,10 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   assert.equal(rightHand.thinking, "high");
   assert.match(rightHand.description, /cannot commit or push/);
   assert.equal(rightHand.inheritTools, false);
-  assert.equal(rightHand.inheritSubagents, true);
+  assert.equal(rightHand.availableToRoot, true);
+  assert.deepEqual(rightHand.availableToSubagents, []);
   assert.equal(rightHand.inheritCommandPolicy, true);
   assert.deepEqual(rightHand.tools, ["read", "write", "bash", "edit"]);
-  assert.deepEqual(rightHand.subagents, []);
 });
 
 test("parses frontmatter as metadata and the body as the system prompt", () => {
@@ -70,8 +73,8 @@ test("parses frontmatter as metadata and the body as the system prompt", () => {
     prompt: "parent",
     tools: ["read", "grep", "find", "ls"],
     inheritTools: false,
-    subagents: [],
-    inheritSubagents: false,
+    availableToRoot: true,
+    availableToSubagents: [],
     commandPolicy: [],
     inheritCommandPolicy: false,
     maxTurns: 15,
@@ -88,47 +91,46 @@ test("defaults bash agents to an empty deny-by-default command policy", () => {
   assert.deepEqual(parsed.commandPolicy, []);
 });
 
-test("parses nested sub-agent names", () => {
-  const definition = validDefinition.replace("subagents: []", "subagents: [scout, reviewer]");
+test("parses target-owned availability and defaults root access", () => {
+  const definition = validDefinition.replace(
+    "  root: true\n  subagents: []",
+    "  subagents: [scout, reviewer]",
+  );
+  const parsed = parseSubagentDefinition(definition, "worker.md");
 
-  assert.deepEqual(parseSubagentDefinition(definition, "worker.md").subagents, [
-    "scout",
-    "reviewer",
-  ]);
+  assert.equal(parsed.availableToRoot, true);
+  assert.deepEqual(parsed.availableToSubagents, ["scout", "reviewer"]);
 });
 
-test("rejects missing nested agents and cycles", () => {
-  const agent = (name: string, subagents: string[]) =>
+test("rejects unknown available agents and availability cycles", () => {
+  const agent = (name: string, availableToSubagents: string[]) =>
     parseSubagentDefinition(
       validDefinition
         .replace("name: scout", `name: ${name}`)
-        .replace("subagents: []", `subagents: [${subagents.join(", ")}]`),
+        .replace("  subagents: []", `  subagents: [${availableToSubagents.join(", ")}]`),
       `${name}.md`,
     );
 
   assert.throws(
     () => validateSubagentDefinitions([agent("worker", ["missing"])]),
-    /unknown nested sub-agent 'missing'/,
+    /unknown available sub-agent 'missing'/,
   );
   assert.throws(
     () =>
       validateSubagentDefinitions([agent("worker", ["reviewer"]), agent("reviewer", ["worker"])]),
-    /nested sub-agent cycle: worker -> reviewer -> worker/,
+    /sub-agent availability cycle: worker -> reviewer -> worker/,
   );
 });
 
-test("parses inherited tools, sub-agents, and command policy", () => {
+test("parses inherited tools and command policy", () => {
   const definition = validDefinition
     .replace("tools: read, grep, find, ls", "tools: inherit")
-    .replace("subagents: []", "subagents: inherit")
     .replace("maxTurns: 15", "command_policy: inherit\nmaxTurns: 15");
 
   const parsed = parseSubagentDefinition(definition, "worker.md");
   assert.equal(parsed.inheritTools, true);
-  assert.equal(parsed.inheritSubagents, true);
   assert.equal(parsed.inheritCommandPolicy, true);
   assert.deepEqual(parsed.tools, []);
-  assert.deepEqual(parsed.subagents, []);
   assert.deepEqual(parsed.commandPolicy, []);
 });
 

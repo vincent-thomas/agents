@@ -14,7 +14,7 @@ const FRONTMATTER_FIELDS = new Set([
   "thinking",
   "prompt",
   "tools",
-  "subagents",
+  "available_to",
   "command_policy",
   "maxTurns",
 ]);
@@ -30,8 +30,8 @@ export interface SubagentDefinition {
   prompt: string;
   tools: string[];
   inheritTools: boolean;
-  subagents: string[];
-  inheritSubagents: boolean;
+  availableToRoot: boolean;
+  availableToSubagents: string[];
   commandPolicy: CommandPolicyEntry[];
   inheritCommandPolicy: boolean;
   maxTurns?: number;
@@ -82,30 +82,46 @@ function stringArray(
   return value.map((item) => item.trim());
 }
 
-function parseSubagentNames(
+const AVAILABLE_TO_FIELDS = new Set(["root", "subagents"]);
+
+function parseAvailability(
   value: unknown,
   filePath: string,
-): { names: string[]; inherit: boolean } {
-  if (value === "inherit") return { names: [], inherit: true };
-  if (value === undefined) return { names: [], inherit: false };
-  if (!Array.isArray(value)) {
-    throw definitionError(filePath, "frontmatter field 'subagents' must be an array or 'inherit'");
+): { root: boolean; subagents: string[] } {
+  if (value === undefined) return { root: true, subagents: [] };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw definitionError(filePath, "frontmatter field 'available_to' must be an object");
   }
 
+  const availableTo = value as Record<string, unknown>;
+  for (const field of Object.keys(availableTo)) {
+    if (!AVAILABLE_TO_FIELDS.has(field)) {
+      throw definitionError(filePath, `unknown field 'available_to.${field}'`);
+    }
+  }
+
+  const root = availableTo.root ?? true;
+  if (typeof root !== "boolean") {
+    throw definitionError(filePath, "'available_to.root' must be a boolean");
+  }
+
+  const rawSubagents = availableTo.subagents ?? [];
+  if (!Array.isArray(rawSubagents)) {
+    throw definitionError(filePath, "'available_to.subagents' must be a string array");
+  }
   const names = new Set<string>();
-  return {
-    names: value.map((rawName) => {
-      if (typeof rawName !== "string" || !AGENT_NAME.test(rawName)) {
-        throw definitionError(filePath, `'${String(rawName)}' is not a valid sub-agent name`);
-      }
-      if (names.has(rawName)) {
-        throw definitionError(filePath, `sub-agent '${rawName}' is listed more than once`);
-      }
-      names.add(rawName);
-      return rawName;
-    }),
-    inherit: false,
-  };
+  const subagents = rawSubagents.map((rawName) => {
+    if (typeof rawName !== "string" || !AGENT_NAME.test(rawName)) {
+      throw definitionError(filePath, `'${String(rawName)}' is not a valid sub-agent name`);
+    }
+    if (names.has(rawName)) {
+      throw definitionError(filePath, `sub-agent '${rawName}' is listed more than once`);
+    }
+    names.add(rawName);
+    return rawName;
+  });
+
+  return { root, subagents };
 }
 
 function parseCommandPolicy(
@@ -247,7 +263,7 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
     throw definitionError(filePath, "frontmatter field 'maxTurns' must be a positive integer");
   }
 
-  const subagents = parseSubagentNames(frontmatter.subagents, filePath);
+  const availability = parseAvailability(frontmatter.available_to, filePath);
   const commandPolicy = parseCommandPolicy(frontmatter.command_policy, filePath);
   const systemPrompt = body.trim();
   if (systemPrompt === "") {
@@ -263,8 +279,8 @@ export function parseSubagentDefinition(content: string, filePath: string): Suba
     prompt: requiredString(frontmatter, "prompt", filePath),
     tools,
     inheritTools,
-    subagents: subagents.names,
-    inheritSubagents: subagents.inherit,
+    availableToRoot: availability.root,
+    availableToSubagents: availability.subagents,
     commandPolicy: commandPolicy.entries,
     inheritCommandPolicy: commandPolicy.inherit,
     ...(maxTurns === undefined ? {} : { maxTurns }),
@@ -282,11 +298,15 @@ export function validateSubagentDefinitions(definitions: SubagentDefinition[]): 
     byName.set(definition.name, definition);
   }
 
+  const calleesByCaller = new Map(
+    definitions.map((definition) => [definition.name, [] as string[]]),
+  );
   for (const definition of definitions) {
-    for (const child of definition.subagents) {
-      if (!byName.has(child)) {
-        throw definitionError(definition.filePath, `unknown nested sub-agent '${child}'`);
+    for (const caller of definition.availableToSubagents) {
+      if (!byName.has(caller)) {
+        throw definitionError(definition.filePath, `unknown available sub-agent '${caller}'`);
       }
+      calleesByCaller.get(caller)!.push(definition.name);
     }
   }
 
@@ -296,14 +316,13 @@ export function validateSubagentDefinitions(definitions: SubagentDefinition[]): 
     if (visiting.has(name)) {
       throw definitionError(
         byName.get(name)!.filePath,
-        `nested sub-agent cycle: ${[...path, name].join(" -> ")}`,
+        `sub-agent availability cycle: ${[...path, name].join(" -> ")}`,
       );
     }
     if (visited.has(name)) return;
 
     visiting.add(name);
-    const definition = byName.get(name)!;
-    for (const child of definition.subagents) visit(child, [...path, name]);
+    for (const child of calleesByCaller.get(name)!) visit(child, [...path, name]);
     visiting.delete(name);
     visited.add(name);
   };

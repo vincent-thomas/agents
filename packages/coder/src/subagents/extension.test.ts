@@ -18,6 +18,11 @@ test("only parent-prompted agents expose a task parameter", () => {
   const registered: Array<{
     name: string;
     parameters: { properties?: Record<string, unknown> };
+    renderCall: (
+      args: unknown,
+      theme: unknown,
+      context: unknown,
+    ) => { render(width: number): string[] };
   }> = [];
   const extension = createSubagentToolsExtension({
     definitions,
@@ -35,6 +40,17 @@ test("only parent-prompted agents expose a task parameter", () => {
     Object.keys(registered.find((tool) => tool.name === name)!.parameters.properties ?? {});
   assert.deepEqual(parameterNames("scout"), ["task"]);
   assert.deepEqual(parameterNames("merge_conflicts"), []);
+
+  const scout = registered.find((tool) => tool.name === "scout")!;
+  const call = scout.renderCall(
+    {},
+    {
+      bold: (text: string) => text,
+      fg: (_color: string, text: string) => text,
+    },
+    {},
+  );
+  assert.deepEqual(call.render("agent scout".length), ["agent scout"]);
 });
 
 test("exposes a parent-prompted sub-agent as a slash command", async () => {

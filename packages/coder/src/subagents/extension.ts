@@ -192,6 +192,11 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
         description: definition.description,
         promptSnippet: definition.description,
         parameters,
+        renderCall(_args, theme) {
+          return new SubagentResultText(
+            theme.fg("toolTitle", theme.bold(`agent ${definition.name}`)),
+          );
+        },
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
           const parentPrompt =
             acceptsParentPrompt && "task" in params && typeof params.task === "string"

@@ -198,6 +198,10 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
         ...options.definitions.map((definition) => `${definition.name}: ${definition.description}`),
       ].join("\n"),
       parameters: Type.Union(variants),
+      renderCall(args, theme) {
+        const actor = typeof args.actor === "string" ? ` ${args.actor}` : "";
+        return new SubagentResultText(theme.fg("toolTitle", theme.bold(`agent${actor}`)));
+      },
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
         const definition = byName.get(params.actor);
         if (!definition) throw new Error(`Sub-agent '${params.actor}' is not available`);
@@ -214,9 +218,7 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
             content: [
               {
                 type: "text",
-                text:
-                  workflowStatus ??
-                  (parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label),
+                text: workflowStatus ?? parentPrompt ?? definition.label,
               },
             ],
             details: details(),
@@ -281,10 +283,7 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
           acceptsParentPrompt && "prompt" in context.args && typeof context.args.prompt === "string"
             ? context.args.prompt
             : undefined;
-        let text = theme.fg(
-          "toolOutput",
-          parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label,
-        );
+        let text = theme.fg("toolOutput", parentPrompt ?? definition.label);
         if (details?.toolTrace.length) {
           text += `\n\n${theme.fg("muted", "Sub-agent tools:")}`;
           for (const execution of details.toolTrace) {

@@ -55,7 +55,20 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   const rightHand = definitions.find((definition) => definition.name === "right_hand")!;
   assert.equal(rightHand.model, "openai-codex/gpt-5.6-luna");
   assert.equal(rightHand.thinking, "high");
+  assert.match(rightHand.description, /bounded implementation work that changes the workspace/);
+  assert.doesNotMatch(rightHand.description, /general-purpose/i);
   assert.match(rightHand.description, /cannot commit or push/);
+  assert.match(rightHand.systemPrompt, /role is execution, not advisory\s+analysis/);
+  assert.match(rightHand.systemPrompt, /concrete workspace-changing\s+outcome/);
+  assert.match(
+    rightHand.systemPrompt,
+    /If asked only to inspect, propose, recommend, or otherwise advise without\s+making workspace changes/,
+  );
+  assert.match(
+    rightHand.systemPrompt,
+    /concise blocker asking the parent to decide\s+and delegate an implementation task/,
+  );
+  assert.match(rightHand.systemPrompt, /parent agent owns analysis, design, and decisions/);
   assert.equal(rightHand.inheritTools, false);
   assert.equal(rightHand.availableToRoot, true);
   assert.deepEqual(rightHand.availableToSubagents, []);

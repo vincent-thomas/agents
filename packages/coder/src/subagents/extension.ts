@@ -262,6 +262,10 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
         ...options.definitions.map((definition) => `${definition.name}: ${definition.description}`),
       ].join("\n"),
       parameters: Type.Union(variants),
+      renderCall(args, theme) {
+        const actor = typeof args.actor === "string" ? ` ${args.actor}` : "";
+        return new SubagentResultText(theme.fg("toolTitle", theme.bold(`agent${actor}`)));
+      },
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
         const definition = byName.get(params.actor);
         if (!definition) throw new Error(`Sub-agent '${params.actor}' is not available`);
@@ -287,9 +291,7 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
             content: [
               {
                 type: "text",
-                text:
-                  workflowStatus ??
-                  (parentPrompt ? `${definition.label}: ${parentPrompt}` : definition.label),
+                text: workflowStatus ?? parentPrompt ?? definition.label,
               },
             ],
             details: details(),
@@ -380,11 +382,17 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
           trace: SubagentTrace,
           depth: number,
           includeHeader = true,
+          partialRoot = false,
         ): string[] => {
           const indent = "  ".repeat(depth);
           const lines: string[] = [];
           if (includeHeader) {
-            const header = trace.prompt ? `${trace.label}: ${trace.prompt}` : trace.label;
+            const header =
+              partialRoot && depth === 0
+                ? (trace.prompt ?? trace.label)
+                : trace.prompt
+                  ? `${trace.label}: ${trace.prompt}`
+                  : trace.label;
             lines.push(
               ...header.split("\n").map((line) => `${indent}${theme.fg("toolOutput", line)}`),
             );
@@ -424,7 +432,7 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
           return lines;
         };
         const traceForRender = isPartial ? { ...root, result: undefined } : root;
-        return new SubagentResultText(renderTrace(traceForRender, 0).join("\n"));
+        return new SubagentResultText(renderTrace(traceForRender, 0, true, isPartial).join("\n"));
       },
     });
   };

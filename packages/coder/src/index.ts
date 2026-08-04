@@ -137,6 +137,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         commandPolicyExtension,
         createSessionPointerExtension(sessionPointerStore),
         subagentCatalog.createToolsExtension(),
+        subagentCatalog.createCommandExtension("review"),
         mergeConflictWriteGuardExtension,
         createwriteGuardExtension({
           overwriteFileThreshold: 50,

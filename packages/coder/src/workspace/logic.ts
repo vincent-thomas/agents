@@ -6,6 +6,15 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+export type WorkspaceTransitionPhase = "pending" | "switching" | "active" | "failed";
+
+export interface WorkspaceTransitionMetadata {
+  phase: WorkspaceTransitionPhase;
+  sourceSessionFile: string;
+  targetSessionFile?: string;
+  error?: string;
+}
+
 export interface AgentWorkspace {
   version: 1;
   id: string;
@@ -22,6 +31,7 @@ export interface AgentWorkspace {
   completionPrNumber?: number;
   sessionFile?: string;
   sessionName?: string;
+  transition?: WorkspaceTransitionMetadata;
 }
 
 export interface WorkspaceStore {
@@ -79,6 +89,21 @@ function recordPath(store: WorkspaceStore, id: string): string {
   return join(recordsDir(store), `${id}.json`);
 }
 
+function isWorkspaceTransition(value: unknown): value is WorkspaceTransitionMetadata {
+  if (!value || typeof value !== "object") return false;
+  const transition = value as Partial<WorkspaceTransitionMetadata>;
+  return (
+    (transition.phase === "pending" ||
+      transition.phase === "switching" ||
+      transition.phase === "active" ||
+      transition.phase === "failed") &&
+    typeof transition.sourceSessionFile === "string" &&
+    (transition.targetSessionFile === undefined ||
+      typeof transition.targetSessionFile === "string") &&
+    (transition.error === undefined || typeof transition.error === "string")
+  );
+}
+
 function parseWorkspace(value: unknown, path: string): AgentWorkspace {
   if (!value || typeof value !== "object") throw new Error(`Invalid workspace record: ${path}`);
   const record = value as Partial<AgentWorkspace>;
@@ -95,6 +120,7 @@ function parseWorkspace(value: unknown, path: string): AgentWorkspace {
     (record.status !== "active" && record.status !== "completed") ||
     (record.completionHeadSha !== undefined && typeof record.completionHeadSha !== "string") ||
     (record.completionPrNumber !== undefined && typeof record.completionPrNumber !== "number") ||
+    (record.transition !== undefined && !isWorkspaceTransition(record.transition)) ||
     (record.branchSetup !== undefined &&
       record.branchSetup !== "created" &&
       record.branchSetup !== "reused-local" &&
@@ -288,7 +314,12 @@ export async function updateWorkspace(
   workspace: AgentWorkspace,
   patch: Pick<
     Partial<AgentWorkspace>,
-    "completionHeadSha" | "completionPrNumber" | "sessionFile" | "sessionName" | "status"
+    | "completionHeadSha"
+    | "completionPrNumber"
+    | "sessionFile"
+    | "sessionName"
+    | "status"
+    | "transition"
   >,
 ): Promise<AgentWorkspace> {
   const updated: AgentWorkspace = {

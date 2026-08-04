@@ -44,27 +44,26 @@ test("goto creates a workspace for a new branch", async () => {
   assert.equal(result, created);
 });
 
-test("goto tool moves the current session after the agent settles", async () => {
+test("goto creates a transition with the source session and switches after the agent settles", async () => {
   const created = workspace("feature/parser");
   let tool: any;
   let agentSettled: (() => void) | undefined;
   let deferredTransition: (() => Promise<void>) | undefined;
   let scheduled = 0;
-  let transition: { workspace: AgentWorkspace; sessionFile: string } | undefined;
+  let switchCalls = 0;
+  let transitionArguments: { branch: string; sourceSessionFile: string } | undefined;
   const extension = createGotoExtension({
-    store: {} as WorkspaceStore,
-    cwd: "/repo",
-    dependencies: {
-      resolveRepository: repository,
-      listWorkspaces: async () => [],
-      createWorkspace: async () => created,
+    createTransition: async (branch, sourceSessionFile) => {
+      transitionArguments = { branch, sourceSessionFile };
+      return created;
+    },
+    switchPendingTransition: async () => {
+      switchCalls += 1;
+      return { cancelled: false };
     },
     scheduleTransition(callback) {
       scheduled += 1;
       deferredTransition = callback;
-    },
-    async transition(workspace, sessionFile) {
-      transition = { workspace, sessionFile };
     },
   });
   extension({
@@ -80,41 +79,71 @@ test("goto tool moves the current session after the agent settles", async () => 
     sessionManager: { getSessionFile: () => "/sessions/source.jsonl" },
   });
   assert.equal(result.terminate, true);
-  assert.equal(transition, undefined);
-  await assert.rejects(
-    tool.execute("second-call", { branch: "feature/other" }, undefined, undefined, {
-      sessionManager: { getSessionFile: () => "/sessions/source.jsonl" },
-    }),
-    new Error("A workspace transition is already pending."),
-  );
+  assert.deepEqual(transitionArguments, {
+    branch: created.branch,
+    sourceSessionFile: "/sessions/source.jsonl",
+  });
+  assert.equal(scheduled, 0);
 
   agentSettled!();
   agentSettled!();
   assert.equal(scheduled, 1);
-  assert.equal(transition, undefined);
+  assert.equal(switchCalls, 0);
 
   await deferredTransition!();
-  assert.deepEqual(transition, {
-    workspace: created,
-    sessionFile: "/sessions/source.jsonl",
-  });
+  assert.equal(switchCalls, 1);
 });
 
-test("goto rejects an unsaved session before creating a workspace", async () => {
+test("goto reports a switch failure", async () => {
+  const messages: unknown[] = [];
+  let tool: any;
+  let agentSettled: (() => void) | undefined;
+  let deferredTransition: (() => Promise<void>) | undefined;
+  const extension = createGotoExtension({
+    createTransition: async () => workspace("feature/parser"),
+    switchPendingTransition: async () => {
+      throw new Error("target session could not be opened");
+    },
+    scheduleTransition(callback) {
+      deferredTransition = callback;
+    },
+  });
+  extension({
+    on(event, handler) {
+      if (event === "agent_settled") agentSettled = handler as () => void;
+    },
+    registerTool(definition) {
+      tool = definition;
+    },
+    sendMessage(message) {
+      messages.push(message);
+    },
+  } as never);
+
+  await tool.execute("call", { branch: "feature/parser" }, undefined, undefined, {
+    sessionManager: { getSessionFile: () => "/sessions/source.jsonl" },
+  });
+  agentSettled!();
+  await deferredTransition!();
+
+  assert.deepEqual(messages, [
+    {
+      customType: "goto-workspace-error",
+      content: "Workspace transition failed: target session could not be opened",
+      display: true,
+    },
+  ]);
+});
+
+test("goto rejects an unsaved session before creating a transition", async () => {
   let tool: any;
   let created = false;
   const extension = createGotoExtension({
-    store: {} as WorkspaceStore,
-    cwd: "/repo",
-    dependencies: {
-      resolveRepository: repository,
-      listWorkspaces: async () => [],
-      createWorkspace: async () => {
-        created = true;
-        return workspace("feature/parser");
-      },
+    createTransition: async () => {
+      created = true;
+      return workspace("feature/parser");
     },
-    async transition() {},
+    switchPendingTransition: async () => ({ cancelled: false }),
   });
   extension({
     on() {},

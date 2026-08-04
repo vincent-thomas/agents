@@ -38,11 +38,9 @@ export async function createGotoWorkspace(options: {
 }
 
 export function createGotoExtension(options: {
-  store: WorkspaceStore;
-  cwd: string;
-  transition: (workspace: AgentWorkspace, sessionFile: string) => Promise<void>;
+  createTransition: (branch: string, sourceSessionFile: string) => Promise<AgentWorkspace>;
+  switchPendingTransition: () => Promise<{ cancelled: boolean }>;
   scheduleTransition?: (transition: () => Promise<void>) => void;
-  dependencies?: GotoDependencies;
 }) {
   const scheduleTransition =
     options.scheduleTransition ??
@@ -51,24 +49,20 @@ export function createGotoExtension(options: {
     });
 
   return function gotoExtension(pi: ExtensionAPI) {
-    let pending:
-      | {
-          workspace: AgentWorkspace;
-          sessionFile: string;
-        }
-      | undefined;
+    let transitionPending = false;
     let transitionScheduled = false;
     let queue = Promise.resolve();
 
     pi.on("agent_settled", () => {
-      if (!pending || transitionScheduled) return;
+      if (!transitionPending || transitionScheduled) return;
       transitionScheduled = true;
-      const transition = pending;
       scheduleTransition(async () => {
         try {
-          await options.transition(transition.workspace, transition.sessionFile);
-          pending = undefined;
+          const result = await options.switchPendingTransition();
+          transitionPending = result.cancelled;
+          transitionScheduled = false;
         } catch (error) {
+          transitionPending = false;
           transitionScheduled = false;
           const message = `Workspace transition failed: ${error instanceof Error ? error.message : String(error)}`;
           try {
@@ -97,16 +91,10 @@ export function createGotoExtension(options: {
         });
         await previous;
         try {
-          if (pending) throw new Error("A workspace transition is already pending.");
           const sessionFile = ctx.sessionManager.getSessionFile();
           if (!sessionFile) throw new Error("The current session has not been saved yet.");
-          const workspace = await createGotoWorkspace({
-            store: options.store,
-            cwd: options.cwd,
-            branch: params.branch,
-            dependencies: options.dependencies,
-          });
-          pending = { workspace, sessionFile };
+          const workspace = await options.createTransition(params.branch, sessionFile);
+          transitionPending = true;
           return {
             content: [
               {

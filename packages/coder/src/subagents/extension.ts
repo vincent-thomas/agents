@@ -10,9 +10,22 @@ export interface SubagentToolExecution {
   name: string;
   args: Record<string, unknown>;
   status: SubagentToolStatus;
+  subagent?: SubagentTrace;
+}
+
+export interface SubagentTrace {
+  name: string;
+  label: string;
+  prompt?: string;
+  result?: string;
+  toolTrace: SubagentToolExecution[];
 }
 
 interface SubagentToolDetails {
+  subagent: SubagentTrace;
+}
+
+interface LegacySubagentToolDetails {
   toolTrace: SubagentToolExecution[];
 }
 
@@ -73,13 +86,64 @@ export function startSubagentToolExecution(
   return trace.map((item, index) => (index === existingIndex ? execution : item));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSubagentToolExecution(value: unknown): value is SubagentToolExecution {
+  if (!isRecord(value) || !isRecord(value.args)) return false;
+  if (typeof value.id !== "string" || typeof value.name !== "string") return false;
+  if (value.status !== "running" && value.status !== "succeeded" && value.status !== "failed") {
+    return false;
+  }
+  return value.subagent === undefined || isSubagentTrace(value.subagent);
+}
+
+function isSubagentTrace(value: unknown): value is SubagentTrace {
+  if (!isRecord(value)) return false;
+  if (typeof value.name !== "string" || typeof value.label !== "string") return false;
+  if (value.prompt !== undefined && typeof value.prompt !== "string") return false;
+  if (value.result !== undefined && typeof value.result !== "string") return false;
+  return Array.isArray(value.toolTrace) && value.toolTrace.every(isSubagentToolExecution);
+}
+
+function traceFromToolResult(result: unknown): SubagentTrace | undefined {
+  if (!isRecord(result) || !isRecord(result.details)) return undefined;
+  return isSubagentTrace(result.details.subagent) ? result.details.subagent : undefined;
+}
+
+function legacyTraceFromDetails(details: unknown): SubagentToolExecution[] {
+  if (!isRecord(details) || !Array.isArray(details.toolTrace)) return [];
+  return details.toolTrace.every(isSubagentToolExecution)
+    ? (details as unknown as LegacySubagentToolDetails).toolTrace
+    : [];
+}
+
+export function updateSubagentToolExecution(
+  trace: SubagentToolExecution[],
+  id: string,
+  result: unknown,
+): SubagentToolExecution[] {
+  const subagent = traceFromToolResult(result);
+  if (!subagent) return trace;
+  return trace.map((item) => (item.id === id ? { ...item, subagent } : item));
+}
+
 export function finishSubagentToolExecution(
   trace: SubagentToolExecution[],
   id: string,
   failed: boolean,
+  result?: unknown,
 ): SubagentToolExecution[] {
+  const subagent = traceFromToolResult(result);
   return trace.map((item) =>
-    item.id === id ? { ...item, status: failed ? "failed" : "succeeded" } : item,
+    item.id === id
+      ? {
+          ...item,
+          status: failed ? "failed" : "succeeded",
+          ...(subagent ? { subagent } : {}),
+        }
+      : item,
   );
 }
 
@@ -212,7 +276,16 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
             : undefined;
         let toolTrace: SubagentToolExecution[] = [];
         let workflowStatus: string | undefined;
-        const details = (): SubagentToolDetails => ({ toolTrace });
+        let resultText: string | undefined;
+        const details = (): SubagentToolDetails => ({
+          subagent: {
+            name: definition.name,
+            label: definition.label,
+            ...(parentPrompt ? { prompt: parentPrompt } : {}),
+            ...(resultText ? { result: resultText } : {}),
+            toolTrace,
+          },
+        });
         const notify = () =>
           onUpdate?.({
             content: [
@@ -242,13 +315,24 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
               event.args,
             );
             notify();
+          } else if (event.type === "tool_execution_update") {
+            toolTrace = updateSubagentToolExecution(
+              toolTrace,
+              event.toolCallId,
+              event.partialResult,
+            );
+            notify();
           } else if (event.type === "tool_execution_end") {
-            toolTrace = finishSubagentToolExecution(toolTrace, event.toolCallId, event.isError);
+            toolTrace = finishSubagentToolExecution(
+              toolTrace,
+              event.toolCallId,
+              event.isError,
+              event.result,
+            );
             notify();
           }
         });
 
-        let resultText: string | undefined;
         try {
           resultText = await runSubagentInvocation(invocation, (text) => {
             workflowStatus = text;
@@ -270,8 +354,9 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
       },
       renderResult(result, { expanded, isPartial }, theme, context) {
         const content = result.content.find((item) => item.type === "text");
-        const resultText = content?.type === "text" ? theme.fg("toolOutput", content.text) : "";
-        const details = result.details as SubagentToolDetails | undefined;
+        const rawResultText = content?.type === "text" ? content.text : "";
+        const resultText = theme.fg("toolOutput", rawResultText);
+        const details = result.details;
 
         if (!expanded) return new SubagentResultText(resultText);
 
@@ -283,22 +368,71 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
           acceptsParentPrompt && "prompt" in context.args && typeof context.args.prompt === "string"
             ? context.args.prompt
             : undefined;
-        let text = theme.fg("toolOutput", parentPrompt ?? definition.label);
-        if (details?.toolTrace.length) {
-          text += `\n\n${theme.fg("muted", "Sub-agent tools:")}`;
-          for (const execution of details.toolTrace) {
-            const marker =
-              execution.status === "running"
-                ? theme.fg("warning", "…")
-                : execution.status === "failed"
-                  ? theme.fg("error", "✗")
-                  : theme.fg("success", "✓");
-            text += `\n${marker} ${theme.fg("toolOutput", formatSubagentToolExecution(execution))}`;
+        const root =
+          isRecord(details) && isSubagentTrace(details.subagent)
+            ? details.subagent
+            : {
+                name: definition.name,
+                label: definition.label,
+                ...(parentPrompt ? { prompt: parentPrompt } : {}),
+                ...(!isPartial && rawResultText ? { result: rawResultText } : {}),
+                toolTrace: legacyTraceFromDetails(details),
+              };
+        const renderTrace = (
+          trace: SubagentTrace,
+          depth: number,
+          includeHeader = true,
+          partialRoot = false,
+        ): string[] => {
+          const indent = "  ".repeat(depth);
+          const lines: string[] = [];
+          if (includeHeader) {
+            const header =
+              partialRoot && depth === 0
+                ? (trace.prompt ?? trace.label)
+                : trace.prompt
+                  ? `${trace.label}: ${trace.prompt}`
+                  : trace.label;
+            lines.push(
+              ...header.split("\n").map((line) => `${indent}${theme.fg("toolOutput", line)}`),
+            );
           }
-        }
-        if (!isPartial && resultText) text += `\n\n${resultText}`;
-
-        return new SubagentResultText(text);
+          if (trace.toolTrace.length) {
+            lines.push("", `${indent}${theme.fg("muted", "Sub-agent tools:")}`);
+            for (const execution of trace.toolTrace) {
+              const marker =
+                execution.status === "running"
+                  ? theme.fg("warning", "…")
+                  : execution.status === "failed"
+                    ? theme.fg("error", "✗")
+                    : theme.fg("success", "✓");
+              const summary = execution.subagent
+                ? execution.subagent.prompt
+                  ? `${execution.subagent.label}: ${execution.subagent.prompt}`
+                  : execution.subagent.label
+                : formatSubagentToolExecution(execution);
+              const summaryLines = summary.split("\n");
+              lines.push(`${indent}${marker} ${theme.fg("toolOutput", summaryLines[0]!)}`);
+              lines.push(
+                ...summaryLines
+                  .slice(1)
+                  .map((line) => `${indent}  ${theme.fg("toolOutput", line)}`),
+              );
+              if (execution.subagent) {
+                lines.push(...renderTrace(execution.subagent, depth + 1, false));
+              }
+            }
+          }
+          if (trace.result) {
+            lines.push(
+              "",
+              ...trace.result.split("\n").map((line) => `${indent}${theme.fg("toolOutput", line)}`),
+            );
+          }
+          return lines;
+        };
+        const traceForRender = isPartial ? { ...root, result: undefined } : root;
+        return new SubagentResultText(renderTrace(traceForRender, 0, true, isPartial).join("\n"));
       },
     });
   };

@@ -20,6 +20,11 @@ test("registers one agent tool with an actor-specific prompt schema", () => {
   const registered: Array<{
     name: string;
     parameters: { anyOf: Array<{ properties: Record<string, unknown> }> };
+    renderCall: (
+      args: { actor?: string },
+      theme: unknown,
+      context: unknown,
+    ) => { render(width: number): string[] };
   }> = [];
   const extension = createSubagentToolsExtension({
     definitions,
@@ -39,6 +44,16 @@ test("registers one agent tool with an actor-specific prompt schema", () => {
     registered[0]!.parameters.anyOf.map((variant) => Object.keys(variant.properties)),
     [["actor", "prompt"], ["actor"], ["actor", "prompt"], ["actor", "prompt"]],
   );
+
+  const call = registered[0]!.renderCall(
+    { actor: "scout" },
+    {
+      bold: (text: string) => text,
+      fg: (_color: string, text: string) => text,
+    },
+    {},
+  );
+  assert.deepEqual(call.render("agent scout".length), ["agent scout"]);
 });
 
 test("exposes a parent-prompted sub-agent as a slash command", async () => {

@@ -198,6 +198,10 @@ export function createSubagentToolsExtension(options: SubagentToolsExtensionOpti
         ...options.definitions.map((definition) => `${definition.name}: ${definition.description}`),
       ].join("\n"),
       parameters: Type.Union(variants),
+      renderCall(args, theme) {
+        const actor = typeof args.actor === "string" ? ` ${args.actor}` : "";
+        return new SubagentResultText(theme.fg("toolTitle", theme.bold(`agent${actor}`)));
+      },
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
         const definition = byName.get(params.actor);
         if (!definition) throw new Error(`Sub-agent '${params.actor}' is not available`);

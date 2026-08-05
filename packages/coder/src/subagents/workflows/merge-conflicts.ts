@@ -158,10 +158,10 @@ export function createMergeConflictsWorkflow(
 
         onProgress("Continuing the cascading GitHub stack rebase…");
         const continuation = await continueStackRebase(cwd, signal);
-        const unmergedAfterContinuation = await commandOutput("git", ["ls-files", "-u"], cwd, signal);
-        if (unmergedAfterContinuation.trim() !== "") {
+        const pendingUnmergedEntries = await commandOutput("git", ["ls-files", "-u"], cwd, signal);
+        if (pendingUnmergedEntries.trim() !== "") {
           onProgress("The stack rebase reached another conflict; resuming the resolver…");
-          prompt = continuingStackRebasePrompt(continuation.output, unmergedAfterContinuation);
+          prompt = continuingStackRebasePrompt(continuation.output, pendingUnmergedEntries);
           continue;
         }
         if (!continuation.success) {

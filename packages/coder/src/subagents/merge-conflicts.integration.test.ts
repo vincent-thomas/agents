@@ -190,3 +190,7 @@ suite("merge-only conflict workflow in real repositories", () => {
 test("keeps the merge-conflicts integration definition available", () => {
   assert.equal(definition.name, "merge_conflicts");
 });
+
+test("keeps the merge-conflicts prompt available to integration tests", () => {
+  assert.equal(typeof createMergeConflictsPrompt, "function");
+});

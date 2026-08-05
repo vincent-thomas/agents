@@ -12,6 +12,9 @@ import {
   allSuitesComplete,
   needsPush,
   branchExistsOnOrigin,
+  findClosestBaseBranch,
+  getPrBaseBranch,
+  createDraftPr,
   gitPush,
   prReadyCommand,
   prViewForBranchCommand,
@@ -20,8 +23,8 @@ import {
   parseReviews,
 } from "./logic.ts";
 import { execSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 
 // ---------------------------------------------------------------------------
@@ -210,6 +213,23 @@ function git(cmd: string, cwd: string): string {
     .trim();
 }
 
+async function withFakeGh<T>(cwd: string, script: string, fn: () => Promise<T>): Promise<T> {
+  const bin = join(cwd, "fake-bin");
+  mkdirSync(bin);
+  const gh = join(bin, "gh");
+  writeFileSync(gh, `#!/bin/sh\n${script}\n`);
+  chmodSync(gh, 0o755);
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${bin}${delimiter}${originalPath ?? ""}`;
+  try {
+    return await fn();
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+  }
+}
+
 function withGitRepos(
   fn: (local: string, remote: string) => void | Promise<void>,
 ): () => Promise<void> {
@@ -312,6 +332,156 @@ suite("branchExistsOnOrigin", () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// findClosestBaseBranch
+// ---------------------------------------------------------------------------
+
+suite("findClosestBaseBranch", () => {
+  test(
+    "selects the remote branch from which the current branch diverged",
+    withGitRepos(async (local) => {
+      git("git checkout -b feature/parent", local);
+      writeFileSync(join(local, "parent.txt"), "parent");
+      git("git add .", local);
+      git("git commit -m 'parent commit'", local);
+      git("git push -u origin feature/parent", local);
+
+      git("git checkout -b feature/child", local);
+      writeFileSync(join(local, "child.txt"), "child");
+      git("git add .", local);
+      git("git commit -m 'child commit'", local);
+
+      assert.equal(await findClosestBaseBranch(local), "feature/parent");
+    }),
+  );
+
+  test(
+    "uses branch-creation history when siblings share the nearest divergence",
+    withGitRepos(async (local) => {
+      git("git checkout -b feature/parent", local);
+      writeFileSync(join(local, "parent.txt"), "parent");
+      git("git add .", local);
+      git("git commit -m 'parent commit'", local);
+      git("git push -u origin feature/parent", local);
+      git("git branch feature/sibling", local);
+      git("git push origin feature/sibling", local);
+
+      git("git checkout -b feature/child", local);
+      writeFileSync(join(local, "child.txt"), "child");
+      git("git add .", local);
+      git("git commit -m 'child commit'", local);
+      git("git push -u origin feature/child", local);
+
+      git("git checkout -b feature/descendant", local);
+      writeFileSync(join(local, "descendant.txt"), "descendant");
+      git("git add .", local);
+      git("git commit -m 'descendant commit'", local);
+      git("git push -u origin feature/descendant", local);
+
+      git("git checkout feature/parent", local);
+      writeFileSync(join(local, "parent-later.txt"), "parent later");
+      git("git add .", local);
+      git("git commit -m 'later parent commit'", local);
+      git("git push", local);
+      git("git checkout feature/child", local);
+
+      assert.equal(await findClosestBaseBranch(local), "feature/parent");
+    }),
+  );
+
+  test(
+    "ignores remote branches with unrelated histories",
+    withGitRepos(async (local) => {
+      git("git checkout --orphan feature/orphan", local);
+      git("git rm -rf .", local);
+      writeFileSync(join(local, "orphan.txt"), "orphan");
+      git("git add .", local);
+      git("git commit -m 'orphan commit'", local);
+
+      assert.equal(await findClosestBaseBranch(local), null);
+    }),
+  );
+});
+
+suite("getPrBaseBranch", () => {
+  test(
+    "preserves the base reported for an existing PR",
+    withGitRepos(async (local) => {
+      const fakeGh =
+        'if [ "$1" = "pr" ] && [ "$2" = "list" ]; then\n' +
+        '  printf "%s\\n" "feature/recorded-base"\n' +
+        "  exit 0\n" +
+        "fi\n" +
+        "exit 1";
+      await withFakeGh(local, fakeGh, async () => {
+        assert.equal(await getPrBaseBranch(local), "feature/recorded-base");
+      });
+    }),
+  );
+
+  test(
+    "fails safely when GitHub cannot determine whether a PR exists",
+    withGitRepos(async (local) => {
+      git("git checkout -b feature/current", local);
+      writeFileSync(join(local, "feature.txt"), "feature");
+      git("git add .", local);
+      git("git commit -m 'feature commit'", local);
+
+      await withFakeGh(local, "exit 1", async () => {
+        assert.equal(await getPrBaseBranch(local), null);
+      });
+    }),
+  );
+
+  test(
+    "does not fall back to an unrelated default branch",
+    withGitRepos(async (local) => {
+      git("git checkout --orphan feature/orphan", local);
+      git("git rm -rf .", local);
+      writeFileSync(join(local, "orphan.txt"), "orphan");
+      git("git add .", local);
+      git("git commit -m 'orphan commit'", local);
+
+      const fakeGh =
+        'if [ "$2" = "list" ]; then exit 0; fi\n' +
+        'if [ "$2" = "view" ]; then printf "%s\\n" "main"; exit 0; fi\n' +
+        "exit 1";
+      await withFakeGh(local, fakeGh, async () => {
+        assert.equal(await getPrBaseBranch(local), null);
+      });
+    }),
+  );
+
+  test(
+    "passes the selected base explicitly to PR creation",
+    withGitRepos(async (local) => {
+      git("git checkout -b feature/current", local);
+      const capturedBase = join(local, "captured-base");
+      const fakeGh =
+        'if [ "$1" = "pr" ] && [ "$2" = "create" ]; then\n' +
+        "  while [ $# -gt 0 ]; do\n" +
+        `    if [ "$1" = "--base" ]; then printf "%s\\n" "$2" > ${JSON.stringify(capturedBase)}; fi\n` +
+        "    shift\n" +
+        "  done\n" +
+        '  printf "%s\\n" "https://example.test/pull/1"\n' +
+        "  exit 0\n" +
+        "fi\n" +
+        "exit 1";
+
+      await withFakeGh(local, fakeGh, async () => {
+        const result = await createDraftPr(
+          local,
+          "Feature title",
+          "Feature body",
+          "feature/parent",
+        );
+        assert.equal(result.success, true);
+        assert.equal(readFileSync(capturedBase, "utf8").trim(), "feature/parent");
+      });
+    }),
+  );
 });
 
 // ---------------------------------------------------------------------------

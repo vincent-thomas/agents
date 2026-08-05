@@ -134,7 +134,114 @@ async function fetchBranch(cwd: string, branch: string, signal?: AbortSignal): P
 
 const GH_DEFAULT_BRANCH_QUERY =
   "gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null";
-const GH_PR_BASE_BRANCH_QUERY = "gh pr view --json baseRefName --jq '.baseRefName' 2>/dev/null";
+interface BranchDistance {
+  name: string;
+  headOnly: number;
+  branchOnly: number;
+}
+
+/**
+ * Find the remote branch with the nearest divergence point from HEAD.
+ *
+ * `headOnly` is the number of commits the resulting PR would contain, so it
+ * identifies how far back HEAD split from each candidate. A matching branch-
+ * creation checkout from the local reflog breaks ties, followed by the
+ * candidate that has moved least since the split. Branches descended from
+ * HEAD cannot be its base and are excluded.
+ */
+async function getBranchDistance(
+  cwd: string,
+  name: string,
+  signal?: AbortSignal,
+): Promise<BranchDistance | null> {
+  const ref = shellQuote(`refs/remotes/origin/${name}`);
+  const mergeBase = await tryExec(`git merge-base HEAD ${ref} 2>/dev/null`, {
+    cwd,
+    timeout: 10_000,
+    signal,
+  });
+  if (!mergeBase) return null;
+
+  const counts = await tryExec(`git rev-list --left-right --count HEAD...${ref} 2>/dev/null`, {
+    cwd,
+    timeout: 10_000,
+    signal,
+  });
+  if (!counts) return null;
+
+  const [headOnly, branchOnly] = counts.split(/\s+/).map(Number);
+  if (!Number.isInteger(headOnly) || !Number.isInteger(branchOnly) || headOnly === 0) return null;
+  return { name, headOnly, branchOnly };
+}
+
+async function getBranchCreationSource(
+  cwd: string,
+  head: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const reflog = await tryExec("git reflog --format='%gs' HEAD", {
+    cwd,
+    timeout: 10_000,
+    signal,
+  });
+  if (!reflog) return null;
+
+  const prefix = "checkout: moving from ";
+  const suffix = ` to ${head}`;
+  const matchingCheckouts = reflog
+    .split("\n")
+    .filter((entry) => entry.startsWith(prefix) && entry.endsWith(suffix));
+  const creationCheckout = matchingCheckouts.at(-1);
+  return creationCheckout?.slice(prefix.length, -suffix.length) ?? null;
+}
+
+export async function findClosestBaseBranch(
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  try {
+    const head = await currentBranch(cwd, signal);
+    if (!head) return null;
+
+    const creationSource = await getBranchCreationSource(cwd, head, signal);
+    await execAsync("git fetch origin --prune", { cwd, timeout: 30_000, signal });
+    const { stdout } = await execAsync(
+      "git for-each-ref --format='%(refname:strip=3)%09%(symref)' refs/remotes/origin",
+      { cwd, timeout: 10_000, signal },
+    );
+
+    let closest: BranchDistance | null = null;
+    for (const line of stdout.split("\n")) {
+      const [name, symref] = line.trim().split("\t");
+      if (!name || symref || name === head) continue;
+
+      const candidate = await getBranchDistance(cwd, name, signal);
+      if (!candidate) continue;
+      const candidateIsCreationSource = candidate.name === creationSource;
+      const closestIsCreationSource = closest?.name === creationSource;
+      if (
+        !closest ||
+        candidate.headOnly < closest.headOnly ||
+        (candidate.headOnly === closest.headOnly &&
+          candidateIsCreationSource &&
+          !closestIsCreationSource) ||
+        (candidate.headOnly === closest.headOnly &&
+          candidateIsCreationSource === closestIsCreationSource &&
+          candidate.branchOnly < closest.branchOnly) ||
+        (candidate.headOnly === closest.headOnly &&
+          candidateIsCreationSource === closestIsCreationSource &&
+          candidate.branchOnly === closest.branchOnly &&
+          candidate.name.localeCompare(closest.name) < 0)
+      ) {
+        closest = candidate;
+      }
+    }
+
+    return closest?.name ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Detect the repo's default branch (e.g. "main") via `gh`, falling back to
@@ -630,18 +737,53 @@ export function trimLog(log: string, maxLines: number): string {
 // PR conflict detection & resolution
 // ---------------------------------------------------------------------------
 
+interface PrBaseLookup {
+  succeeded: boolean;
+  base: string | null;
+}
+
+async function getExistingPrBase(cwd: string, signal?: AbortSignal): Promise<PrBaseLookup> {
+  const head = await currentBranch(cwd, signal);
+  if (!head) return { succeeded: false, base: null };
+
+  try {
+    const { stdout } = await execAsync(
+      `gh pr list --head ${shellQuote(head)} --state open --json baseRefName --jq '.[0].baseRefName // empty'`,
+      { cwd, timeout: 15_000, signal },
+    );
+    return { succeeded: true, base: stdout.trim() || null };
+  } catch {
+    return { succeeded: false, base: null };
+  }
+}
+
 /**
- * Get the base branch name of the current PR (e.g. "main").
- * Returns null if there's no PR or the query fails.
+ * Get the base branch name of the current PR or infer one for a new PR.
+ * Returns null when GitHub cannot be queried or no valid ancestor-side remote
+ * branch exists.
  */
 export async function getPrBaseBranch(cwd: string, signal?: AbortSignal): Promise<string | null> {
-  // Try to get the base branch from an existing PR first.
-  const baseFromPr = await tryExec(GH_PR_BASE_BRANCH_QUERY, { cwd, timeout: 15_000, signal });
-  if (baseFromPr) return baseFromPr;
+  const existing = await getExistingPrBase(cwd, signal);
+  if (!existing.succeeded) return null;
+  if (existing.base) return existing.base;
 
-  // Fall back to the repo's default branch (e.g. "main") when no PR exists.
-  // This ensures the base-branch-ahead check runs even on the first push.
-  return tryExec(GH_DEFAULT_BRANCH_QUERY, { cwd, timeout: 15_000, signal });
+  // A new PR should target the remote branch whose history diverged most
+  // recently from HEAD, which normally recovers the branch from which the
+  // current branch was created.
+  const closest = await findClosestBaseBranch(cwd, signal);
+  if (closest) return closest;
+
+  // Keep the old default-branch fallback only when it is a valid candidate.
+  // This avoids constructing a PR against an unrelated branch or a branch
+  // whose history descends from HEAD.
+  const defaultBranch = await getDefaultBranch(cwd, signal);
+  try {
+    await fetchBranch(cwd, defaultBranch, signal);
+  } catch {
+    // A cached remote ref can still be valid when the network is unavailable.
+  }
+  const distance = await getBranchDistance(cwd, defaultBranch, signal);
+  return distance ? defaultBranch : null;
 }
 
 /**
@@ -922,18 +1064,19 @@ export async function generatePrTitle(cwd: string, signal?: AbortSignal): Promis
  * Generate a PR body from commit messages since branch divergence.
  * Returns a formatted markdown string with commit list and description.
  */
-export async function generatePrBody(cwd: string, signal?: AbortSignal): Promise<string> {
+export async function generatePrBody(
+  cwd: string,
+  baseBranch: string,
+  signal?: AbortSignal,
+): Promise<string> {
   try {
-    // Determine the repo's default branch, then find the fork point.
     let base: string;
     try {
-      const defaultBranch = await getDefaultBranch(cwd, signal);
-
-      // Fetch the latest base branch ref so merge-base is accurate.
-      await fetchBranch(cwd, defaultBranch, signal);
+      // Fetch the latest target branch ref so merge-base is accurate.
+      await fetchBranch(cwd, baseBranch, signal);
 
       const { stdout: mergeBase } = await execAsync(
-        `git merge-base HEAD ${shellQuote(`origin/${defaultBranch}`)} 2>/dev/null || echo HEAD~1`,
+        `git merge-base HEAD ${shellQuote(`origin/${baseBranch}`)} 2>/dev/null || echo HEAD~1`,
         { cwd, timeout: 10_000, signal },
       );
       base = mergeBase.trim();
@@ -973,15 +1116,13 @@ export async function createDraftPr(
   cwd: string,
   title: string,
   body: string,
+  base: string,
   signal?: AbortSignal,
 ): Promise<{ success: boolean; url: string | null; output: string }> {
   try {
     // Get the current branch name to pass explicitly via --head.
     const head = await currentBranch(cwd, signal);
     if (!head) return { success: false, url: null, output: "Could not determine current branch." };
-
-    // Detect the default base branch via gh.
-    const base = await getDefaultBranch(cwd, signal);
 
     const { stdout, stderr } = await execAsync(
       `gh pr create --draft --title ${shellQuote(title)} --body ${shellQuote(body)} --head ${shellQuote(head)} --base ${shellQuote(base)}`,

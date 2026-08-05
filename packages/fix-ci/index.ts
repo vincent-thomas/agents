@@ -102,9 +102,21 @@ export function createFixCiExtension(options: {
         "switching checkout and require the final point to be HEAD. After this tool " +
         "succeeds, use push_and_check_ci to submit and check the current branch.",
       parameters: TObject({
-        branches: TArray(TString(), { minItems: 1 }),
-        base: Optional(TString()),
-        branch_points: Optional(TArray(TString())),
+        branches: TArray(TString(), {
+          minItems: 1,
+          description:
+            "Local branch names ordered from the stack base to its tip. The final name must be the owned workspace branch when branch_points is provided.",
+        }),
+        base: Optional(
+          TString({ description: "Optional GitHub base branch for the bottom PR in the stack." }),
+        ),
+        branch_points: Optional(
+          TArray(TString(), {
+            minItems: 1,
+            description:
+              "Commit-ish for each branch, ordered base-to-tip and ending at HEAD. Missing local branches are created at these points.",
+          }),
+        ),
       }),
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {

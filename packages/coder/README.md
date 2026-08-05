@@ -22,12 +22,15 @@ bun run /path/to/agents/packages/coder/src/index.ts goto
 
 Inside a managed workspace, use `/name <task>` to give the session a friendly
 name and `/workspace` to inspect its branch, base commit, worktree, and session file.
-The model cannot create or switch branches directly. Commits use `git_commit`;
-`create_github_stack` initializes existing branches as a stack; and
-`push_and_check_ci` uses `gh stack sync`/`submit` for stacked branches while
-retaining the ordinary push, PR creation, target-branch merge, and CI workflow
-for unstacked branches. Stack rebase conflicts are completed through the
-`merge_conflicts` agent.
+The model cannot create or switch branches directly. Commits use `git_commit`.
+For a major request with separable changes, the model can make every PR boundary
+an independently valid commit and call `create_github_stack` with ordered branch
+names plus matching `branch_points` (for example, `HEAD~2`, `HEAD~1`, `HEAD`).
+The tool materializes missing local branch refs without switching the checkout;
+the host-owned branch remains the stack tip. `push_and_check_ci` then uses
+`gh stack sync`/`submit` for stacked branches while retaining the ordinary push,
+PR creation, target-branch merge, and CI workflow for unstacked branches. Stack
+rebase conflicts are completed through the `merge_conflicts` agent.
 
 Install dependencies from the repository root with `bun install`, and validate
 changes with `make`.

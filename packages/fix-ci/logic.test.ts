@@ -13,6 +13,8 @@ import {
   needsPush,
   branchExistsOnOrigin,
   gitPush,
+  prReadyCommand,
+  prViewForBranchCommand,
   extractRunId,
   trimLog,
   parseReviews,
@@ -21,6 +23,24 @@ import { execSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+// ---------------------------------------------------------------------------
+// Explicit PR command targets
+// ---------------------------------------------------------------------------
+
+suite("PR command targets", () => {
+  test("terminates options before explicit stack branch targets", () => {
+    assert.equal(
+      prViewForBranchCommand("--repo=other/project"),
+      "gh pr view --json number,state,isDraft,headRefOid -- '--repo=other/project'",
+    );
+    assert.equal(prReadyCommand("feature/part-one"), "gh pr ready -- 'feature/part-one'");
+  });
+
+  test("preserves ordinary current-branch readiness", () => {
+    assert.equal(prReadyCommand(), "gh pr ready");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // isFailure (bucket-based)

@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { suite, test } from "node:test";
 import { createFixCiExtension } from "../../../fix-ci/index.ts";
 import type { GhStackCommandRunner } from "../../../fix-ci/github-stack.ts";
 import type { StackReadinessRunner } from "../../../fix-ci/stack-readiness.ts";
 import { parseSubagentDefinition } from "./definitions.ts";
-import { createMergeConflictsPrompt } from "./prompts/merge-conflicts.ts";
+import { createMergeConflictsPrompt, type CommandOutputFn } from "./prompts/merge-conflicts.ts";
 import { createMergeConflictsWorkflow } from "./workflows/merge-conflicts.ts";
+
+const execFileAsync = promisify(execFile);
 
 const definition = parseSubagentDefinition(
   `---
@@ -247,14 +250,13 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
       if (args[1] === "sync") {
         syncAttempts += 1;
         if (syncAttempts === 1) {
+          // Real gh stack sync restores every branch when the first rebase
+          // conflicts, so no prepared operation remains for the resolver.
           git(cwd, ["switch", "lower"]);
-          const rebase = spawnSync("git", ["rebase", "main"], { cwd, encoding: "utf8" });
-          assert.notEqual(rebase.status, 0, "the lower branch rebase should conflict");
-          const statePath = git(cwd, ["rev-parse", "--git-path", "gh-stack-rebase-state"]).trim();
-          writeFileSync(join(cwd, statePath), JSON.stringify({ originalBranch: "tip" }) + "\n");
-          throw Object.assign(new Error("lower stack rebase stopped on a conflict"), {
-            stdout: rebase.stdout,
-            stderr: rebase.stderr,
+          git(cwd, ["switch", "tip"]);
+          throw Object.assign(new Error("stack sync restored after conflict"), {
+            stdout: "Conflict detected rebasing lower onto main\n",
+            stderr: "All branches restored to their original state.\n",
           });
         }
         return { stdout: "stack synced", stderr: "" };
@@ -310,16 +312,56 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
     assert.ok(pushAndCheck, "push_and_check_ci was not registered");
 
     const firstPush = await pushAndCheck.execute("first-push", {}, undefined, undefined, { cwd });
-    assert.equal(firstPush.details.stackSyncConflict, true);
-    assert.equal(firstPush.details.rebaseStatePreserved, true);
-    assert.deepEqual(firstPush.details.conflictPaths, ["lower.txt"]);
-    assert.notEqual(git(cwd, ["ls-files", "-u"]).trim(), "");
+    assert.equal(firstPush.details.stackSyncConflict, undefined);
+    assert.equal(firstPush.details.stackSyncFailed, true);
+    assert.equal(firstPush.details.stackReadiness, undefined);
+    assert.equal(git(cwd, ["ls-files", "-u"]).trim(), "");
+    assert.equal(git(cwd, ["branch", "--show-current"]).trim(), "tip");
+
+    const promptStackCalls: string[] = [];
+    const commandOutput: CommandOutputFn = async (command, args, workspace, signal) => {
+      const call = `${command} ${args.join(" ")}`;
+      if (command === "gh") {
+        promptStackCalls.push(call);
+        if (call === "gh stack view --json") {
+          return '{"branches":[{"branch":"lower"},{"branch":"tip"}]}';
+        }
+        if (call === "gh stack rebase") {
+          git(workspace, ["switch", "lower"]);
+          const rebase = spawnSync("git", ["rebase", "main"], {
+            cwd: workspace,
+            encoding: "utf8",
+          });
+          assert.notEqual(rebase.status, 0, "the lower branch rebase should conflict");
+          const statePath = git(workspace, [
+            "rev-parse",
+            "--git-path",
+            "gh-stack-rebase-state",
+          ]).trim();
+          writeFileSync(
+            join(workspace, statePath),
+            JSON.stringify({ originalBranch: "tip" }) + "\n",
+          );
+          throw Object.assign(new Error("lower stack rebase stopped on a conflict"), {
+            stdout: rebase.stdout,
+            stderr: rebase.stderr,
+          });
+        }
+      }
+      const result = await execFileAsync(command, args, {
+        cwd: workspace,
+        signal,
+        encoding: "utf8",
+      });
+      return String(result.stdout);
+    };
     const statePath = git(cwd, ["rev-parse", "--git-path", "gh-stack-rebase-state"]).trim();
+    const prompt = await createMergeConflictsPrompt(commandOutput)({ cwd, definition });
+    assert.deepEqual(promptStackCalls, ["gh stack view --json", "gh stack rebase"]);
+    assert.notEqual(git(cwd, ["ls-files", "-u"]).trim(), "");
     assert.deepEqual(JSON.parse(readFileSync(join(cwd, statePath), "utf8")), {
       originalBranch: "tip",
     });
-
-    const prompt = await createMergeConflictsPrompt()({ cwd, definition });
     const resolvedPaths: string[] = [];
     let assistantReport = "";
     let continuationCalls = 0;

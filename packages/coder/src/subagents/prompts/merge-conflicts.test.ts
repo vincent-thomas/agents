@@ -6,6 +6,13 @@ import {
   type CommandOutputFn,
 } from "./merge-conflicts.ts";
 
+function noGitOperation(call: string): string | undefined {
+  if (call.startsWith("git rev-parse --verify")) throw new Error("missing");
+  if (call === "git rev-parse --git-path rebase-merge") return ".git/rebase-merge";
+  if (call === "git rev-parse --git-path rebase-apply") return ".git/rebase-apply";
+  return undefined;
+}
+
 test("fetches the PR target and preserves a conflicting merge for resolution", async () => {
   const calls: string[] = [];
   let unmergedChecks = 0;
@@ -17,7 +24,12 @@ test("fetches the PR target and preserves a conflicting merge for resolution", a
       return unmergedChecks === 1 ? "" : "100644 abc 2\tsrc/index.ts\n";
     }
     if (call === "git status --porcelain") return "";
-    if (command === "gh") return "main\n";
+    if (call === "gh stack view --json") {
+      throw Object.assign(new Error("not stacked"), {
+        stderr: 'current branch "feature" is not part of a stack',
+      });
+    }
+    if (call === "gh pr view --json baseRefName --jq .baseRefName") return "main\n";
     if (call === "git fetch origin +main:refs/remotes/origin/main") return "";
     if (call === "git merge --no-commit --no-ff origin/main") {
       throw Object.assign(new Error("merge conflict"), {
@@ -49,7 +61,12 @@ test("aborts a clean no-commit merge", async () => {
     calls.push(call);
     if (call === "git ls-files -u") return "";
     if (call === "git status --porcelain") return "";
-    if (command === "gh") return "main\n";
+    if (call === "gh stack view --json") {
+      throw Object.assign(new Error("not stacked"), {
+        stderr: 'no stack found for branch "feature"',
+      });
+    }
+    if (call === "gh pr view --json baseRefName --jq .baseRefName") return "main\n";
     if (call === "git fetch origin +main:refs/remotes/origin/main") return "";
     if (call === "git merge --no-commit --no-ff origin/main") return "clean\n";
     if (call === "git rev-parse --verify -q MERGE_HEAD") return "merge-head\n";
@@ -65,6 +82,251 @@ test("aborts a clean no-commit merge", async () => {
     /origin\/main merges cleanly/,
   );
   assert.equal(calls.filter((call) => call === "git merge --abort").length, 1);
+});
+
+test("starts a stacked rebase and preserves its real conflicts", async () => {
+  const calls: string[] = [];
+  let unmergedChecks = 0;
+  let rebaseStarted = false;
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    calls.push(call);
+    if (call === "git ls-files -u") {
+      unmergedChecks += 1;
+      return unmergedChecks === 1 ? "" : "100644 abc 2\tsrc/index.ts\n";
+    }
+    if (call === "git status --porcelain") return "";
+    if (call === "git branch --show-current") return "feature\n";
+    const operationResult = noGitOperation(call);
+    if (operationResult !== undefined) return operationResult;
+    if (call === "git rev-parse --git-path gh-stack-rebase-state") {
+      return ".git/gh-stack-rebase-state\n";
+    }
+    if (call === "gh stack view --json") return '{"branches":[{"branch":"feature"}]}';
+    if (call === "gh stack rebase") {
+      rebaseStarted = true;
+      throw Object.assign(new Error("stack rebase conflict"), {
+        stdout: "rebase output\n",
+        stderr: "CONFLICT (content): src/index.ts\n",
+      });
+    }
+    if (call === "git status --short") return "UU src/index.ts\n";
+    if (call === "git diff --no-ext-diff --cc --diff-filter=U") {
+      return "diff --cc src/index.ts\n";
+    }
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  const prompt = await createMergeConflictsPrompt(commandOutput, (path) => {
+    return (
+      rebaseStarted && (path.endsWith("rebase-merge") || path.endsWith("gh-stack-rebase-state"))
+    );
+  })({
+    cwd: "/repo",
+    definition: {} as never,
+  });
+
+  assert.match(prompt, /rebasing the GitHub stack/);
+  assert.match(prompt, /rebase output/);
+  assert.match(prompt, /CONFLICT \(content\): src\/index\.ts/);
+  assert.match(prompt, /UU src\/index\.ts/);
+  assert.match(prompt, /100644 abc 2\tsrc\/index\.ts/);
+  assert.match(prompt, /diff --cc src\/index\.ts/);
+  assert.ok(calls.includes("gh stack view --json"));
+  assert.ok(calls.includes("gh stack rebase"));
+  assert.ok(!calls.some((call) => call.startsWith("gh pr view")));
+});
+
+test("fails safely when a stacked rebase completes without conflicts", async () => {
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    if (call === "git ls-files -u") return "";
+    if (call === "git status --porcelain") return "";
+    if (call === "git branch --show-current") return "feature\n";
+    const operationResult = noGitOperation(call);
+    if (operationResult !== undefined) return operationResult;
+    if (call === "git rev-parse --git-path gh-stack-rebase-state") return ".git/missing-state\n";
+    if (call === "gh stack view --json") return '{"branches":[{"branch":"feature"}]}';
+    if (call === "gh stack rebase") return "All branches in stack rebased\n";
+    if (call === "git switch -- feature") return "";
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  await assert.rejects(
+    createMergeConflictsPrompt(commandOutput)({
+      cwd: "/repo",
+      definition: {} as never,
+    }),
+    /GitHub stack rebase completed cleanly; no conflicts need resolution/,
+  );
+});
+
+test("fails safely when a stacked rebase fails without conflicts", async () => {
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    if (call === "git ls-files -u") return "";
+    if (call === "git status --porcelain") return "";
+    if (call === "git branch --show-current") return "feature\n";
+    const operationResult = noGitOperation(call);
+    if (operationResult !== undefined) return operationResult;
+    if (call === "git rev-parse --git-path gh-stack-rebase-state") return ".git/missing-state\n";
+    if (call === "gh stack view --json") return '{"branches":[{"branch":"feature"}]}';
+    if (call === "gh stack rebase") {
+      throw Object.assign(new Error("stack rebase failed"), {
+        stdout: "rebase output\n",
+        stderr: "fatal: unable to rebase\n",
+      });
+    }
+    if (call === "git switch -- feature") return "";
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  await assert.rejects(
+    createMergeConflictsPrompt(commandOutput)({
+      cwd: "/repo",
+      definition: {} as never,
+    }),
+    /GitHub stack rebase failed without producing conflicts:[\s\S]*fatal: unable to rebase/,
+  );
+});
+
+test("rejects malformed successful stack output instead of falling back to PR merging", async () => {
+  const calls: string[] = [];
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    calls.push(call);
+    if (call === "git ls-files -u") return "";
+    if (call === "git status --porcelain") return "";
+    if (call === "gh stack view --json") {
+      return '{"branches":[{"branch":"feature"},{"unknown":"base"}]}';
+    }
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  await assert.rejects(
+    createMergeConflictsPrompt(commandOutput)({ cwd: "/repo", definition: {} as never }),
+    /gh stack view failed:[\s\S]*malformed or empty/,
+  );
+  assert.ok(!calls.some((call) => call.includes("gh stack rebase")));
+  assert.ok(!calls.some((call) => call.startsWith("gh pr view")));
+});
+
+test("rejects an existing Git operation before starting a stack rebase", async () => {
+  const calls: string[] = [];
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    calls.push(call);
+    if (call === "git ls-files -u") return "";
+    if (call === "git status --porcelain") return "";
+    if (call === "git branch --show-current") return "feature\n";
+    if (call === "gh stack view --json") return '{"branches":[{"branch":"feature"}]}';
+    if (call === "git rev-parse --verify -q MERGE_HEAD") return "merge-head\n";
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  await assert.rejects(
+    createMergeConflictsPrompt(commandOutput)({ cwd: "/repo", definition: {} as never }),
+    /in-progress merge/,
+  );
+  assert.ok(!calls.includes("gh stack rebase"));
+  assert.ok(!calls.includes("git switch -- feature"));
+});
+
+test("restores the owned branch after a clean stack rebase", async () => {
+  const calls: string[] = [];
+  let currentBranch = "feature";
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    calls.push(call);
+    if (call === "git ls-files -u") return "";
+    if (call === "git status --porcelain") return "";
+    if (call === "git branch --show-current") return `${currentBranch}\n`;
+    const operationResult = noGitOperation(call);
+    if (operationResult !== undefined) return operationResult;
+    if (call === "git rev-parse --git-path gh-stack-rebase-state") return ".git/missing-state\n";
+    if (call === "gh stack view --json") return '{"branches":[{"branch":"feature"}]}';
+    if (call === "gh stack rebase") {
+      currentBranch = "lower";
+      return "All branches in stack rebased\n";
+    }
+    if (call === "git switch -- feature") {
+      currentBranch = "feature";
+      return "";
+    }
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  await assert.rejects(
+    createMergeConflictsPrompt(commandOutput)({ cwd: "/repo", definition: {} as never }),
+    /completed cleanly/,
+  );
+  assert.equal(currentBranch, "feature");
+  assert.equal(calls.filter((call) => call === "git switch -- feature").length, 1);
+});
+
+test("aborts and restores the branch when stack rebase is cancelled", async () => {
+  const controller = new AbortController();
+  const calls: string[] = [];
+  const cleanupSignals: Array<AbortSignal | undefined> = [];
+  const commandOutput: CommandOutputFn = async (command, args, _cwd, signal) => {
+    const call = `${command} ${args.join(" ")}`;
+    calls.push(call);
+    if (call === "git ls-files -u") return "";
+    if (call === "git status --porcelain") return "";
+    if (call === "git branch --show-current") return "feature\n";
+    const operationResult = noGitOperation(call);
+    if (operationResult !== undefined) return operationResult;
+    if (call === "git rev-parse --git-path gh-stack-rebase-state") {
+      return ".git/gh-stack-rebase-state\n";
+    }
+    if (call === "gh stack view --json") return '{"branches":[{"branch":"feature"}]}';
+    if (call === "gh stack rebase") {
+      controller.abort(new Error("cancelled"));
+      return "rebase completed\n";
+    }
+    if (call === "gh stack rebase --abort" || call === "git switch -- feature") {
+      cleanupSignals.push(signal);
+      return "";
+    }
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  await assert.rejects(
+    createMergeConflictsPrompt(commandOutput, (path) => path.endsWith("gh-stack-rebase-state"))({
+      cwd: "/repo",
+      definition: {} as never,
+      signal: controller.signal,
+    }),
+    /cancelled/,
+  );
+  assert.ok(calls.includes("gh stack rebase --abort"));
+  assert.ok(calls.includes("git switch -- feature"));
+  assert.ok(cleanupSignals.every((signal) => signal === undefined));
+});
+
+test("rejects non-stack probe failures instead of falling back to PR merging", async () => {
+  const calls: string[] = [];
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    calls.push(call);
+    if (call === "git ls-files -u") return "";
+    if (call === "git status --porcelain") return "";
+    if (call === "gh stack view --json") {
+      throw Object.assign(new Error("authentication failed"), {
+        stderr: "gh: authentication required\n",
+      });
+    }
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  await assert.rejects(
+    createMergeConflictsPrompt(commandOutput)({
+      cwd: "/repo",
+      definition: {} as never,
+    }),
+    /gh stack view failed:[\s\S]*authentication required/,
+  );
+  assert.ok(!calls.some((call) => call.startsWith("gh pr view")));
 });
 
 test("adopts conflicts from an existing merge", async () => {

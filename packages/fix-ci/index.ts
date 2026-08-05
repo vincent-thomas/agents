@@ -15,6 +15,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Array as TArray, Object as TObject, Optional, String as TString } from "typebox";
 import { currentBranch, isWorktreeDirty } from "./git-utils.ts";
+import { prepareBranchPoints } from "./branch-points.ts";
 import {
   gitPush,
   gitPushToOrigin,
@@ -70,20 +71,18 @@ export function createFixCiExtension(options: {
     const stackRunner = options.stackRunner ?? runGhStackCommand;
     const restoreBranch = options.restoreBranch ?? restoreWorkspaceBranch;
 
-    const restoreOwnedBranch = async (
-      cwd: string,
-      originalBranch: string,
-      signal?: AbortSignal,
-    ) => {
-      let current = await currentBranch(cwd, signal);
-      let clean = !(await isWorktreeDirty(cwd, signal));
+    const restoreOwnedBranch = async (cwd: string, originalBranch: string) => {
+      // Restoration is safety cleanup and must still run after the caller
+      // cancels the stack operation that moved the checkout.
+      let current = await currentBranch(cwd);
+      let clean = !(await isWorktreeDirty(cwd));
       let restoreOutput = "";
 
       if (current !== originalBranch && clean) {
-        const restoration = await restoreBranch(cwd, originalBranch, signal);
+        const restoration = await restoreBranch(cwd, originalBranch);
         restoreOutput = restoration.output;
-        current = await currentBranch(cwd, signal);
-        clean = !(await isWorktreeDirty(cwd, signal));
+        current = await currentBranch(cwd);
+        clean = !(await isWorktreeDirty(cwd));
       }
 
       const restored = current === originalBranch && clean;
@@ -98,11 +97,14 @@ export function createFixCiExtension(options: {
       description:
         "Initialize a GitHub CLI stack for the supplied branches. The working tree " +
         "must be clean and the workspace is restored to its original branch before " +
-        "returning. After this tool succeeds, use push_and_check_ci to submit and " +
-        "check the current branch.",
+        "returning. Optionally provide `branch_points`, one commit-ish per branch " +
+        "ordered base-to-tip; these materialize missing local branch refs without " +
+        "switching checkout and require the final point to be HEAD. After this tool " +
+        "succeeds, use push_and_check_ci to submit and check the current branch.",
       parameters: TObject({
         branches: TArray(TString(), { minItems: 1 }),
         base: Optional(TString()),
+        branch_points: Optional(TArray(TString())),
       }),
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -114,17 +116,41 @@ export function createFixCiExtension(options: {
             ? params.branches
             : [];
         const base = typeof params.base === "string" ? params.base : undefined;
+        const rawBranchPoints = params.branch_points;
+        const branchPointsSupplied = rawBranchPoints !== undefined;
+        const branchPoints =
+          Array.isArray(rawBranchPoints) &&
+          rawBranchPoints.every((point: unknown): point is string => typeof point === "string")
+            ? rawBranchPoints
+            : null;
 
         if (
           branches.length === 0 ||
           branches.some((branch) => branch.trim().length === 0) ||
-          (base !== undefined && base.trim().length === 0)
+          (base !== undefined && base.trim().length === 0) ||
+          (branchPointsSupplied &&
+            (branchPoints === null ||
+              branchPoints.length === 0 ||
+              branchPoints.some((point) => point.trim().length === 0)))
         ) {
           return respond(
-            "`branches` must contain at least one non-empty branch name; `base`, when provided, must be non-empty.",
+            "`branches` must contain at least one non-empty branch name; `base`, when provided, must be non-empty; `branch_points`, when provided, must contain non-empty commit points.",
             { invalidParameters: true },
           );
         }
+
+        if (
+          branchPointsSupplied &&
+          branchPoints !== null &&
+          branchPoints.length !== branches.length
+        ) {
+          return respond(
+            "When provided, `branch_points` must contain exactly one commit point for each branch, ordered base-to-tip.",
+            { invalidParameters: true, branches, branchPoints },
+          );
+        }
+        const providedBranchPoints = branchPointsSupplied ? (branchPoints ?? []) : [];
+        let materializedBranches: string[] = [];
 
         if (await isWorktreeDirty(cwd, signal)) {
           return respond(
@@ -139,7 +165,46 @@ export function createFixCiExtension(options: {
             stackCreationFailed: true,
           });
         }
-        if (!branches.includes(originalBranch)) {
+        if (branchPointsSupplied) {
+          if (branches[branches.length - 1] !== originalBranch) {
+            return respond(
+              `When \`branch_points\` is supplied, the final branch must be the owned workspace branch \`${originalBranch}\`.`,
+              {
+                invalidParameters: true,
+                currentBranch: originalBranch,
+                branches,
+                branchPoints: providedBranchPoints,
+              },
+            );
+          }
+
+          onUpdate?.({
+            content: [{ type: "text", text: "Preparing GitHub stack branch points…" }],
+          });
+          const preparation = await prepareBranchPoints(
+            cwd,
+            branches,
+            providedBranchPoints,
+            originalBranch,
+            signal,
+          );
+          materializedBranches = preparation.createdBranches;
+          if (!preparation.success) {
+            return respond(
+              "GitHub stack preparation failed, so stack initialization was not run:\n\n" +
+                `\`\`\`\n${preparation.output.trim()}\n\`\`\`\n\n` +
+                "Any local branch refs created during preparation were rolled back. Fix the branch points and try again.",
+              {
+                stackCreationFailed: true,
+                branchPointsPreparationFailed: true,
+                stackInitializationRun: false,
+                branches,
+                branchPoints: providedBranchPoints,
+                output: preparation.output,
+              },
+            );
+          }
+        } else if (!branches.includes(originalBranch)) {
           return respond(
             `The stack must include the owned workspace branch \`${originalBranch}\` so it can be submitted and checked without switching workspaces.`,
             {
@@ -152,7 +217,7 @@ export function createFixCiExtension(options: {
 
         onUpdate?.({ content: [{ type: "text", text: "Initializing GitHub stack…" }] });
         const init = await runGhStackInit(cwd, branches, base, signal, stackRunner);
-        const restoration = await restoreOwnedBranch(cwd, originalBranch, signal);
+        const restoration = await restoreOwnedBranch(cwd, originalBranch);
 
         if (!restoration.restored) {
           return respond(
@@ -178,10 +243,22 @@ export function createFixCiExtension(options: {
           );
         }
 
+        const materialized = branchPointsSupplied
+          ? ` Prepared ${providedBranchPoints.length} branch point${providedBranchPoints.length === 1 ? "" : "s"} without switching checkout.`
+          : "";
         return respond(
-          `GitHub stack created for ${branches.map((branch) => `\`${branch}\``).join(", ")}${base ? ` on base \`${base}\`` : ""}. ` +
-            "The workspace was restored. Call `push_and_check_ci` to submit and check CI.",
-          { stackCreated: true, workspaceRestored: true, branches, base: base ?? null },
+          `GitHub stack created for ${branches.map((branch) => `\`${branch}\``).join(", ")}${base ? ` on base \`${base}\`` : ""}.` +
+            materialized +
+            " The workspace was restored. Call `push_and_check_ci` to submit and check CI.",
+          {
+            stackCreated: true,
+            workspaceRestored: true,
+            branches,
+            base: base ?? null,
+            ...(branchPointsSupplied
+              ? { branchPoints: providedBranchPoints, materializedBranches }
+              : {}),
+          },
         );
       },
     });
@@ -300,7 +377,7 @@ export function createFixCiExtension(options: {
               );
             }
 
-            const restoration = await restoreOwnedBranch(cwd, branchName, signal);
+            const restoration = await restoreOwnedBranch(cwd, branchName);
             return respond(
               `## ⚠️ GitHub Stack Sync Failed\n\n` +
                 `Failed to sync the GitHub stack on \`${branchName}\`. No unmerged paths ` +
@@ -321,7 +398,7 @@ export function createFixCiExtension(options: {
             );
           }
 
-          const restoration = await restoreOwnedBranch(cwd, branchName, signal);
+          const restoration = await restoreOwnedBranch(cwd, branchName);
           if (!restoration.restored) {
             cycleCount = 0;
             return respond(
@@ -340,7 +417,7 @@ export function createFixCiExtension(options: {
 
           notify("Stack sync succeeded — submitting the stack…");
           const submitResult = await runGhStackSubmit(cwd, signal, stackRunner);
-          const submitRestoration = await restoreOwnedBranch(cwd, branchName, signal);
+          const submitRestoration = await restoreOwnedBranch(cwd, branchName);
           if (!submitRestoration.restored) {
             cycleCount = 0;
             return respond(

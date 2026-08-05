@@ -15,10 +15,11 @@ The runtime in `packages/coder/src/index.ts` currently enables:
   wholesale with the `write` tool; targeted `edit` operations are required.
 - **Commit guard** — the `git_commit` tool runs pre-checks and refuses to commit
   on a default branch.
-- **GitHub stacks** — `create_github_stack` initializes existing branches, while
-  `push_and_check_ci` synchronizes and submits stacks with the official
-  `github/gh-stack` extension. The conflict agent continues cascading stack
-  rebases across every conflicted branch.
+- **GitHub stacks** — `create_github_stack` can materialize ordered local branches
+  at explicit, independently valid commit boundaries without switching the
+  host-owned checkout. `push_and_check_ci` synchronizes and submits the resulting
+  stack with the official `github/gh-stack` extension. The conflict agent
+  continues cascading stack rebases across every conflicted branch.
 - **Working conventions** — the appended system prompt asks the agent to make
   focused changes, verify them, and keep a clean Git history.
 

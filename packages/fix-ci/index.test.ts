@@ -62,6 +62,121 @@ function requireTool(tools: RegisteredTool[], name: string): RegisteredTool {
   return tool;
 }
 
+test("create_github_stack materializes branch points without switching checkout", async () => {
+  const cwd = createRepository();
+  try {
+    writeFileSync(join(cwd, "file.txt"), "feature one\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature one"]);
+    writeFileSync(join(cwd, "file.txt"), "feature two\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature two"]);
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+      assert.equal(
+        git(cwd, ["rev-parse", "refs/heads/stack-first"]),
+        git(cwd, ["rev-parse", "HEAD~1"]),
+      );
+      assert.equal(git(cwd, ["rev-parse", "refs/heads/feature"]), git(cwd, ["rev-parse", "HEAD"]));
+      return { stdout: "Stack initialized\\n", stderr: "" };
+    };
+    const tool = requireTool(registeredTools({ stackRunner }), "create_github_stack");
+
+    const result = await tool.execute(
+      "create-stack-with-points",
+      { branches: ["stack-first", "feature"], branch_points: ["HEAD~1", "HEAD"] },
+      undefined,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.stackCreated, true, JSON.stringify(result.details));
+    assert.deepEqual(result.details.materializedBranches, ["stack-first"]);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+    assert.deepEqual(calls, ["stack init -- stack-first feature"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("create_github_stack restores the owned branch after cancellation", async () => {
+  const cwd = createRepository();
+  try {
+    writeFileSync(join(cwd, "file.txt"), "feature one\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature one"]);
+    writeFileSync(join(cwd, "file.txt"), "feature two\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature two"]);
+    const controller = new AbortController();
+    const stackRunner: GhStackCommandRunner = async () => {
+      git(cwd, ["switch", "stack-first"]);
+      controller.abort();
+      throw new Error("cancelled");
+    };
+    const tool = requireTool(registeredTools({ stackRunner }), "create_github_stack");
+
+    const result = await tool.execute(
+      "cancel-stack",
+      { branches: ["stack-first", "feature"], branch_points: ["HEAD~1", "HEAD"] },
+      controller.signal,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.stackCreationFailed, true);
+    assert.equal(result.details.workspaceRestored, true);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+    assert.equal(git(cwd, ["rev-parse", "stack-first"]), git(cwd, ["rev-parse", "HEAD~1"]));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("create_github_stack rolls back materialized refs before rejecting without stack init", async () => {
+  const cwd = createRepository();
+  try {
+    writeFileSync(join(cwd, "file.txt"), "feature one\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature one"]);
+    writeFileSync(join(cwd, "file.txt"), "feature two\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature two"]);
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      return { stdout: "should not run", stderr: "" };
+    };
+    const tool = requireTool(registeredTools({ stackRunner }), "create_github_stack");
+
+    const result = await tool.execute(
+      "reject-stack-with-points",
+      {
+        branches: ["stack-base", "stack-base/nested", "feature"],
+        branch_points: ["main", "HEAD~1", "HEAD"],
+      },
+      undefined,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.branchPointsPreparationFailed, true);
+    assert.equal(result.details.stackInitializationRun, false);
+    assert.deepEqual(calls, []);
+    for (const branch of ["stack-base", "stack-base/nested"]) {
+      assert.equal(
+        spawnSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd })
+          .status,
+        1,
+      );
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("create_github_stack restores the owned branch after init traverses branches", async () => {
   const cwd = createRepository();
   try {

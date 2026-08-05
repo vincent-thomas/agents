@@ -37,6 +37,32 @@ test("reports fetching a remote branch and creating its tracking branch", () => 
   );
 });
 
+test("instructs the agent how to materialize independently valid stacked PRs", async () => {
+  let beforeAgentStart: any;
+  const extension = createWorkspaceExtension({
+    store: {} as never,
+    initialWorkspace: workspace("created"),
+    created: true,
+    dependencies: {
+      assertOwnedWorkspace: async () => undefined,
+      loadWorkspace: async () => workspace("created"),
+      updateWorkspace: async (_store, current) => current,
+    },
+  });
+  extension({
+    on(event, handler) {
+      if (event === "before_agent_start") beforeAgentStart = handler;
+    },
+    registerCommand() {},
+  } as never);
+
+  const result = await beforeAgentStart({ systemPrompt: "base prompt" });
+
+  assert.match(result.systemPrompt, /each PR boundary an independently valid commit/);
+  assert.match(result.systemPrompt, /branch_points ordered base-to-tip/);
+  assert.match(result.systemPrompt, /owned workspace branch must be the final stack branch/);
+});
+
 test("persists session metadata against the latest transition record", async () => {
   const initial = {
     ...workspace("created"),

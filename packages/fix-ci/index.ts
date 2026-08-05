@@ -52,7 +52,7 @@ import {
   type WorkspaceBranchRestorer,
 } from "./github-stack.ts";
 
-const MAX_CYCLES = 3;
+const MAX_CYCLES = 5;
 
 /** Shapes a tool result: single text block plus the machine-readable `details`
  * every branch below returns alongside it. */

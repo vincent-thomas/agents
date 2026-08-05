@@ -131,6 +131,7 @@ export function createMergeConflictsWorkflow(
   return async ({ cwd, prompt: initialPrompt, signal, subagent, onProgress }) => {
     let prompt = initialPrompt;
     let stackOriginalBranch: string | undefined;
+    const stackResolutionReports: string[] = [];
 
     while (true) {
       await subagent.session.prompt(prompt);
@@ -155,6 +156,13 @@ export function createMergeConflictsWorkflow(
           throw new Error("merge_conflicts cannot continue an in-progress non-stack rebase");
         }
         stackOriginalBranch ??= await readStackRebaseOriginalBranch(cwd, signal);
+        const report = subagent.session.getLastAssistantText()?.trim();
+        const resolutionNumber = stackResolutionReports.length + 1;
+        stackResolutionReports.push(
+          report
+            ? `Stack conflict ${resolutionNumber}:\n${report}`
+            : `Stack conflict ${resolutionNumber}: resolved and staged.`,
+        );
 
         onProgress("Continuing the cascading GitHub stack rebase…");
         const continuation = await continueStackRebase(cwd, signal);
@@ -182,10 +190,10 @@ export function createMergeConflictsWorkflow(
           );
         }
         await options.assertWorkspace(cwd);
-        const report = subagent.session.getLastAssistantText()?.trim();
-        return [report, continuation.output || "GitHub stack rebase completed."]
-          .filter((text): text is string => Boolean(text))
-          .join("\n\n");
+        return [
+          ...stackResolutionReports,
+          continuation.output || "GitHub stack rebase completed.",
+        ].join("\n\n");
       }
 
       if (operation !== "merge") {

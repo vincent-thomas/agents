@@ -434,6 +434,8 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
 
     assert.deepEqual(resolvedPaths, ["lower.txt", "tip.txt"]);
     assert.equal(continuationCalls, 2);
+    assert.match(workflowResult, /Stack conflict 1:\nResolved lower\.txt\./);
+    assert.match(workflowResult, /Stack conflict 2:\nResolved tip\.txt\./);
     assert.match(workflowResult, /stack rebase completed/);
     assert.equal(git(cwd, ["branch", "--show-current"]).trim(), "tip");
     assert.equal(git(cwd, ["status", "--porcelain"]).trim(), "");

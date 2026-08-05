@@ -10,11 +10,12 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import type { CommandPolicyEntry } from "./types.ts";
+import type { CommandPolicyCommandValidator, CommandPolicyEntry } from "./types.ts";
 import { evaluateCommand } from "./matching.ts";
 
 export interface CommandPolicyOptions {
   entries: CommandPolicyEntry[];
+  validateCommand?: CommandPolicyCommandValidator;
 }
 
 const COMMAND_POLICY_SYSTEM_PROMPT = `
@@ -35,7 +36,7 @@ export function createCommandPolicyExtension(options: CommandPolicyOptions) {
       if (!isToolCallEventType("bash", event)) return;
 
       const command = event.input.command ?? "";
-      const violation = evaluateCommand(command, options.entries);
+      const violation = evaluateCommand(command, options.entries, options.validateCommand);
       if (!violation) return;
 
       if (ctx.hasUI) ctx.ui.notify(violation.notify, "warning");

@@ -15,4 +15,9 @@
 
 export { createCommandPolicyExtension, type CommandPolicyOptions } from "./extension.ts";
 export { evaluateCommand } from "./matching.ts";
-export { CommandPolicyStatus, type CommandPolicyEntry, type CommandUse } from "./types.ts";
+export {
+  CommandPolicyStatus,
+  type CommandPolicyCommandValidator,
+  type CommandPolicyEntry,
+  type CommandUse,
+} from "./types.ts";

@@ -5,7 +5,12 @@
  * any test or logic module on its own.
  */
 import { splitCommandSegments, commandInvocation, OBFUSCATED } from "./command-utils.ts";
-import { CommandPolicyStatus, type CommandPolicyEntry, type CommandUse } from "./types.ts";
+import {
+  CommandPolicyStatus,
+  type CommandPolicyCommandValidator,
+  type CommandPolicyEntry,
+  type CommandUse,
+} from "./types.ts";
 
 export { CommandPolicyStatus, type CommandPolicyEntry, type CommandUse };
 
@@ -178,6 +183,7 @@ interface CommandPolicyViolation {
 export function evaluateCommand(
   command: string,
   entries: CommandPolicyEntry[],
+  validateCommand?: CommandPolicyCommandValidator,
 ): CommandPolicyViolation | null {
   if (hasHereDoc(command)) {
     return {
@@ -189,7 +195,16 @@ export function evaluateCommand(
     };
   }
 
-  for (const use of getCommandUses(command)) {
+  const uses = getCommandUses(command);
+  const commandValidationError = validateCommand?.(command, uses);
+  if (commandValidationError) {
+    return {
+      notify: "🚫 Blocked command syntax.",
+      reason: `${commandValidationError} Blocked: \`${command.trim()}\``,
+    };
+  }
+
+  for (const use of uses) {
     if (use.obfuscated) {
       return {
         notify: `🚫 Blocked disguised command.`,

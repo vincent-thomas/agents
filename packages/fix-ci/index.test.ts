@@ -74,6 +74,16 @@ test("create_github_stack restores the owned branch after init traverses branche
     };
     const tool = requireTool(registeredTools({ stackRunner }), "create_github_stack");
 
+    const invalid = await tool.execute(
+      "create-other-stack",
+      { branches: ["other"] },
+      undefined,
+      undefined,
+      { cwd },
+    );
+    assert.equal(invalid.details.invalidParameters, true);
+    assert.deepEqual(calls, []);
+
     const result = await tool.execute(
       "create-stack",
       { branches: ["feature"] },

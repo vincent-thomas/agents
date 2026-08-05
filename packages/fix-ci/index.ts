@@ -137,6 +137,16 @@ export function createFixCiExtension(options: {
             stackCreationFailed: true,
           });
         }
+        if (!branches.includes(originalBranch)) {
+          return respond(
+            `The stack must include the owned workspace branch \`${originalBranch}\` so it can be submitted and checked without switching workspaces.`,
+            {
+              invalidParameters: true,
+              currentBranch: originalBranch,
+              branches,
+            },
+          );
+        }
 
         onUpdate?.({ content: [{ type: "text", text: "Initializing GitHub stack…" }] });
         const init = await runGhStackInit(cwd, branches, base, signal, stackRunner);

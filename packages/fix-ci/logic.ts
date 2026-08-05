@@ -154,6 +154,80 @@ export async function detectPrNumber(cwd: string, signal?: AbortSignal): Promise
   return isNaN(num) ? null : num;
 }
 
+/** Resolve a local branch ref without switching the current checkout. */
+export async function getLocalBranchSha(
+  cwd: string,
+  branch: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  return tryExec(`git rev-parse --verify ${shellQuote(`refs/heads/${branch}`)}`, {
+    cwd,
+    timeout: 5_000,
+    signal,
+  });
+}
+
+export function prViewForBranchCommand(branch: string): string {
+  return `gh pr view --json number,state,isDraft,headRefOid -- ${shellQuote(branch)}`;
+}
+
+/** Read an open PR's identity and draft state for an explicit branch. */
+export async function getPrForBranch(
+  cwd: string,
+  branch: string,
+  signal?: AbortSignal,
+): Promise<{ number: number; state: string; isDraft: boolean; headRefOid: string } | null> {
+  const output = await tryExec(prViewForBranchCommand(branch), {
+    cwd,
+    timeout: 15_000,
+    signal,
+  });
+  if (!output) return null;
+
+  try {
+    const parsed = JSON.parse(output) as {
+      number?: unknown;
+      state?: unknown;
+      isDraft?: unknown;
+      headRefOid?: unknown;
+    };
+    if (
+      typeof parsed.number !== "number" ||
+      !Number.isInteger(parsed.number) ||
+      typeof parsed.state !== "string" ||
+      typeof parsed.isDraft !== "boolean" ||
+      typeof parsed.headRefOid !== "string" ||
+      parsed.headRefOid.length === 0
+    ) {
+      return null;
+    }
+    return {
+      number: parsed.number,
+      state: parsed.state,
+      isDraft: parsed.isDraft,
+      headRefOid: parsed.headRefOid,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve a stack branch's exact local SHA and its explicit-branch PR. */
+export async function resolveStackBranch(
+  cwd: string,
+  branch: string,
+  signal?: AbortSignal,
+): Promise<{
+  sha: string | null;
+  pr: { number: number; state: string; isDraft: boolean; headRefOid: string } | null;
+}> {
+  const [sha, pr] = await Promise.all([
+    getLocalBranchSha(cwd, branch, signal),
+    getPrForBranch(cwd, branch, signal),
+  ]);
+  return { sha, pr };
+}
+
 /**
  * Get the state of the current branch's PR (OPEN, CLOSED, MERGED).
  * Returns null if there is no PR for the current branch.
@@ -920,12 +994,21 @@ export async function createDraftPr(
 }
 
 /**
- * Mark the current PR as ready for review (convert from draft).
+ * Mark a PR as ready for review (convert from draft). When `branch` is
+ * provided, pass it explicitly so this works without checking out that branch.
  * Returns true on success.
  */
-export async function markPrReady(cwd: string, signal?: AbortSignal): Promise<boolean> {
+export function prReadyCommand(branch?: string): string {
+  return branch === undefined ? "gh pr ready" : `gh pr ready -- ${shellQuote(branch)}`;
+}
+
+export async function markPrReady(
+  cwd: string,
+  signal?: AbortSignal,
+  branch?: string,
+): Promise<boolean> {
   try {
-    await execAsync("gh pr ready", { cwd, timeout: 15_000, signal });
+    await execAsync(prReadyCommand(branch), { cwd, timeout: 15_000, signal });
     return true;
   } catch {
     return false;

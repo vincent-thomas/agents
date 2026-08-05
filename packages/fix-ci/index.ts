@@ -22,6 +22,7 @@ import {
   gitPushBranchToOrigin,
   branchExistsOnOrigin,
   getHeadSha,
+  resolveStackBranch,
   needsPush,
   pollChecks,
   fetchFailureLogs,
@@ -53,6 +54,12 @@ import {
   type GhStackCommandRunner,
   type WorkspaceBranchRestorer,
 } from "./github-stack.ts";
+import {
+  checkAndReadyStack,
+  type StackReadinessResult,
+  type StackReadinessRunner,
+} from "./stack-readiness.ts";
+import { shellQuote } from "./shell-quote.ts";
 
 const MAX_CYCLES = 5;
 
@@ -66,11 +73,13 @@ export function createFixCiExtension(options: {
   assertWorkspace: (cwd: string) => Promise<void>;
   stackRunner?: GhStackCommandRunner;
   restoreBranch?: WorkspaceBranchRestorer;
+  stackReadinessRunner?: StackReadinessRunner;
 }) {
   return function (pi: ExtensionAPI) {
     let cycleCount = 0;
     const stackRunner = options.stackRunner ?? runGhStackCommand;
     const restoreBranch = options.restoreBranch ?? restoreWorkspaceBranch;
+    const stackReadinessRunner = options.stackReadinessRunner ?? checkAndReadyStack;
 
     const restoreOwnedBranch = async (cwd: string, originalBranch: string) => {
       // Restoration is safety cleanup and must still run after the caller
@@ -101,7 +110,7 @@ export function createFixCiExtension(options: {
         "returning. Optionally provide `branch_points`, one commit-ish per branch " +
         "ordered base-to-tip; these materialize missing local branch refs without " +
         "switching checkout and require the final point to be HEAD. After this tool " +
-        "succeeds, use push_and_check_ci to submit and check the current branch.",
+        "succeeds, use push_and_check_ci to submit the stack and check every branch.",
       parameters: TObject({
         branches: TArray(TString(), {
           minItems: 1,
@@ -283,7 +292,9 @@ export function createFixCiExtension(options: {
       description:
         "Push the current branch to origin, create a draft PR if none exists, " +
         "poll GitHub Actions checks until they all finish, and if all pass " +
-        "mark the PR as ready for review. " +
+        "mark the PR as ready for review. For a GitHub stack, resolves every " +
+        "stack branch to its exact local SHA, checks every branch, and marks " +
+        "draft PRs ready only after all checks pass. " +
         "Returns the status of every check. For failures, includes " +
         "the last 200 lines of log output. " +
         "You MUST use this tool instead of running `git push` in bash. " +
@@ -491,7 +502,28 @@ export function createFixCiExtension(options: {
             );
           }
           pushedSha = (await getHeadSha(cwd, signal)) ?? undefined;
-          notify("Stack submitted. Continuing with current-PR CI checks…");
+          notify("Stack submitted. Resolving and checking every stack branch…");
+
+          const stackReadiness = await stackReadinessRunner(
+            cwd,
+            stackProbe.branches,
+            signal,
+            notify,
+            {
+              resolveBranch: resolveStackBranch,
+              pollChecks,
+              fetchFailureLogs,
+              markPrReady,
+            },
+          );
+          cycleCount = 0;
+          return respond(formatStackReadiness(stackReadiness), {
+            stackReadiness: true,
+            allChecksPassed: stackReadiness.allChecksPassed,
+            allReady: stackReadiness.allReady,
+            success: stackReadiness.allReady,
+            branches: stackReadiness.branches,
+          });
         } else {
           // ── 2. Check if base branch is ahead — merge if so ─────────────
           // Keep the PR branch up to date with the base branch before pushing
@@ -828,6 +860,70 @@ export default createFixCiExtension;
 
 function formatConflictList(paths: string[]): string {
   return paths.map((p) => `- \`${p}\``).join("\n");
+}
+
+function formatStackReadiness(result: StackReadinessResult): string {
+  const lines = [
+    result.allReady
+      ? "## GitHub Stack CI Passed and Stack Ready ✅"
+      : result.allChecksPassed
+        ? "## ⚠️ GitHub Stack CI Passed, Stack Not Ready"
+        : "## ⚠️ GitHub Stack CI Did Not Pass",
+    "",
+    result.allReady
+      ? "Every stack branch has a passing CI signal and every draft PR is ready."
+      : result.allChecksPassed
+        ? "CI passed, but the stack was not fully marked ready."
+        : "No stack PRs were marked ready because every branch must resolve and pass CI first.",
+    "",
+  ];
+
+  for (const branch of result.branches) {
+    const sha = branch.sha ? branch.sha.slice(0, 8) : "missing SHA";
+    const pr = branch.prNumber === null ? "missing open PR" : `PR #${branch.prNumber}`;
+    lines.push(`### \`${branch.branch}\` — ${pr} @ \`${sha}\``);
+    if (branch.prState)
+      lines.push(`PR state: ${branch.prState}${branch.isDraft ? " (draft)" : ""}`);
+    if (branch.checks.length === 0) {
+      lines.push("No checks ran.");
+    } else {
+      lines.push(formatChecks(branch.checks));
+    }
+    if (branch.timedOut) {
+      lines.push(`Timed out after ${branch.polls} polls.`);
+    }
+    if (branch.reason) lines.push(`Action needed: ${branch.reason}.`);
+    if (branch.failureLogs.length > 0) {
+      lines.push("");
+      for (const failureLog of branch.failureLogs) {
+        lines.push(`#### Failure logs: ${failureLog.name}`);
+        if (failureLog.log) {
+          lines.push("```", failureLog.log, "```");
+        } else {
+          lines.push("_(no logs available)_");
+        }
+      }
+    }
+    if (branch.ready === true) lines.push(`✅ PR #${branch.prNumber} marked ready for review.`);
+    if (branch.ready === false) {
+      lines.push(
+        `⚠️ Could not mark PR #${branch.prNumber} ready. Run \`gh pr ready -- ${shellQuote(branch.branch)}\` manually.`,
+      );
+    }
+    if (branch.ready === null && branch.isDraft === false) {
+      lines.push(`✅ PR #${branch.prNumber} was already ready for review.`);
+    }
+    lines.push("");
+  }
+
+  if (result.allChecksPassed && !result.allReady) {
+    lines.push(
+      "CI passed, but the stack is not fully ready. Inspect the warnings above and retry after resolving the reported issue.",
+    );
+  } else if (!result.allChecksPassed) {
+    lines.push("Fix the listed branch/PR or CI issue, then call `push_and_check_ci` again.");
+  }
+  return lines.join("\n");
 }
 
 function formatChecks(checks: CheckResult[]): string {

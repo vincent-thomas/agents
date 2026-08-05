@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createFixCiExtension } from "./index.ts";
 import type { GhStackCommandRunner, WorkspaceBranchRestorer } from "./github-stack.ts";
+import type { StackReadinessRunner } from "./stack-readiness.ts";
 
 type RegisteredTool = {
   name: string;
@@ -41,12 +42,14 @@ function createRepository(): string {
 function registeredTools(options: {
   stackRunner: GhStackCommandRunner;
   restoreBranch?: WorkspaceBranchRestorer;
+  stackReadinessRunner?: StackReadinessRunner;
 }): RegisteredTool[] {
   const tools: RegisteredTool[] = [];
   const extension = createFixCiExtension({
     assertWorkspace: async () => {},
     stackRunner: options.stackRunner,
     restoreBranch: options.restoreBranch,
+    stackReadinessRunner: options.stackReadinessRunner,
   });
   extension({
     registerTool(tool: RegisteredTool) {
@@ -328,6 +331,71 @@ test("push_and_check_ci publishes every missing stack branch before sync", async
 
     assert.equal(result.details.stackSyncFailed, true);
     assert.deepEqual(calls, ["stack view --json", "stack sync"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci wires successful stack submission into readiness", async () => {
+  const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
+  try {
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["branch", "stack-base", "main"]);
+    git(cwd, ["push", "origin", "main", "feature", "stack-base"]);
+
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view") {
+        return {
+          stdout: '{"branches":[{"branch":"stack-base"},{"branch":"feature"}]}',
+          stderr: "",
+        };
+      }
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      assert.equal(args[1], "submit");
+      return { stdout: "submitted", stderr: "" };
+    };
+    let readinessBranches: readonly string[] = [];
+    const stackReadinessRunner: StackReadinessRunner = async (_cwd, branches) => {
+      readinessBranches = branches;
+      return {
+        allChecksPassed: true,
+        allReady: true,
+        branches: branches.map((branch, index) => ({
+          branch,
+          sha: `sha-${index}`,
+          prNumber: index + 1,
+          prState: "OPEN",
+          prHeadRefOid: `sha-${index}`,
+          isDraft: true,
+          checks: [],
+          timedOut: false,
+          polls: 0,
+          mode: `commit sha-${index}`,
+          failureLogs: [],
+          ready: true,
+        })),
+      };
+    };
+    const tool = requireTool(
+      registeredTools({ stackRunner, stackReadinessRunner }),
+      "push_and_check_ci",
+    );
+
+    const result = await tool.execute("push", {}, undefined, undefined, { cwd });
+
+    assert.deepEqual(readinessBranches, ["stack-base", "feature"]);
+    assert.equal(result.details.allChecksPassed, true);
+    assert.equal(result.details.allReady, true);
+    assert.deepEqual(
+      (result.details.branches as Array<{ branch: string }>).map((branch) => branch.branch),
+      ["stack-base", "feature"],
+    );
+    assert.deepEqual(calls, ["stack view --json", "stack sync", "stack submit --auto"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(remote, { recursive: true, force: true });

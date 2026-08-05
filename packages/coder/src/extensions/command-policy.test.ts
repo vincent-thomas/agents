@@ -7,10 +7,11 @@ function violation(command: string) {
   return evaluateCommand(command, commandPolicyEntries);
 }
 
-test("allows the project test target only", () => {
+test("allows bare make and the test target only", () => {
+  assert.equal(violation("make"), null);
   assert.equal(violation("make test"), null);
-  assert.ok(violation("make"));
   assert.ok(violation("make format"));
+  assert.ok(violation("make test EXTRA=1"));
 });
 
 test("keeps Git branch, history, and synchronization behind dedicated workflows", () => {

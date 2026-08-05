@@ -304,23 +304,40 @@ export function createFixCiExtension(options: {
 
           notify("Stack sync succeeded — submitting the stack…");
           const submitResult = await runGhStackSubmit(cwd, signal, stackRunner);
+          const submitRestoration = await restoreOwnedBranch(cwd, branchName, signal);
+          if (!submitRestoration.restored) {
+            cycleCount = 0;
+            return respond(
+              `GitHub stack submission ${submitResult.success ? "completed" : "failed"}, but the owned workspace branch was not restored. ` +
+                `It started on \`${branchName}\` and is now on \`${submitRestoration.currentBranch ?? "no branch"}\`. ` +
+                "Stop and inspect the workspace manually.",
+              {
+                stackSubmitFailed: !submitResult.success,
+                workspaceRestored: false,
+                originalBranch: branchName,
+                currentBranch: submitRestoration.currentBranch,
+                errorOutput: submitResult.output,
+                restoreOutput: submitRestoration.restoreOutput,
+              },
+            );
+          }
           if (!submitResult.success) {
             cycleCount = 0;
             return respond(
               `## ⚠️ GitHub Stack Submit Failed\n\n` +
                 `The stack synced successfully, but \`gh stack submit --auto\` failed.\n\n` +
                 `### Error output:\n\`\`\`\n${submitResult.output.trim()}\n\`\`\`\n\n` +
-                `Fix the submission error and call \`push_and_check_ci\` again.`,
+                `The owned workspace branch was restored. Fix the submission error and call \`push_and_check_ci\` again.`,
               {
                 stackSubmitFailed: true,
+                workspaceRestored: true,
                 currentBranch: branchName,
                 errorOutput: submitResult.output,
+                restoreOutput: submitRestoration.restoreOutput,
                 instructions: "Fix the gh stack submit error, then call push_and_check_ci again.",
               },
             );
           }
-
-          await options.assertWorkspace(cwd);
           pushedSha = (await getHeadSha(cwd, signal)) ?? undefined;
           notify("Stack submitted. Continuing with current-PR CI checks…");
         } else {

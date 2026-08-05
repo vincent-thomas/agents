@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseSubagentDefinition } from "../definitions.ts";
-import { createMergeConflictsWorkflow } from "./merge-conflicts.ts";
+import { createMergeConflictsWorkflow, parseStackRebaseOriginalBranch } from "./merge-conflicts.ts";
 
 const definition = parseSubagentDefinition(
   `---
@@ -131,6 +131,13 @@ test("fails safely when MERGE_HEAD disappears before commit", async () => {
   assert.equal(commitCalled, false);
 });
 
+test("reads the original branch from gh-stack rebase state formats", () => {
+  assert.equal(parseStackRebaseOriginalBranch('{"originalBranch":"feature"}'), "feature");
+  assert.equal(parseStackRebaseOriginalBranch('{"original_branch":"feature"}'), "feature");
+  assert.equal(parseStackRebaseOriginalBranch("{}"), null);
+  assert.equal(parseStackRebaseOriginalBranch("invalid"), null);
+});
+
 test("continues a cascading GitHub stack rebase through every conflicted branch", async () => {
   const prompts: string[] = [];
   const progress: string[] = [];
@@ -141,6 +148,7 @@ test("continues a cascading GitHub stack rebase through every conflicted branch"
   ];
   let rebaseActive = true;
   let workspaceAssertions = 0;
+  const restoredBranches: string[] = [];
 
   const workflow = createMergeConflictsWorkflow({
     async assertWorkspace() {
@@ -158,10 +166,17 @@ test("continues a cascading GitHub stack rebase through every conflicted branch"
       assert.equal(args[1], "--git-path");
       return `.git/${args[2]}\n`;
     },
+    async readStackRebaseOriginalBranch() {
+      return "feature";
+    },
     async continueStackRebase() {
       const result = continuations.shift()!;
       if (result.success) rebaseActive = false;
       return result;
+    },
+    async restoreBranch(_cwd, branch) {
+      restoredBranches.push(branch);
+      return { success: true, output: "restored" };
     },
     async commit() {
       throw new Error("stack rebases must not create merge commits");
@@ -198,6 +213,7 @@ test("continues a cascading GitHub stack rebase through every conflicted branch"
     "Continuing the cascading GitHub stack rebase…",
   ]);
   assert.equal(workspaceAssertions, 1);
+  assert.deepEqual(restoredBranches, ["feature"]);
   assert.match(result, /Resolved all stack conflicts/);
   assert.match(result, /All branches in stack rebased/);
 });

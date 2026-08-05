@@ -147,6 +147,7 @@ test("push_and_check_ci stops on stack probe and submit failures", async () => {
     const probeResult = await probeTool.execute("push", {}, undefined, undefined, { cwd });
     assert.equal(probeResult.details.stackProbeFailed, true);
 
+    git(cwd, ["branch", "other"]);
     const calls: string[] = [];
     const submitFailure: GhStackCommandRunner = async (args) => {
       calls.push(args.join(" "));
@@ -154,6 +155,7 @@ test("push_and_check_ci stops on stack probe and submit failures", async () => {
         return { stdout: '{"branches":[{"branch":"feature"}]}', stderr: "" };
       }
       if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      git(cwd, ["switch", "other"]);
       throw new Error("submit failed");
     };
     const submitTool = requireTool(
@@ -163,6 +165,8 @@ test("push_and_check_ci stops on stack probe and submit failures", async () => {
     const submitResult = await submitTool.execute("push", {}, undefined, undefined, { cwd });
 
     assert.equal(submitResult.details.stackSubmitFailed, true);
+    assert.equal(submitResult.details.workspaceRestored, true);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
     assert.deepEqual(calls, ["stack view --json", "stack sync", "stack submit --auto"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });

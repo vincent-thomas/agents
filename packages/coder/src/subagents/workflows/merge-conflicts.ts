@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   runGitCommit,
   type RunGitCommitOptions,
@@ -18,6 +19,12 @@ export interface CreateMergeConflictsWorkflowOptions {
   commit?: (options: RunGitCommitOptions) => Promise<{ success: boolean; output: string }>;
   continueStackRebase?: (
     cwd: string,
+    signal?: AbortSignal,
+  ) => Promise<StackRebaseContinuationResult>;
+  readStackRebaseOriginalBranch?: (cwd: string, signal?: AbortSignal) => Promise<string>;
+  restoreBranch?: (
+    cwd: string,
+    branch: string,
     signal?: AbortSignal,
   ) => Promise<StackRebaseContinuationResult>;
   pathExists?: (path: string) => boolean;
@@ -59,9 +66,20 @@ function failedCommitPrompt(output: string): string {
 function commandErrorOutput(error: unknown): string {
   if (typeof error !== "object" || error === null) return String(error);
   const result = error as { stdout?: unknown; stderr?: unknown };
-  return [result.stdout, result.stderr]
+  const output = [result.stdout, result.stderr]
     .filter((value): value is string => typeof value === "string" && value !== "")
     .join("\n");
+  return output || (error instanceof Error ? error.message : String(error));
+}
+
+export function parseStackRebaseOriginalBranch(contents: string): string | null {
+  try {
+    const state = JSON.parse(contents) as Record<string, unknown>;
+    const branch = state.originalBranch ?? state.original_branch;
+    return typeof branch === "string" && branch.trim() !== "" ? branch : null;
+  } catch {
+    return null;
+  }
 }
 
 export function createMergeConflictsWorkflow(
@@ -70,6 +88,35 @@ export function createMergeConflictsWorkflow(
   const commandOutput = options.commandOutput ?? defaultCommandOutput;
   const commit = options.commit ?? runGitCommit;
   const pathExists = options.pathExists ?? existsSync;
+  const readStackRebaseOriginalBranch =
+    options.readStackRebaseOriginalBranch ??
+    (async (cwd: string, signal?: AbortSignal): Promise<string> => {
+      const statePath = (
+        await commandOutput(
+          "git",
+          ["rev-parse", "--git-path", "gh-stack-rebase-state"],
+          cwd,
+          signal,
+        )
+      ).trim();
+      const branch = parseStackRebaseOriginalBranch(readFileSync(resolve(cwd, statePath), "utf8"));
+      if (!branch) throw new Error("gh-stack-rebase-state does not record the original branch");
+      return branch;
+    });
+  const restoreBranch =
+    options.restoreBranch ??
+    (async (
+      cwd: string,
+      branch: string,
+      signal?: AbortSignal,
+    ): Promise<StackRebaseContinuationResult> => {
+      try {
+        const output = await commandOutput("git", ["switch", "--", branch], cwd, signal);
+        return { success: true, output };
+      } catch (error) {
+        return { success: false, output: commandErrorOutput(error) };
+      }
+    });
   const continueStackRebase =
     options.continueStackRebase ??
     (async (cwd: string, signal?: AbortSignal): Promise<StackRebaseContinuationResult> => {
@@ -83,6 +130,7 @@ export function createMergeConflictsWorkflow(
 
   return async ({ cwd, prompt: initialPrompt, signal, subagent, onProgress }) => {
     let prompt = initialPrompt;
+    let stackOriginalBranch: string | undefined;
 
     while (true) {
       await subagent.session.prompt(prompt);
@@ -106,6 +154,7 @@ export function createMergeConflictsWorkflow(
         if (!stackRebase) {
           throw new Error("merge_conflicts cannot continue an in-progress non-stack rebase");
         }
+        stackOriginalBranch ??= await readStackRebaseOriginalBranch(cwd, signal);
 
         onProgress("Continuing the cascading GitHub stack rebase…");
         const continuation = await continueStackRebase(cwd, signal);
@@ -124,6 +173,12 @@ export function createMergeConflictsWorkflow(
           throw new Error("gh stack rebase --continue returned before the stack rebase finished");
         }
 
+        const restoration = await restoreBranch(cwd, stackOriginalBranch, signal);
+        if (!restoration.success) {
+          throw new Error(
+            `GitHub stack rebase completed, but the owned branch ${stackOriginalBranch} could not be restored:\n${restoration.output}`,
+          );
+        }
         await options.assertWorkspace(cwd);
         const report = subagent.session.getLastAssistantText()?.trim();
         return [report, continuation.output || "GitHub stack rebase completed."]

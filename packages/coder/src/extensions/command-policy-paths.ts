@@ -18,7 +18,16 @@ function parseLiteralShellWords(command: string): string[] | null {
   for (let index = 0; index < command.length; index++) {
     const character = command[index];
     if (quote) {
-      if (character === quote) {
+      if (quote === '"' && character === "\\") {
+        index++;
+        if (index >= command.length) return null;
+        const escaped = command[index];
+        if ('$`"\\'.includes(escaped)) {
+          current += escaped;
+        } else if (escaped !== "\n") {
+          current += `\\${escaped}`;
+        }
+      } else if (character === quote) {
         quote = null;
       } else if (quote === '"' && (character === "$" || character === "`")) {
         return null;

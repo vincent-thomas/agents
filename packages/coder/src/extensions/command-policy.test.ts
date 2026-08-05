@@ -66,6 +66,7 @@ test("supports quoted project paths without treating comments as paths", () => {
     );
     assert.equal(violation('bun x oxfmt --check "#"', projectFixture), null);
     assert.equal(violation("bun test '$literal.test.ts'", projectFixture), null);
+    assert.equal(violation('bun test "\\$literal.test.ts"', projectFixture), null);
     assert.equal(violation("bun x oxfmt --check '[generated].ts'", projectFixture), null);
     assert.ok(violation("bun x oxfmt --check #", projectFixture));
     assert.ok(violation("bun test $literal.test.ts", projectFixture));

@@ -184,6 +184,7 @@ export function evaluateCommand(
   command: string,
   entries: CommandPolicyEntry[],
   validateCommand?: CommandPolicyCommandValidator,
+  cwd = process.cwd(),
 ): CommandPolicyViolation | null {
   if (hasHereDoc(command)) {
     return {
@@ -196,7 +197,7 @@ export function evaluateCommand(
   }
 
   const uses = getCommandUses(command);
-  const commandValidationError = validateCommand?.(command, uses);
+  const commandValidationError = validateCommand?.(command, uses, cwd);
   if (commandValidationError) {
     return {
       notify: "🚫 Blocked command syntax.",

@@ -36,7 +36,7 @@ export function createCommandPolicyExtension(options: CommandPolicyOptions) {
       if (!isToolCallEventType("bash", event)) return;
 
       const command = event.input.command ?? "";
-      const violation = evaluateCommand(command, options.entries, options.validateCommand);
+      const violation = evaluateCommand(command, options.entries, options.validateCommand, ctx.cwd);
       if (!violation) return;
 
       if (ctx.hasUI) ctx.ui.notify(violation.notify, "warning");

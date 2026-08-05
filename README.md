@@ -15,18 +15,22 @@ The runtime in `packages/coder/src/index.ts` currently enables:
   wholesale with the `write` tool; targeted `edit` operations are required.
 - **Commit guard** — the `git_commit` tool runs pre-checks and refuses to commit
   on a default branch.
+- **GitHub stacks** — `create_github_stack` initializes existing branches, while
+  `push_and_check_ci` synchronizes and submits stacks with the official
+  `github/gh-stack` extension. The conflict agent continues cascading stack
+  rebases across every conflicted branch.
 - **Working conventions** — the appended system prompt asks the agent to make
   focused changes, verify them, and keep a clean Git history.
 
-The `packages/fix-ci` workspace contains a push/CI/PR extension, but it is **not
-registered in the current runtime**. Do not assume a workspace dependency is an
-active agent feature; `packages/coder/src/index.ts` is the source of truth.
+The active push/CI/PR and stack tools live in `packages/fix-ci`; runtime
+registration remains centralized in `packages/coder/src/index.ts`.
 
 ## Requirements
 
 - [Bun](https://bun.sh/) (the workspace and CI use Bun, not npm)
 - GNU Make
 - Git
+- GitHub CLI with the official stack extension (`gh extension install github/gh-stack`)
 - Credentials for a model provider supported by Pi
 - Optional: Nix with flakes enabled
 

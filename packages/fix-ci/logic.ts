@@ -73,6 +73,35 @@ export async function gitPush(cwd: string, signal?: AbortSignal): Promise<PushRe
 }
 
 // ---------------------------------------------------------------------------
+// Git conflict paths
+// ---------------------------------------------------------------------------
+
+/** Parse the paths in the unmerged index format produced by `git ls-files -u`. */
+export function parseUnmergedPaths(output: string): string[] {
+  const paths: string[] = [];
+  for (const line of output.split("\n")) {
+    if (!line.trim()) continue;
+    const path = line.slice(line.indexOf("\t") + 1).trim();
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
+
+/** Read conflict paths without changing the in-progress merge/rebase state. */
+export async function getUnmergedPaths(cwd: string, signal?: AbortSignal): Promise<string[]> {
+  try {
+    const { stdout } = await execAsync("git ls-files -u", {
+      cwd,
+      timeout: 5_000,
+      signal,
+    });
+    return parseUnmergedPaths(stdout);
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Check mode detection
 // ---------------------------------------------------------------------------
 

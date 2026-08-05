@@ -55,11 +55,7 @@ interface MergeResult {
 // Git push
 // ---------------------------------------------------------------------------
 
-export async function gitPush(cwd: string, signal?: AbortSignal): Promise<PushResult> {
-  // A brand-new branch has no upstream, so a bare `git push` fails. In that
-  // case push and set the upstream in one go so first pushes succeed.
-  const command = (await hasUpstream(cwd, signal)) ? "git push" : "git push -u origin HEAD";
-
+async function runGitPush(command: string, cwd: string, signal?: AbortSignal): Promise<PushResult> {
   try {
     const { stdout, stderr } = await execAsync(command, {
       cwd,
@@ -70,6 +66,18 @@ export async function gitPush(cwd: string, signal?: AbortSignal): Promise<PushRe
   } catch (err: unknown) {
     return { success: false, output: extractErrorOutput(err) };
   }
+}
+
+export async function gitPush(cwd: string, signal?: AbortSignal): Promise<PushResult> {
+  // A brand-new branch has no upstream, so a bare `git push` fails. In that
+  // case push and set the upstream in one go so first pushes succeed.
+  const command = (await hasUpstream(cwd, signal)) ? "git push" : "git push -u origin HEAD";
+  return runGitPush(command, cwd, signal);
+}
+
+/** Bootstrap the current branch on origin regardless of existing tracking config. */
+export function gitPushToOrigin(cwd: string, signal?: AbortSignal): Promise<PushResult> {
+  return runGitPush("git push -u origin HEAD", cwd, signal);
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +194,29 @@ export async function needsPush(cwd: string, signal?: AbortSignal): Promise<bool
   } catch {
     // If anything fails, assume there's something to push.
     return true;
+  }
+}
+
+/**
+ * Check whether an exact named branch exists under origin's heads.
+ * Returns null when the remote lookup itself fails, so callers never treat
+ * uncertainty as permission to bootstrap a branch.
+ */
+export async function branchExistsOnOrigin(
+  cwd: string,
+  branch: string,
+  signal?: AbortSignal,
+): Promise<boolean | null> {
+  try {
+    const { stdout } = await execAsync(`git ls-remote --heads origin ${shellQuote(branch)}`, {
+      cwd,
+      timeout: 10_000,
+      signal,
+    });
+    const expectedRef = `refs/heads/${branch}`;
+    return stdout.split("\n").some((line) => line.trim().split(/\s+/)[1] === expectedRef);
+  } catch {
+    return null;
   }
 }
 

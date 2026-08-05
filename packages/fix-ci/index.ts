@@ -17,6 +17,8 @@ import { Array as TArray, Object as TObject, Optional, String as TString } from 
 import { currentBranch, isWorktreeDirty } from "./git-utils.ts";
 import {
   gitPush,
+  gitPushToOrigin,
+  branchExistsOnOrigin,
   getHeadSha,
   needsPush,
   pollChecks,
@@ -243,7 +245,31 @@ export function createFixCiExtension(options: {
           }
 
           cycleCount++;
-          notify(`GitHub stack detected on \`${branchName}\` — syncing…`);
+          const branchOnOrigin = await branchExistsOnOrigin(cwd, branchName, signal);
+          if (branchOnOrigin === false) {
+            notify(
+              `GitHub stack detected on \`${branchName}\` — publishing the branch for its first stack submission…`,
+            );
+            const bootstrap = await gitPushToOrigin(cwd, signal);
+            if (!bootstrap.success) {
+              cycleCount = 0;
+              return respond(
+                `## ⚠️ GitHub Stack Bootstrap Failed\n\n` +
+                  `The stack branch \`${branchName}\` was not present on origin, so its first stack submission required a bootstrap push. ` +
+                  `That push failed.\n\n` +
+                  `### Error output:\n\`\`\`\n${bootstrap.output.trim()}\n\`\`\`\n\n` +
+                  `Fix the push error and call \`push_and_check_ci\` again.`,
+                {
+                  stackBootstrapFailed: true,
+                  branch: branchName,
+                  errorOutput: bootstrap.output,
+                },
+              );
+            }
+            notify("Initial stack branch push succeeded — syncing…");
+          } else {
+            notify(`GitHub stack detected on \`${branchName}\` — syncing…`);
+          }
           const syncResult = await runGhStackSync(cwd, signal, stackRunner);
 
           if (!syncResult.success) {

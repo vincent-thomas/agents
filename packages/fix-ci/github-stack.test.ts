@@ -11,6 +11,7 @@ import {
   stackSubmitArgs,
   stackSyncArgs,
   stackViewArgs,
+  withRerereGitConfig,
   type GhStackCommandRunner,
 } from "./github-stack.ts";
 import { parseUnmergedPaths } from "./logic.ts";
@@ -33,6 +34,34 @@ suite("GitHub stack command builders", () => {
     assert.deepEqual(stackViewArgs(), ["stack", "view", "--json"]);
     assert.deepEqual(stackSyncArgs(), ["stack", "sync"]);
     assert.deepEqual(stackSubmitArgs(), ["stack", "submit", "--auto"]);
+  });
+
+  test("injects rerere without mutating the original environment", () => {
+    const env: NodeJS.ProcessEnv = { PATH: "/bin" };
+    const configured = withRerereGitConfig(env);
+
+    assert.deepEqual(env, { PATH: "/bin" });
+    assert.equal(configured.GIT_CONFIG_COUNT, "1");
+    assert.equal(configured.GIT_CONFIG_KEY_0, "rerere.enabled");
+    assert.equal(configured.GIT_CONFIG_VALUE_0, "true");
+  });
+
+  test("appends rerere after existing Git config entries", () => {
+    const configured = withRerereGitConfig({
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "user.name",
+      GIT_CONFIG_VALUE_0: "Test User",
+      GIT_CONFIG_KEY_1: "core.autocrlf",
+      GIT_CONFIG_VALUE_1: "false",
+    });
+
+    assert.equal(configured.GIT_CONFIG_COUNT, "3");
+    assert.equal(configured.GIT_CONFIG_KEY_0, "user.name");
+    assert.equal(configured.GIT_CONFIG_VALUE_0, "Test User");
+    assert.equal(configured.GIT_CONFIG_KEY_1, "core.autocrlf");
+    assert.equal(configured.GIT_CONFIG_VALUE_1, "false");
+    assert.equal(configured.GIT_CONFIG_KEY_2, "rerere.enabled");
+    assert.equal(configured.GIT_CONFIG_VALUE_2, "true");
   });
 
   test("recognizes stack view JSON without depending on one object shape", () => {

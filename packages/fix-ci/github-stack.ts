@@ -23,6 +23,22 @@ export type GhStackCommandRunner = (
   options: GhStackCommandOptions,
 ) => Promise<GhStackCommandResult>;
 
+/** Add a non-persistent rerere setting while preserving existing Git config entries. */
+export function withRerereGitConfig(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const configuredCount = env.GIT_CONFIG_COUNT;
+  const parsedCount =
+    configuredCount !== undefined && /^[0-9]+$/.test(configuredCount)
+      ? Number(configuredCount)
+      : NaN;
+  const count =
+    Number.isSafeInteger(parsedCount) && parsedCount < Number.MAX_SAFE_INTEGER ? parsedCount : 0;
+  const next = { ...env };
+  next.GIT_CONFIG_COUNT = String(count + 1);
+  next[`GIT_CONFIG_KEY_${count}`] = "rerere.enabled";
+  next[`GIT_CONFIG_VALUE_${count}`] = "true";
+  return next;
+}
+
 interface GhStackCommandError extends Error {
   stdout?: string;
   stderr?: string;
@@ -38,11 +54,11 @@ export const runGhStackCommand: GhStackCommandRunner = (args, options) =>
         cwd: options.cwd,
         timeout: options.timeout ?? 30_000,
         signal: options.signal,
-        env: {
+        env: withRerereGitConfig({
           ...process.env,
           GH_PROMPT_DISABLED: "1",
           GIT_TERMINAL_PROMPT: "0",
-        },
+        }),
       },
       (error, stdout, stderr) => {
         if (error) {

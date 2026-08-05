@@ -15,11 +15,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Array as TArray, Object as TObject, Optional, String as TString } from "typebox";
 import { currentBranch, isWorktreeDirty } from "./git-utils.ts";
+import { prepareBranchPoints } from "./branch-points.ts";
 import {
   gitPush,
   gitPushToOrigin,
+  gitPushBranchToOrigin,
   branchExistsOnOrigin,
   getHeadSha,
+  resolveStackBranch,
   needsPush,
   pollChecks,
   fetchFailureLogs,
@@ -51,8 +54,14 @@ import {
   type GhStackCommandRunner,
   type WorkspaceBranchRestorer,
 } from "./github-stack.ts";
+import {
+  checkAndReadyStack,
+  type StackReadinessResult,
+  type StackReadinessRunner,
+} from "./stack-readiness.ts";
+import { shellQuote } from "./shell-quote.ts";
 
-const MAX_CYCLES = 3;
+const MAX_CYCLES = 5;
 
 /** Shapes a tool result: single text block plus the machine-readable `details`
  * every branch below returns alongside it. */
@@ -64,26 +73,26 @@ export function createFixCiExtension(options: {
   assertWorkspace: (cwd: string) => Promise<void>;
   stackRunner?: GhStackCommandRunner;
   restoreBranch?: WorkspaceBranchRestorer;
+  stackReadinessRunner?: StackReadinessRunner;
 }) {
   return function (pi: ExtensionAPI) {
     let cycleCount = 0;
     const stackRunner = options.stackRunner ?? runGhStackCommand;
     const restoreBranch = options.restoreBranch ?? restoreWorkspaceBranch;
+    const stackReadinessRunner = options.stackReadinessRunner ?? checkAndReadyStack;
 
-    const restoreOwnedBranch = async (
-      cwd: string,
-      originalBranch: string,
-      signal?: AbortSignal,
-    ) => {
-      let current = await currentBranch(cwd, signal);
-      let clean = !(await isWorktreeDirty(cwd, signal));
+    const restoreOwnedBranch = async (cwd: string, originalBranch: string) => {
+      // Restoration is safety cleanup and must still run after the caller
+      // cancels the stack operation that moved the checkout.
+      let current = await currentBranch(cwd);
+      let clean = !(await isWorktreeDirty(cwd));
       let restoreOutput = "";
 
       if (current !== originalBranch && clean) {
-        const restoration = await restoreBranch(cwd, originalBranch, signal);
+        const restoration = await restoreBranch(cwd, originalBranch);
         restoreOutput = restoration.output;
-        current = await currentBranch(cwd, signal);
-        clean = !(await isWorktreeDirty(cwd, signal));
+        current = await currentBranch(cwd);
+        clean = !(await isWorktreeDirty(cwd));
       }
 
       const restored = current === originalBranch && clean;
@@ -98,11 +107,26 @@ export function createFixCiExtension(options: {
       description:
         "Initialize a GitHub CLI stack for the supplied branches. The working tree " +
         "must be clean and the workspace is restored to its original branch before " +
-        "returning. After this tool succeeds, use push_and_check_ci to submit and " +
-        "check the current branch.",
+        "returning. Optionally provide `branch_points`, one commit-ish per branch " +
+        "ordered base-to-tip; these materialize missing local branch refs without " +
+        "switching checkout and require the final point to be HEAD. After this tool " +
+        "succeeds, use push_and_check_ci to submit the stack and check every branch.",
       parameters: TObject({
-        branches: TArray(TString(), { minItems: 1 }),
-        base: Optional(TString()),
+        branches: TArray(TString(), {
+          minItems: 1,
+          description:
+            "Local branch names ordered from the stack base to its tip. The final name must be the owned workspace branch when branch_points is provided.",
+        }),
+        base: Optional(
+          TString({ description: "Optional GitHub base branch for the bottom PR in the stack." }),
+        ),
+        branch_points: Optional(
+          TArray(TString(), {
+            minItems: 1,
+            description:
+              "Commit-ish for each branch, ordered base-to-tip and ending at HEAD. Missing local branches are created at these points.",
+          }),
+        ),
       }),
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -114,17 +138,41 @@ export function createFixCiExtension(options: {
             ? params.branches
             : [];
         const base = typeof params.base === "string" ? params.base : undefined;
+        const rawBranchPoints = params.branch_points;
+        const branchPointsSupplied = rawBranchPoints !== undefined;
+        const branchPoints =
+          Array.isArray(rawBranchPoints) &&
+          rawBranchPoints.every((point: unknown): point is string => typeof point === "string")
+            ? rawBranchPoints
+            : null;
 
         if (
           branches.length === 0 ||
           branches.some((branch) => branch.trim().length === 0) ||
-          (base !== undefined && base.trim().length === 0)
+          (base !== undefined && base.trim().length === 0) ||
+          (branchPointsSupplied &&
+            (branchPoints === null ||
+              branchPoints.length === 0 ||
+              branchPoints.some((point) => point.trim().length === 0)))
         ) {
           return respond(
-            "`branches` must contain at least one non-empty branch name; `base`, when provided, must be non-empty.",
+            "`branches` must contain at least one non-empty branch name; `base`, when provided, must be non-empty; `branch_points`, when provided, must contain non-empty commit points.",
             { invalidParameters: true },
           );
         }
+
+        if (
+          branchPointsSupplied &&
+          branchPoints !== null &&
+          branchPoints.length !== branches.length
+        ) {
+          return respond(
+            "When provided, `branch_points` must contain exactly one commit point for each branch, ordered base-to-tip.",
+            { invalidParameters: true, branches, branchPoints },
+          );
+        }
+        const providedBranchPoints = branchPointsSupplied ? (branchPoints ?? []) : [];
+        let materializedBranches: string[] = [];
 
         if (await isWorktreeDirty(cwd, signal)) {
           return respond(
@@ -139,7 +187,46 @@ export function createFixCiExtension(options: {
             stackCreationFailed: true,
           });
         }
-        if (!branches.includes(originalBranch)) {
+        if (branchPointsSupplied) {
+          if (branches[branches.length - 1] !== originalBranch) {
+            return respond(
+              `When \`branch_points\` is supplied, the final branch must be the owned workspace branch \`${originalBranch}\`.`,
+              {
+                invalidParameters: true,
+                currentBranch: originalBranch,
+                branches,
+                branchPoints: providedBranchPoints,
+              },
+            );
+          }
+
+          onUpdate?.({
+            content: [{ type: "text", text: "Preparing GitHub stack branch points…" }],
+          });
+          const preparation = await prepareBranchPoints(
+            cwd,
+            branches,
+            providedBranchPoints,
+            originalBranch,
+            signal,
+          );
+          materializedBranches = preparation.createdBranches;
+          if (!preparation.success) {
+            return respond(
+              "GitHub stack preparation failed, so stack initialization was not run:\n\n" +
+                `\`\`\`\n${preparation.output.trim()}\n\`\`\`\n\n` +
+                "Any local branch refs created during preparation were rolled back. Fix the branch points and try again.",
+              {
+                stackCreationFailed: true,
+                branchPointsPreparationFailed: true,
+                stackInitializationRun: false,
+                branches,
+                branchPoints: providedBranchPoints,
+                output: preparation.output,
+              },
+            );
+          }
+        } else if (!branches.includes(originalBranch)) {
           return respond(
             `The stack must include the owned workspace branch \`${originalBranch}\` so it can be submitted and checked without switching workspaces.`,
             {
@@ -152,7 +239,7 @@ export function createFixCiExtension(options: {
 
         onUpdate?.({ content: [{ type: "text", text: "Initializing GitHub stack…" }] });
         const init = await runGhStackInit(cwd, branches, base, signal, stackRunner);
-        const restoration = await restoreOwnedBranch(cwd, originalBranch, signal);
+        const restoration = await restoreOwnedBranch(cwd, originalBranch);
 
         if (!restoration.restored) {
           return respond(
@@ -178,10 +265,22 @@ export function createFixCiExtension(options: {
           );
         }
 
+        const materialized = branchPointsSupplied
+          ? ` Prepared ${providedBranchPoints.length} branch point${providedBranchPoints.length === 1 ? "" : "s"} without switching checkout.`
+          : "";
         return respond(
-          `GitHub stack created for ${branches.map((branch) => `\`${branch}\``).join(", ")}${base ? ` on base \`${base}\`` : ""}. ` +
-            "The workspace was restored. Call `push_and_check_ci` to submit and check CI.",
-          { stackCreated: true, workspaceRestored: true, branches, base: base ?? null },
+          `GitHub stack created for ${branches.map((branch) => `\`${branch}\``).join(", ")}${base ? ` on base \`${base}\`` : ""}.` +
+            materialized +
+            " The workspace was restored. Call `push_and_check_ci` to submit and check CI.",
+          {
+            stackCreated: true,
+            workspaceRestored: true,
+            branches,
+            base: base ?? null,
+            ...(branchPointsSupplied
+              ? { branchPoints: providedBranchPoints, materializedBranches }
+              : {}),
+          },
         );
       },
     });
@@ -193,7 +292,9 @@ export function createFixCiExtension(options: {
       description:
         "Push the current branch to origin, create a draft PR if none exists, " +
         "poll GitHub Actions checks until they all finish, and if all pass " +
-        "mark the PR as ready for review. " +
+        "mark the PR as ready for review. For a GitHub stack, resolves every " +
+        "stack branch to its exact local SHA, checks every branch, and marks " +
+        "draft PRs ready only after all checks pass. " +
         "Returns the status of every check. For failures, includes " +
         "the last 200 lines of log output. " +
         "You MUST use this tool instead of running `git push` in bash. " +
@@ -246,31 +347,57 @@ export function createFixCiExtension(options: {
           }
 
           cycleCount++;
-          const branchOnOrigin = await branchExistsOnOrigin(cwd, branchName, signal);
-          if (branchOnOrigin === false) {
-            notify(
-              `GitHub stack detected on \`${branchName}\` — publishing the branch for its first stack submission…`,
+          if (stackProbe.branches.length === 0 || !stackProbe.branches.includes(branchName)) {
+            cycleCount = 0;
+            return respond(
+              `Could not identify every branch in the GitHub stack on \`${branchName}\`. ` +
+                "No branches were published and stack synchronization was not started.\n\n" +
+                `### gh stack view output:\n\`\`\`\n${stackProbe.output.trim()}\n\`\`\``,
+              {
+                stackProbeFailed: true,
+                stackViewOutput: stackProbe.output,
+                stackBranches: stackProbe.branches,
+              },
             );
-            const bootstrap = await gitPushToOrigin(cwd, signal);
+          }
+
+          const missingStackBranches: string[] = [];
+          for (const stackBranch of stackProbe.branches) {
+            const branchOnOrigin = await branchExistsOnOrigin(cwd, stackBranch, signal);
+            if (branchOnOrigin === null) {
+              cycleCount = 0;
+              return respond(
+                `Could not determine whether stack branch \`${stackBranch}\` exists on origin. ` +
+                  "No branches were published and stack synchronization was not started; fix remote access and try again.",
+                { stackBootstrapFailed: true, branch: stackBranch, remoteLookupFailed: true },
+              );
+            }
+            if (!branchOnOrigin) missingStackBranches.push(stackBranch);
+          }
+
+          for (const stackBranch of missingStackBranches) {
+            notify(`Publishing missing stack branch \`${stackBranch}\`…`);
+            const bootstrap =
+              stackBranch === branchName
+                ? await gitPushToOrigin(cwd, signal)
+                : await gitPushBranchToOrigin(cwd, stackBranch, signal);
             if (!bootstrap.success) {
               cycleCount = 0;
               return respond(
                 `## ⚠️ GitHub Stack Bootstrap Failed\n\n` +
-                  `The stack branch \`${branchName}\` was not present on origin, so its first stack submission required a bootstrap push. ` +
-                  `That push failed.\n\n` +
+                  `The stack branch \`${stackBranch}\` was not present on origin, and its bootstrap push failed.\n\n` +
                   `### Error output:\n\`\`\`\n${bootstrap.output.trim()}\n\`\`\`\n\n` +
                   `Fix the push error and call \`push_and_check_ci\` again.`,
                 {
                   stackBootstrapFailed: true,
-                  branch: branchName,
+                  branch: stackBranch,
                   errorOutput: bootstrap.output,
                 },
               );
             }
-            notify("Initial stack branch push succeeded — syncing…");
-          } else {
-            notify(`GitHub stack detected on \`${branchName}\` — syncing…`);
           }
+
+          notify(`GitHub stack detected on \`${branchName}\` — syncing…`);
           const syncResult = await runGhStackSync(cwd, signal, stackRunner);
 
           if (!syncResult.success) {
@@ -301,7 +428,7 @@ export function createFixCiExtension(options: {
               );
             }
 
-            const restoration = await restoreOwnedBranch(cwd, branchName, signal);
+            const restoration = await restoreOwnedBranch(cwd, branchName);
             return respond(
               `## ⚠️ GitHub Stack Sync Failed\n\n` +
                 `Failed to sync the GitHub stack on \`${branchName}\`. No unmerged paths ` +
@@ -322,7 +449,7 @@ export function createFixCiExtension(options: {
             );
           }
 
-          const restoration = await restoreOwnedBranch(cwd, branchName, signal);
+          const restoration = await restoreOwnedBranch(cwd, branchName);
           if (!restoration.restored) {
             cycleCount = 0;
             return respond(
@@ -341,7 +468,7 @@ export function createFixCiExtension(options: {
 
           notify("Stack sync succeeded — submitting the stack…");
           const submitResult = await runGhStackSubmit(cwd, signal, stackRunner);
-          const submitRestoration = await restoreOwnedBranch(cwd, branchName, signal);
+          const submitRestoration = await restoreOwnedBranch(cwd, branchName);
           if (!submitRestoration.restored) {
             cycleCount = 0;
             return respond(
@@ -376,7 +503,28 @@ export function createFixCiExtension(options: {
             );
           }
           pushedSha = (await getHeadSha(cwd, signal)) ?? undefined;
-          notify("Stack submitted. Continuing with current-PR CI checks…");
+          notify("Stack submitted. Resolving and checking every stack branch…");
+
+          const stackReadiness = await stackReadinessRunner(
+            cwd,
+            stackProbe.branches,
+            signal,
+            notify,
+            {
+              resolveBranch: resolveStackBranch,
+              pollChecks,
+              fetchFailureLogs,
+              markPrReady,
+            },
+          );
+          cycleCount = 0;
+          return respond(formatStackReadiness(stackReadiness), {
+            stackReadiness: true,
+            allChecksPassed: stackReadiness.allChecksPassed,
+            allReady: stackReadiness.allReady,
+            success: stackReadiness.allReady,
+            branches: stackReadiness.branches,
+          });
         } else {
           // ── 2. Check if base branch is ahead — merge if so ─────────────
           // Keep the PR branch up to date with the base branch before pushing
@@ -721,6 +869,70 @@ export default createFixCiExtension;
 
 function formatConflictList(paths: string[]): string {
   return paths.map((p) => `- \`${p}\``).join("\n");
+}
+
+function formatStackReadiness(result: StackReadinessResult): string {
+  const lines = [
+    result.allReady
+      ? "## GitHub Stack CI Passed and Stack Ready ✅"
+      : result.allChecksPassed
+        ? "## ⚠️ GitHub Stack CI Passed, Stack Not Ready"
+        : "## ⚠️ GitHub Stack CI Did Not Pass",
+    "",
+    result.allReady
+      ? "Every stack branch has a passing CI signal and every draft PR is ready."
+      : result.allChecksPassed
+        ? "CI passed, but the stack was not fully marked ready."
+        : "No stack PRs were marked ready because every branch must resolve and pass CI first.",
+    "",
+  ];
+
+  for (const branch of result.branches) {
+    const sha = branch.sha ? branch.sha.slice(0, 8) : "missing SHA";
+    const pr = branch.prNumber === null ? "missing open PR" : `PR #${branch.prNumber}`;
+    lines.push(`### \`${branch.branch}\` — ${pr} @ \`${sha}\``);
+    if (branch.prState)
+      lines.push(`PR state: ${branch.prState}${branch.isDraft ? " (draft)" : ""}`);
+    if (branch.checks.length === 0) {
+      lines.push("No checks ran.");
+    } else {
+      lines.push(formatChecks(branch.checks));
+    }
+    if (branch.timedOut) {
+      lines.push(`Timed out after ${branch.polls} polls.`);
+    }
+    if (branch.reason) lines.push(`Action needed: ${branch.reason}.`);
+    if (branch.failureLogs.length > 0) {
+      lines.push("");
+      for (const failureLog of branch.failureLogs) {
+        lines.push(`#### Failure logs: ${failureLog.name}`);
+        if (failureLog.log) {
+          lines.push("```", failureLog.log, "```");
+        } else {
+          lines.push("_(no logs available)_");
+        }
+      }
+    }
+    if (branch.ready === true) lines.push(`✅ PR #${branch.prNumber} marked ready for review.`);
+    if (branch.ready === false) {
+      lines.push(
+        `⚠️ Could not mark PR #${branch.prNumber} ready. Run \`gh pr ready -- ${shellQuote(branch.branch)}\` manually.`,
+      );
+    }
+    if (branch.ready === null && branch.isDraft === false) {
+      lines.push(`✅ PR #${branch.prNumber} was already ready for review.`);
+    }
+    lines.push("");
+  }
+
+  if (result.allChecksPassed && !result.allReady) {
+    lines.push(
+      "CI passed, but the stack is not fully ready. Inspect the warnings above and retry after resolving the reported issue.",
+    );
+  } else if (!result.allChecksPassed) {
+    lines.push("Fix the listed branch/PR or CI issue, then call `push_and_check_ci` again.");
+  }
+  return lines.join("\n");
 }
 
 function formatChecks(checks: CheckResult[]): string {

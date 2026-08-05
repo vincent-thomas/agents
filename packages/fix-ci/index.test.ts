@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createFixCiExtension } from "./index.ts";
 import type { GhStackCommandRunner, WorkspaceBranchRestorer } from "./github-stack.ts";
+import type { StackReadinessRunner } from "./stack-readiness.ts";
 
 type RegisteredTool = {
   name: string;
@@ -41,12 +42,14 @@ function createRepository(): string {
 function registeredTools(options: {
   stackRunner: GhStackCommandRunner;
   restoreBranch?: WorkspaceBranchRestorer;
+  stackReadinessRunner?: StackReadinessRunner;
 }): RegisteredTool[] {
   const tools: RegisteredTool[] = [];
   const extension = createFixCiExtension({
     assertWorkspace: async () => {},
     stackRunner: options.stackRunner,
     restoreBranch: options.restoreBranch,
+    stackReadinessRunner: options.stackReadinessRunner,
   });
   extension({
     registerTool(tool: RegisteredTool) {
@@ -61,6 +64,121 @@ function requireTool(tools: RegisteredTool[], name: string): RegisteredTool {
   assert.ok(tool, `missing tool ${name}`);
   return tool;
 }
+
+test("create_github_stack materializes branch points without switching checkout", async () => {
+  const cwd = createRepository();
+  try {
+    writeFileSync(join(cwd, "file.txt"), "feature one\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature one"]);
+    writeFileSync(join(cwd, "file.txt"), "feature two\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature two"]);
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+      assert.equal(
+        git(cwd, ["rev-parse", "refs/heads/stack-first"]),
+        git(cwd, ["rev-parse", "HEAD~1"]),
+      );
+      assert.equal(git(cwd, ["rev-parse", "refs/heads/feature"]), git(cwd, ["rev-parse", "HEAD"]));
+      return { stdout: "Stack initialized\\n", stderr: "" };
+    };
+    const tool = requireTool(registeredTools({ stackRunner }), "create_github_stack");
+
+    const result = await tool.execute(
+      "create-stack-with-points",
+      { branches: ["stack-first", "feature"], branch_points: ["HEAD~1", "HEAD"] },
+      undefined,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.stackCreated, true, JSON.stringify(result.details));
+    assert.deepEqual(result.details.materializedBranches, ["stack-first"]);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+    assert.deepEqual(calls, ["stack init -- stack-first feature"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("create_github_stack restores the owned branch after cancellation", async () => {
+  const cwd = createRepository();
+  try {
+    writeFileSync(join(cwd, "file.txt"), "feature one\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature one"]);
+    writeFileSync(join(cwd, "file.txt"), "feature two\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature two"]);
+    const controller = new AbortController();
+    const stackRunner: GhStackCommandRunner = async () => {
+      git(cwd, ["switch", "stack-first"]);
+      controller.abort();
+      throw new Error("cancelled");
+    };
+    const tool = requireTool(registeredTools({ stackRunner }), "create_github_stack");
+
+    const result = await tool.execute(
+      "cancel-stack",
+      { branches: ["stack-first", "feature"], branch_points: ["HEAD~1", "HEAD"] },
+      controller.signal,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.stackCreationFailed, true);
+    assert.equal(result.details.workspaceRestored, true);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+    assert.equal(git(cwd, ["rev-parse", "stack-first"]), git(cwd, ["rev-parse", "HEAD~1"]));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("create_github_stack rolls back materialized refs before rejecting without stack init", async () => {
+  const cwd = createRepository();
+  try {
+    writeFileSync(join(cwd, "file.txt"), "feature one\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature one"]);
+    writeFileSync(join(cwd, "file.txt"), "feature two\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature two"]);
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      return { stdout: "should not run", stderr: "" };
+    };
+    const tool = requireTool(registeredTools({ stackRunner }), "create_github_stack");
+
+    const result = await tool.execute(
+      "reject-stack-with-points",
+      {
+        branches: ["stack-base", "stack-base/nested", "feature"],
+        branch_points: ["main", "HEAD~1", "HEAD"],
+      },
+      undefined,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.branchPointsPreparationFailed, true);
+    assert.equal(result.details.stackInitializationRun, false);
+    assert.deepEqual(calls, []);
+    for (const branch of ["stack-base", "stack-base/nested"]) {
+      assert.equal(
+        spawnSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd })
+          .status,
+        1,
+      );
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
 
 test("create_github_stack restores the owned branch after init traverses branches", async () => {
   const cwd = createRepository();
@@ -102,6 +220,7 @@ test("create_github_stack restores the owned branch after init traverses branche
 
 test("push_and_check_ci preserves a conflict from the middle of a stack rebase", async () => {
   const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
   try {
     writeFileSync(join(cwd, "file.txt"), "feature\n");
     git(cwd, ["add", "file.txt"]);
@@ -111,6 +230,9 @@ test("push_and_check_ci preserves a conflict from the middle of a stack rebase",
     git(cwd, ["add", "file.txt"]);
     git(cwd, ["commit", "-m", "trunk"]);
     git(cwd, ["switch", "feature"]);
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["push", "origin", "main", "feature"]);
 
     const stackRunner: GhStackCommandRunner = async (args) => {
       if (args[1] === "view") {
@@ -141,6 +263,7 @@ test("push_and_check_ci preserves a conflict from the middle of a stack rebase",
     git(cwd, ["rebase", "--abort"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
   }
 });
 
@@ -176,8 +299,112 @@ test("push_and_check_ci bootstraps an unpublished stack branch before sync", asy
   }
 });
 
+test("push_and_check_ci publishes every missing stack branch before sync", async () => {
+  const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
+  try {
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["branch", "stack-base", "main"]);
+    git(cwd, ["push", "origin", "main"]);
+
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view") {
+        return {
+          stdout:
+            '{"branches":[{"branch":"stack-base"},{"branch":"feature"}],"currentBranch":"feature"}',
+          stderr: "",
+        };
+      }
+      assert.equal(args[1], "sync");
+      assert.notEqual(git(cwd, ["ls-remote", "--heads", "origin", "stack-base"]), "");
+      assert.notEqual(git(cwd, ["ls-remote", "--heads", "origin", "feature"]), "");
+      assert.equal(git(cwd, ["rev-parse", "--abbrev-ref", "@{upstream}"]), "origin/feature");
+      assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+      throw new Error("intentionally stop before CI polling");
+    };
+    const tool = requireTool(registeredTools({ stackRunner }), "push_and_check_ci");
+
+    const result = await tool.execute("push", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.stackSyncFailed, true);
+    assert.deepEqual(calls, ["stack view --json", "stack sync"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci wires successful stack submission into readiness", async () => {
+  const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
+  try {
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["branch", "stack-base", "main"]);
+    git(cwd, ["push", "origin", "main", "feature", "stack-base"]);
+
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view") {
+        return {
+          stdout: '{"branches":[{"branch":"stack-base"},{"branch":"feature"}]}',
+          stderr: "",
+        };
+      }
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      assert.equal(args[1], "submit");
+      return { stdout: "submitted", stderr: "" };
+    };
+    let readinessBranches: readonly string[] = [];
+    const stackReadinessRunner: StackReadinessRunner = async (_cwd, branches) => {
+      readinessBranches = branches;
+      return {
+        allChecksPassed: true,
+        allReady: true,
+        branches: branches.map((branch, index) => ({
+          branch,
+          sha: `sha-${index}`,
+          prNumber: index + 1,
+          prState: "OPEN",
+          prHeadRefOid: `sha-${index}`,
+          isDraft: true,
+          checks: [],
+          timedOut: false,
+          polls: 0,
+          mode: `commit sha-${index}`,
+          failureLogs: [],
+          ready: true,
+        })),
+      };
+    };
+    const tool = requireTool(
+      registeredTools({ stackRunner, stackReadinessRunner }),
+      "push_and_check_ci",
+    );
+
+    const result = await tool.execute("push", {}, undefined, undefined, { cwd });
+
+    assert.deepEqual(readinessBranches, ["stack-base", "feature"]);
+    assert.equal(result.details.allChecksPassed, true);
+    assert.equal(result.details.allReady, true);
+    assert.deepEqual(
+      (result.details.branches as Array<{ branch: string }>).map((branch) => branch.branch),
+      ["stack-base", "feature"],
+    );
+    assert.deepEqual(calls, ["stack view --json", "stack sync", "stack submit --auto"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
 test("push_and_check_ci stops on stack probe and submit failures", async () => {
   const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
   try {
     const probeFailure: GhStackCommandRunner = async () => {
       throw new Error("gh: unknown command stack");
@@ -189,6 +416,9 @@ test("push_and_check_ci stops on stack probe and submit failures", async () => {
     const probeResult = await probeTool.execute("push", {}, undefined, undefined, { cwd });
     assert.equal(probeResult.details.stackProbeFailed, true);
 
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["push", "origin", "feature"]);
     git(cwd, ["branch", "other"]);
     const calls: string[] = [];
     const submitFailure: GhStackCommandRunner = async (args) => {
@@ -212,5 +442,6 @@ test("push_and_check_ci stops on stack probe and submit failures", async () => {
     assert.deepEqual(calls, ["stack view --json", "stack sync", "stack submit --auto"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
   }
 });

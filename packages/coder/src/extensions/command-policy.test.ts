@@ -34,6 +34,8 @@ test("allows bun tests with optional project-relative paths", () => {
   assert.ok(violation("bun test --watch"));
   assert.ok(violation("bun test missing.test.ts"));
   assert.ok(violation("bun test package.json/.."));
+  assert.ok(violation("bun test package.json/."));
+  assert.ok(violation("bun test package.json/"));
 });
 
 test("allows oxfmt modes only with explicit project paths", () => {
@@ -41,6 +43,7 @@ test("allows oxfmt modes only with explicit project paths", () => {
   assert.equal(violation(`bun x oxfmt --check ${policyPath}`), null);
   assert.equal(violation(`bun x oxfmt --write ${process.cwd()}/${policyPath}`), null);
   assert.ok(violation("bun x oxfmt --check"));
+  assert.ok(violation('bun x oxfmt --write ""'));
   assert.ok(violation("bun x oxfmt --write .."));
   assert.ok(violation(`bun x oxfmt --list ${policyPath}`));
   assert.ok(violation("bun x oxfmt --write $HOME/outside.ts"));
@@ -52,6 +55,8 @@ test("supports quoted project paths without treating comments as paths", () => {
   mkdirSync(spacedDirectory);
   writeFileSync(join(spacedDirectory, "example.test.ts"), "");
   writeFileSync(join(projectFixture, "#"), "");
+  writeFileSync(join(projectFixture, "$literal.test.ts"), "");
+  writeFileSync(join(projectFixture, "[generated].ts"), "");
 
   try {
     assert.equal(violation('bun test "with space/example.test.ts"', projectFixture), null);
@@ -60,7 +65,11 @@ test("supports quoted project paths without treating comments as paths", () => {
       null,
     );
     assert.equal(violation('bun x oxfmt --check "#"', projectFixture), null);
+    assert.equal(violation("bun test '$literal.test.ts'", projectFixture), null);
+    assert.equal(violation("bun x oxfmt --check '[generated].ts'", projectFixture), null);
     assert.ok(violation("bun x oxfmt --check #", projectFixture));
+    assert.ok(violation("bun test $literal.test.ts", projectFixture));
+    assert.ok(violation("bun x oxfmt --check [generated].ts", projectFixture));
   } finally {
     rmSync(projectFixture, { recursive: true, force: true });
   }
@@ -83,12 +92,17 @@ test("blocks symlink traversal outside the project", () => {
   writeFileSync(join(projectFixture, "outside.test.ts"), "");
   writeFileSync(join(outsideFixture, "outside.test.ts"), "");
   symlinkSync(outsideChild, join(projectFixture, "link"), "dir");
+  symlinkSync(projectFixture, join(outsideChild, "reentry"), "dir");
 
   try {
     const link = relative(process.cwd(), join(projectFixture, "link"));
     const escapingPath = `${link}/../outside.test.ts`;
     assert.ok(violation(`bun test ${escapingPath}`));
     assert.ok(violation(`bun x oxfmt --write ${escapingPath}`));
+
+    const reenteringPath = `${link}/reentry/outside.test.ts`;
+    assert.ok(violation(`bun test ${reenteringPath}`));
+    assert.ok(violation(`bun x oxfmt --write ${reenteringPath}`));
   } finally {
     rmSync(projectFixture, { recursive: true, force: true });
     rmSync(outsideFixture, { recursive: true, force: true });

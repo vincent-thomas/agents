@@ -7,7 +7,7 @@ interface ProjectPathOptions {
   relativeOnly: boolean;
 }
 
-const SHELL_EXPANSION_CHARACTERS = "$`*?[]{}~<>";
+const ACTIVE_SHELL_PATH_CHARACTERS = "$`*?[]{}~<>";
 
 function parseLiteralShellWords(command: string): string[] | null {
   const words: string[] = [];
@@ -50,7 +50,7 @@ function parseLiteralShellWords(command: string): string[] | null {
       started = true;
       continue;
     }
-    if (character === "$" || character === "`") return null;
+    if (ACTIVE_SHELL_PATH_CHARACTERS.includes(character)) return null;
     current += character;
     started = true;
   }
@@ -114,16 +114,26 @@ function lexicallyEscapesRoot(candidate: string): boolean {
 function realpathPreservingTraversal(root: string, candidate: string): string {
   const candidateRoot = isAbsolute(candidate) ? parse(candidate).root : "";
   let current = candidateRoot || root;
+  let enteredRoot = !candidateRoot;
   const remainder = candidateRoot ? candidate.slice(candidateRoot.length) : candidate;
 
   for (const component of remainder.split(sep)) {
-    if (component === "" || component === ".") continue;
+    if (component === "" || component === ".") {
+      if (!statSync(current).isDirectory()) throw new Error("Cannot traverse through a file");
+      continue;
+    }
     if (component === "..") {
       if (!statSync(current).isDirectory()) throw new Error("Cannot traverse through a file");
       current = dirname(current);
-      continue;
+    } else {
+      current = realpathSync(join(current, component));
     }
-    current = realpathSync(join(current, component));
+
+    if (isInside(root, current)) {
+      enteredRoot = true;
+    } else if (enteredRoot) {
+      throw new Error("Path traversal left the project");
+    }
   }
   return current;
 }
@@ -139,11 +149,11 @@ export function validateProjectPaths(
 
   const projectRoot = realpathSync(cwd);
   for (const candidate of paths) {
+    if (candidate.length === 0) {
+      return "Paths cannot be empty.";
+    }
     if (candidate.startsWith("-")) {
       return `Unexpected flag \`${candidate}\`; only paths are allowed.`;
-    }
-    if ([...candidate].some((character) => SHELL_EXPANSION_CHARACTERS.includes(character))) {
-      return `Path \`${candidate}\` must be explicit and cannot use shell expansion.`;
     }
     if (options.relativeOnly && isAbsolute(candidate)) {
       return `Path \`${candidate}\` must be relative to the project root.`;

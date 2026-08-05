@@ -88,8 +88,11 @@ export function createWorkspaceExtension(options: {
       systemPrompt:
         event.systemPrompt +
         `\n\nYou are working in the host-owned Git workspace ${workspace.branch}. ` +
-        `Do not create, switch, rename, or delete branches. Git commit, synchronization, ` +
-        `push, and conflict workflows must use their dedicated tools.`,
+        `Do not directly create, switch, rename, or delete branches. Git commit, synchronization, ` +
+        `push, and conflict workflows must use their dedicated tools. For a major request with ` +
+        `separable changes, make each PR boundary an independently valid commit, then call ` +
+        `create_github_stack with branch names and matching branch_points ordered base-to-tip; ` +
+        `the owned workspace branch must be the final stack branch.`,
     }));
 
     pi.registerCommand("workspace", {

@@ -56,6 +56,22 @@ an isolated managed worktree on that exact new branch, or `goto` to choose among
 active managed workspaces.
 Creating a workspace fails when the requested local branch already exists.
 
+### Stacked PR workflow
+
+For a large request with separable changes, commit each independently valid PR
+boundary before creating the stack. Then call `create_github_stack` with branch
+names and commit points in base-to-tip order, keeping the managed workspace
+branch last:
+
+```text
+branches:      ["feature/part-1", "feature/part-2", "feature/task"]
+branch_points: ["HEAD~2",         "HEAD~1",         "HEAD"]
+```
+
+The tool creates missing local branch refs without switching the checkout and
+initializes them with `gh stack init`. Call `push_and_check_ci` afterward to
+synchronize, submit, and check the stack.
+
 On first use, enter `/login` in the Pi interface and authenticate with a model
 provider. The exploration tool is currently configured to use OpenAI model
 `gpt-5.6-luna`, so exploration requires OpenAI credentials even if the parent

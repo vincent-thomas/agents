@@ -55,11 +55,7 @@ interface MergeResult {
 // Git push
 // ---------------------------------------------------------------------------
 
-export async function gitPush(cwd: string, signal?: AbortSignal): Promise<PushResult> {
-  // A brand-new branch has no upstream, so a bare `git push` fails. In that
-  // case push and set the upstream in one go so first pushes succeed.
-  const command = (await hasUpstream(cwd, signal)) ? "git push" : "git push -u origin HEAD";
-
+async function runGitPush(command: string, cwd: string, signal?: AbortSignal): Promise<PushResult> {
   try {
     const { stdout, stderr } = await execAsync(command, {
       cwd,
@@ -69,6 +65,47 @@ export async function gitPush(cwd: string, signal?: AbortSignal): Promise<PushRe
     return { success: true, output: stdout + stderr };
   } catch (err: unknown) {
     return { success: false, output: extractErrorOutput(err) };
+  }
+}
+
+export async function gitPush(cwd: string, signal?: AbortSignal): Promise<PushResult> {
+  // A brand-new branch has no upstream, so a bare `git push` fails. In that
+  // case push and set the upstream in one go so first pushes succeed.
+  const command = (await hasUpstream(cwd, signal)) ? "git push" : "git push -u origin HEAD";
+  return runGitPush(command, cwd, signal);
+}
+
+/** Bootstrap the current branch on origin regardless of existing tracking config. */
+export function gitPushToOrigin(cwd: string, signal?: AbortSignal): Promise<PushResult> {
+  return runGitPush("git push -u origin HEAD", cwd, signal);
+}
+
+// ---------------------------------------------------------------------------
+// Git conflict paths
+// ---------------------------------------------------------------------------
+
+/** Parse the paths in the unmerged index format produced by `git ls-files -u`. */
+export function parseUnmergedPaths(output: string): string[] {
+  const paths: string[] = [];
+  for (const line of output.split("\n")) {
+    if (!line.trim()) continue;
+    const path = line.slice(line.indexOf("\t") + 1).trim();
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
+
+/** Read conflict paths without changing the in-progress merge/rebase state. */
+export async function getUnmergedPaths(cwd: string, signal?: AbortSignal): Promise<string[]> {
+  try {
+    const { stdout } = await execAsync("git ls-files -u", {
+      cwd,
+      timeout: 5_000,
+      signal,
+    });
+    return parseUnmergedPaths(stdout);
+  } catch {
+    return [];
   }
 }
 
@@ -157,6 +194,29 @@ export async function needsPush(cwd: string, signal?: AbortSignal): Promise<bool
   } catch {
     // If anything fails, assume there's something to push.
     return true;
+  }
+}
+
+/**
+ * Check whether an exact named branch exists under origin's heads.
+ * Returns null when the remote lookup itself fails, so callers never treat
+ * uncertainty as permission to bootstrap a branch.
+ */
+export async function branchExistsOnOrigin(
+  cwd: string,
+  branch: string,
+  signal?: AbortSignal,
+): Promise<boolean | null> {
+  try {
+    const { stdout } = await execAsync(`git ls-remote --heads origin ${shellQuote(branch)}`, {
+      cwd,
+      timeout: 10_000,
+      signal,
+    });
+    const expectedRef = `refs/heads/${branch}`;
+    return stdout.split("\n").some((line) => line.trim().split(/\s+/)[1] === expectedRef);
+  } catch {
+    return null;
   }
 }
 

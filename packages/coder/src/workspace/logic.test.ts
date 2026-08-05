@@ -10,6 +10,7 @@ import {
   createWorkspace,
   deleteWorkspace,
   listWorkspaces,
+  loadWorkspace,
   removeWorkspaceWorktree,
   resolveRegularCheckout,
   resolveRepository,
@@ -75,13 +76,27 @@ test("resolves the regular checkout from a managed worktree", async () => {
 test("lists repository workspaces and persists session metadata", async () => {
   const { repo, store, cleanup } = fixture();
   try {
-    const first = await createWorkspace(store, repo, "feature/one");
+    const first = await createWorkspace(store, repo, "feature/one", {
+      transition: {
+        phase: "pending",
+        sourceSessionFile: "/sessions/source.jsonl",
+      },
+    });
+    assert.deepEqual((await loadWorkspace(store, first.id)).transition, first.transition);
     const second = await createWorkspace(store, repo, "feature/two");
     const updated = await updateWorkspace(store, first, {
       sessionFile: "/sessions/one.jsonl",
       sessionName: "Refactor auth",
+      transition: {
+        phase: "switching",
+        sourceSessionFile: "/sessions/source.jsonl",
+        targetSessionFile: "/sessions/one-target.jsonl",
+      },
     });
     const repository = await resolveRepository(repo);
+
+    const loaded = await loadWorkspace(store, updated.id);
+    assert.deepEqual(loaded, updated);
 
     const records = await listWorkspaces(store, repository.repository);
 
@@ -89,7 +104,28 @@ test("lists repository workspaces and persists session metadata", async () => {
     const persisted = records.find((record) => record.id === updated.id);
     assert.equal(persisted?.sessionFile, "/sessions/one.jsonl");
     assert.equal(persisted?.sessionName, "Refactor auth");
+    assert.deepEqual(persisted?.transition, updated.transition);
     assert.ok(records.some((record) => record.id === second.id));
+  } finally {
+    cleanup();
+  }
+});
+
+test("rejects malformed transition metadata in a workspace record", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const created = await createWorkspace(store, repo, "feature/malformed-transition");
+    const path = join(store.stateDir, "workspaces", "records", `${created.id}.json`);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ...created,
+        transition: { phase: "switching", targetSessionFile: "/sessions/target.jsonl" },
+      }),
+    );
+
+    await assert.rejects(loadWorkspace(store, created.id), /Invalid workspace record/);
+    await assert.rejects(listWorkspaces(store, created.repository), /Invalid workspace record/);
   } finally {
     cleanup();
   }

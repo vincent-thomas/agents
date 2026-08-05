@@ -16,7 +16,7 @@ This is a Bun/TypeScript workspace for a customized [Pi coding agent](https://gi
 | Reusable command-policy engine | `packages/command-policy/index.ts`                   | Public exports. Follow into `extension.ts` for Pi wiring, `matching.ts` for policy decisions, `command-utils.ts` for shell tokenization, and `types.ts` for rule shapes.                        |
 | Safe-write enforcement         | `packages/coder/src/extensions/write-guard/index.ts` | Pi hook that blocks whole-file overwrites of large existing files; pure threshold logic is in `logic.ts`.                                                                                       |
 | Commit tool                    | `packages/coder/src/extensions/git-commit/index.ts`  | Registers `git_commit` and orchestrates branch checks, prechecks, staging, and commit. Helpers are split into `logic.ts`, `precheck.ts`, `git-utils.ts`, `exec-async.ts`, and `shell-quote.ts`. |
-| Push/CI/PR workflow            | `packages/fix-ci/index.ts`                           | Implements the active `push_and_check_ci` extension. Most Git/GitHub polling and PR logic is in `logic.ts`; process/git helpers are adjacent.                                                   |
+| Push/CI/PR and stacks          | `packages/fix-ci/index.ts`                           | Implements `create_github_stack` and `push_and_check_ci`. Official `gh stack` command boundaries live in `github-stack.ts`; Git/GitHub polling and ordinary PR logic live in `logic.ts`.        |
 | Build/package                  | `Makefile`, `flake.nix`, `package.json`              | Workspace, Bun build/test entry points, and Nix packaging.                                                                                                                                      |
 | CI                             | `.github/workflows/ci.yaml`                          | Installs with Bun and runs `make`.                                                                                                                                                              |
 
@@ -27,7 +27,7 @@ This is a Bun/TypeScript workspace for a customized [Pi coding agent](https://gi
 - Debug a command unexpectedly allowed or blocked: trace `command-utils.ts` -> `matching.ts` -> host `command-policy.ts`. Add an engine test in `matching.test.ts` or a concrete host-policy test in `command-policy.test.ts`.
 - Change overwrite thresholds or write interception: `packages/coder/src/extensions/write-guard/index.ts`; keep the decision logic in `logic.ts`.
 - Change commit orchestration/UI responses: `packages/coder/src/extensions/git-commit/index.ts`. Put testable branch/commit decisions in `logic.ts`, Makefile validation in `precheck.ts`, and process plumbing in the helper files.
-- Change push, CI polling, PR creation/review, or retry behavior: `packages/fix-ci/index.ts` for orchestration and response text; `packages/fix-ci/logic.ts` for git/GitHub operations and polling.
+- Change push, CI polling, PR creation/review, stack submit/sync, or retry behavior: `packages/fix-ci/index.ts` for orchestration and response text; `packages/fix-ci/github-stack.ts` for official stack CLI commands; `packages/fix-ci/logic.ts` for other git/GitHub operations and polling.
 - Change release/runtime packaging: inspect both `flake.nix` and `packages/coder/package.json`; the Nix wrapper runs the TypeScript entry point directly with Bun.
 
 ## Control flow and boundaries

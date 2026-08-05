@@ -11,6 +11,7 @@ import {
   mapStatusState,
   allSuitesComplete,
   needsPush,
+  branchExistsOnOrigin,
   gitPush,
   extractRunId,
   trimLog,
@@ -261,6 +262,36 @@ suite("needsPush", () => {
       assert.equal(result, false);
     }),
   );
+});
+
+// ---------------------------------------------------------------------------
+// branchExistsOnOrigin
+// ---------------------------------------------------------------------------
+
+suite("branchExistsOnOrigin", () => {
+  test(
+    "returns true for a branch present on origin",
+    withGitRepos(async (local) => {
+      const branch = git("git branch --show-current", local);
+      assert.equal(await branchExistsOnOrigin(local, branch), true);
+    }),
+  );
+
+  test(
+    "returns false for a confidently absent branch",
+    withGitRepos(async (local) => {
+      assert.equal(await branchExistsOnOrigin(local, "feature/missing"), false);
+    }),
+  );
+
+  test("returns null when the remote lookup fails", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "branch-lookup-failure-"));
+    try {
+      assert.equal(await branchExistsOnOrigin(cwd, "main"), null);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

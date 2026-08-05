@@ -528,6 +528,19 @@ suite("evaluateCommand — end-to-end policy decision", () => {
     assert.match(violation?.reason ?? "", /force pushes are not allowed/);
   });
 
+  test("raw command validation receives syntax and the runtime cwd", () => {
+    const violation = evaluateCommand(
+      "rg foo > outside",
+      testEntries,
+      (command, uses, cwd) =>
+        command.includes(">") && uses.some((use) => use.name === "rg") && cwd === "/repo"
+          ? "rg redirection is not allowed."
+          : null,
+      "/repo",
+    );
+    assert.match(violation?.reason ?? "", /rg redirection is not allowed/);
+  });
+
   test("second command use in a chain is checked too", () => {
     const violation = evaluateCommand("rg foo && wget bar", testEntries);
     assert.match(violation?.reason ?? "", /not on the allow list/);

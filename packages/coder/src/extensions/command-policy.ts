@@ -9,6 +9,7 @@ import {
   createCommandPolicyExtension,
   type CommandPolicyEntry,
 } from "@vt-agent/command-policy";
+import { validateManagedBunCommand } from "./command-policy-paths.ts";
 
 export const commandPolicyEntries: CommandPolicyEntry[] = [
   {
@@ -172,10 +173,28 @@ export const commandPolicyEntries: CommandPolicyEntry[] = [
       "Git history, refs, synchronization, and branch lifecycle are owned by dedicated tools.",
   },
   {
-    name: "make",
-    status: CommandPolicyStatus.Allow,
-    command: "make",
+    name: "bun test",
+    status: CommandPolicyStatus.Allowed,
+    command: "bun",
+    subcommand: [["test"]],
+  },
+  {
+    name: "bun x oxfmt",
+    status: CommandPolicyStatus.Allowed,
+    command: "bun",
+    subcommand: [["x", "oxfmt"]],
+  },
+  {
+    name: "make, make test, or make format",
+    status: CommandPolicyStatus.Allowed,
+    command: (use) =>
+      use.name === "make" &&
+      (use.args.length === 0 ||
+        (use.args.length === 1 && ["test", "format"].includes(use.args[0]))),
   },
 ];
 
-export default createCommandPolicyExtension({ entries: commandPolicyEntries });
+export default createCommandPolicyExtension({
+  entries: commandPolicyEntries,
+  validateCommand: validateManagedBunCommand,
+});

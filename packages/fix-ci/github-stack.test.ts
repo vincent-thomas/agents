@@ -5,11 +5,14 @@ import {
   isStackViewStacked,
   probeGhStack,
   runGhStackInit,
+  runGhStackUnstackLocal,
   runGhStackSubmit,
   runGhStackSync,
+  stackBaseBranch,
   stackBranchNames,
   stackInitArgs,
   stackSubmitArgs,
+  stackUnstackLocalArgs,
   stackSyncArgs,
   stackViewArgs,
   withRerereGitConfig,
@@ -33,6 +36,7 @@ suite("GitHub stack command builders", () => {
 
   test("builds official view, sync, and submit commands", () => {
     assert.deepEqual(stackViewArgs(), ["stack", "view", "--json"]);
+    assert.deepEqual(stackUnstackLocalArgs(), ["stack", "unstack", "--local"]);
     assert.deepEqual(stackSyncArgs(), ["stack", "sync"]);
     assert.deepEqual(stackSubmitArgs(), ["stack", "submit", "--auto"]);
   });
@@ -91,6 +95,21 @@ suite("GitHub stack command builders", () => {
     );
     assert.deepEqual(stackBranchNames("not json"), []);
   });
+
+  test("extracts trunk/base branches from root stack view fields", () => {
+    assert.equal(stackBaseBranch('{"trunk":"main"}'), "main");
+    assert.equal(stackBaseBranch('{"base":{"branchName":"develop"}}'), "develop");
+    assert.equal(stackBaseBranch('{"trunk":{"name":"release"}}'), "release");
+    assert.equal(stackBaseBranch('{"baseBranch":"main"}'), "main");
+    assert.equal(stackBaseBranch('{"trunkBranch":{"headRefName":"main"}}'), "main");
+    assert.equal(
+      stackBaseBranch('{"stack":{"trunk":{"branch":"main"},"branches":[{"base":"abc123"}]}}'),
+      "main",
+    );
+    assert.equal(stackBaseBranch('{"branches":[{"branch":"feature","base":"abc123"}]}'), null);
+    assert.equal(stackBaseBranch('{"branches":["feature"]}'), null);
+    assert.equal(stackBaseBranch("not json"), null);
+  });
 });
 
 suite("GitHub stack runner-driven helpers", () => {
@@ -114,9 +133,11 @@ suite("GitHub stack runner-driven helpers", () => {
       return { stdout: "ok", stderr: "" };
     };
 
+    assert.equal((await runGhStackUnstackLocal("/workspace", undefined, runner)).success, true);
     assert.equal((await runGhStackSync("/workspace", undefined, runner)).success, true);
     assert.equal((await runGhStackSubmit("/workspace", undefined, runner)).success, true);
     assert.deepEqual(calls, [
+      ["stack", "unstack", "--local"],
       ["stack", "sync"],
       ["stack", "submit", "--auto"],
     ]);
@@ -130,6 +151,7 @@ suite("GitHub stack runner-driven helpers", () => {
       status: "unstacked",
       output: 'current branch "feature" is not part of a stack',
       branches: [],
+      baseBranch: null,
     });
 
     const failedRunner: GhStackCommandRunner = async () => {
@@ -139,18 +161,20 @@ suite("GitHub stack runner-driven helpers", () => {
       status: "error",
       output: "gh: unknown command stack",
       branches: [],
+      baseBranch: null,
     });
   });
 
   test("recognizes successful stack probes and rejects malformed JSON", async () => {
     const stackedRunner: GhStackCommandRunner = async () => ({
-      stdout: '{"branches":[{"branch":"feature"}]}',
+      stdout: '{"trunk":"main","branches":[{"branch":"feature"}]}',
       stderr: "",
     });
     assert.deepEqual(await probeGhStack("/workspace", undefined, stackedRunner), {
       status: "stacked",
-      output: '{"branches":[{"branch":"feature"}]}',
+      output: '{"trunk":"main","branches":[{"branch":"feature"}]}',
       branches: ["feature"],
+      baseBranch: "main",
     });
 
     const malformedRunner: GhStackCommandRunner = async () => ({

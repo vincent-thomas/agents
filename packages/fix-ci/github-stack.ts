@@ -146,6 +146,10 @@ export function stackViewArgs(): string[] {
   return ["stack", "view", "--json"];
 }
 
+export function stackUnstackLocalArgs(): string[] {
+  return ["stack", "unstack", "--local"];
+}
+
 export function stackSyncArgs(): string[] {
   return ["stack", "sync"];
 }
@@ -162,6 +166,14 @@ export function runGhStackInit(
   runner: GhStackCommandRunner = runGhStackCommand,
 ): Promise<GhStackOperationResult> {
   return runStackOperation(stackInitArgs(branches, base), cwd, signal, runner);
+}
+
+export function runGhStackUnstackLocal(
+  cwd: string,
+  signal?: AbortSignal,
+  runner: GhStackCommandRunner = runGhStackCommand,
+): Promise<GhStackOperationResult> {
+  return runStackOperation(stackUnstackLocalArgs(), cwd, signal, runner);
 }
 
 export function runGhStackSync(
@@ -186,6 +198,8 @@ export interface GhStackProbeResult {
   status: GhStackProbeStatus;
   output: string;
   branches: string[];
+  /** The stack trunk/base branch when the view JSON identifies it. */
+  baseBranch: string | null;
 }
 
 /**
@@ -209,6 +223,7 @@ export async function probeGhStack(
           : "error",
       output: output || "gh stack view returned no recognizable stack data",
       branches: parsed.branches,
+      baseBranch: stackBaseBranch(result.stdout),
     };
   } catch (error: unknown) {
     const output = errorOutput(error);
@@ -216,6 +231,7 @@ export async function probeGhStack(
       status: isNotStackOutput(output) ? "unstacked" : "error",
       output,
       branches: [],
+      baseBranch: null,
     };
   }
 }
@@ -243,6 +259,51 @@ export function isStackViewStacked(output: string): boolean {
 /** Extract stack branch names from the supported `gh stack view --json` shapes. */
 export function stackBranchNames(output: string): string[] {
   return parseStackBranchNames(output).branches;
+}
+
+/** Extract the trunk/base branch from the root of a stack view JSON object. */
+export function stackBaseBranch(output: string): string | null {
+  try {
+    return stackBaseBranchValue(JSON.parse(output) as unknown);
+  } catch {
+    return null;
+  }
+}
+
+function stackBaseBranchValue(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const root = value as Record<string, unknown>;
+  for (const key of ["trunk", "base", "trunkBranch", "baseBranch"]) {
+    const branch = branchLikeName(root[key]);
+    if (branch) return branch;
+  }
+
+  // A few gh versions wrap the root fields in an object under `stack`.
+  // Deliberately do not walk branches/entries/commits: their `base` values
+  // can be commit SHAs rather than the stack's base branch.
+  return stackBaseBranchValue(root.stack);
+}
+
+function branchLikeName(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const object = value as Record<string, unknown>;
+  for (const key of [
+    "branch",
+    "branchName",
+    "name",
+    "headBranch",
+    "headRefName",
+    "refName",
+    "currentBranch",
+    "current",
+    "head",
+  ]) {
+    if (typeof object[key] === "string" && object[key].trim()) return object[key].trim();
+  }
+  return null;
 }
 
 function parseStackBranchNames(output: string): { branches: string[]; complete: boolean } {

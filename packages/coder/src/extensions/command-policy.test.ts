@@ -7,10 +7,11 @@ function violation(command: string) {
   return evaluateCommand(command, commandPolicyEntries);
 }
 
-test("allows bare make and the test target only", () => {
+test("allows bare make and selected targets only", () => {
   assert.equal(violation("make"), null);
   assert.equal(violation("make test"), null);
-  assert.ok(violation("make format"));
+  assert.equal(violation("make format"), null);
+  assert.ok(violation("make audit"));
   assert.ok(violation("make test EXTRA=1"));
 });
 

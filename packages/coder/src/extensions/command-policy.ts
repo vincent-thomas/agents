@@ -172,11 +172,12 @@ export const commandPolicyEntries: CommandPolicyEntry[] = [
       "Git history, refs, synchronization, and branch lifecycle are owned by dedicated tools.",
   },
   {
-    name: "make or make test",
+    name: "make, make test, or make format",
     status: CommandPolicyStatus.Allowed,
     command: (use) =>
       use.name === "make" &&
-      (use.args.length === 0 || (use.args.length === 1 && use.args[0] === "test")),
+      (use.args.length === 0 ||
+        (use.args.length === 1 && ["test", "format"].includes(use.args[0]))),
   },
 ];
 

@@ -226,6 +226,7 @@ export function createFixCiExtension(options: {
         const branchName = await currentBranch(cwd, signal);
         const stackProbe = await probeGhStack(cwd, signal, stackRunner);
         let pushedSha: string | undefined;
+        let prBase: string | null = null;
 
         if (stackProbe.status === "error") {
           return respond(
@@ -380,7 +381,7 @@ export function createFixCiExtension(options: {
           // ── 2. Check if base branch is ahead — merge if so ─────────────
           // Keep the PR branch up to date with the base branch before pushing
           // and running CI. This prevents CI from testing a stale branch.
-          const prBase = await getPrBaseBranch(cwd, signal);
+          prBase = await getPrBaseBranch(cwd, signal);
 
           if (prBase) {
             const baseAhead = await isBaseBranchAhead(cwd, prBase, signal);
@@ -540,13 +541,21 @@ export function createFixCiExtension(options: {
         if (!existingPr) {
           notify("Creating draft pull request…");
 
-          // Generate PR body from commit messages.
-          const prBody = await generatePrBody(cwd, signal);
+          const targetBase = prBase ?? (await getPrBaseBranch(cwd, signal));
+          if (!targetBase) {
+            return respond("Draft PR creation failed: could not determine a target branch.", {
+              prCreationFailed: true,
+              output: "Could not determine a target branch.",
+            });
+          }
+
+          // Generate PR body from commits unique to the inferred target branch.
+          const prBody = await generatePrBody(cwd, targetBase, signal);
 
           // Use provided title or auto-generate from the branch name.
           const prTitle = await generatePrTitle(cwd, signal);
 
-          const prResult = await createDraftPr(cwd, prTitle, prBody, signal);
+          const prResult = await createDraftPr(cwd, prTitle, prBody, targetBase, signal);
 
           if (!prResult.success) {
             return respond(`Draft PR creation failed:\n\n\`\`\`\n${prResult.output}\n\`\`\``, {

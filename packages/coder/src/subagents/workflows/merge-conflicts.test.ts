@@ -217,3 +217,60 @@ test("continues a cascading GitHub stack rebase through every conflicted branch"
   assert.match(result, /Resolved all stack conflicts/);
   assert.match(result, /All branches in stack rebased/);
 });
+
+test("restores the owned branch when cancellation arrives as stack continuation finishes", async () => {
+  const controller = new AbortController();
+  let rebaseActive = true;
+  let restored = false;
+
+  const workflow = createMergeConflictsWorkflow({
+    assertWorkspace: async () => {},
+    pathExists(path) {
+      return (
+        rebaseActive && (path.endsWith("rebase-merge") || path.endsWith("gh-stack-rebase-state"))
+      );
+    },
+    commandOutput: async (command, args, _cwd, signal) => {
+      assert.equal(command, "git");
+      if (controller.signal.aborted) assert.equal(signal, undefined);
+      if (args[0] === "ls-files") return "";
+      if (args[1] === "--verify") throw new Error("missing");
+      assert.equal(args[1], "--git-path");
+      return `.git/${args[2]}\n`;
+    },
+    async readStackRebaseOriginalBranch() {
+      return "feature";
+    },
+    async continueStackRebase() {
+      rebaseActive = false;
+      controller.abort();
+      return { success: true, output: "All branches in stack rebased" };
+    },
+    async restoreBranch(_cwd, branch, signal) {
+      assert.equal(branch, "feature");
+      assert.equal(signal, undefined);
+      restored = true;
+      return { success: true, output: "restored" };
+    },
+  });
+
+  await workflow({
+    cwd: "/repo",
+    definition,
+    prompt: "initial stack conflict prompt",
+    signal: controller.signal,
+    subagent: {
+      definition,
+      session: {
+        async prompt() {},
+        getLastAssistantText() {
+          return "Resolved the stack conflict.";
+        },
+      } as never,
+      dispose() {},
+    },
+    onProgress() {},
+  });
+
+  assert.equal(restored, true);
+});

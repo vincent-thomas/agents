@@ -158,10 +158,12 @@ export function createMergeConflictsWorkflow(
 
         onProgress("Continuing the cascading GitHub stack rebase…");
         const continuation = await continueStackRebase(cwd, signal);
-        const pendingUnmergedEntries = await commandOutput("git", ["ls-files", "-u"], cwd, signal);
-        if (pendingUnmergedEntries.trim() !== "") {
+        // The stack command may complete just as cancellation arrives. Verify
+        // and restore its resulting checkout without reusing an aborted signal.
+        const nextUnmergedEntries = await commandOutput("git", ["ls-files", "-u"], cwd);
+        if (nextUnmergedEntries.trim() !== "") {
           onProgress("The stack rebase reached another conflict; resuming the resolver…");
-          prompt = continuingStackRebasePrompt(continuation.output, pendingUnmergedEntries);
+          prompt = continuingStackRebasePrompt(continuation.output, nextUnmergedEntries);
           continue;
         }
         if (!continuation.success) {
@@ -169,11 +171,11 @@ export function createMergeConflictsWorkflow(
             `gh stack rebase --continue failed without producing conflicts:\n${continuation.output}`,
           );
         }
-        if ((await detectGitOperation(cwd, commandOutput, signal, pathExists)) !== "none") {
+        if ((await detectGitOperation(cwd, commandOutput, undefined, pathExists)) !== "none") {
           throw new Error("gh stack rebase --continue returned before the stack rebase finished");
         }
 
-        const restoration = await restoreBranch(cwd, stackOriginalBranch, signal);
+        const restoration = await restoreBranch(cwd, stackOriginalBranch);
         if (!restoration.success) {
           throw new Error(
             `GitHub stack rebase completed, but the owned branch ${stackOriginalBranch} could not be restored:\n${restoration.output}`,

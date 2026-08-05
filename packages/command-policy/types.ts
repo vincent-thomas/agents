@@ -19,6 +19,12 @@ export interface CommandUse {
   obfuscated?: boolean;
 }
 
+export type CommandPolicyCommandValidator = (
+  command: string,
+  uses: CommandUse[],
+  cwd: string,
+) => string | null;
+
 type CommandPolicyEntryBase = {
   /** Display name for the entry, e.g. "git status" or "rg" */
   name: string;

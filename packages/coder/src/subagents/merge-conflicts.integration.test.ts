@@ -186,3 +186,7 @@ suite("merge-only conflict workflow in real repositories", () => {
     );
   }
 });
+
+test("keeps the merge-conflicts integration definition available", () => {
+  assert.equal(definition.name, "merge_conflicts");
+});

@@ -272,7 +272,8 @@ suite("branchExistsOnOrigin", () => {
   test(
     "returns true for a branch present on origin",
     withGitRepos(async (local) => {
-      assert.equal(await branchExistsOnOrigin(local, "main"), true);
+      const branch = git("git branch --show-current", local);
+      assert.equal(await branchExistsOnOrigin(local, branch), true);
     }),
   );
 

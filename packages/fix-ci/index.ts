@@ -19,6 +19,7 @@ import { prepareBranchPoints } from "./branch-points.ts";
 import {
   gitPush,
   gitPushToOrigin,
+  gitPushBranchToOrigin,
   branchExistsOnOrigin,
   getHeadSha,
   needsPush,
@@ -334,31 +335,57 @@ export function createFixCiExtension(options: {
           }
 
           cycleCount++;
-          const branchOnOrigin = await branchExistsOnOrigin(cwd, branchName, signal);
-          if (branchOnOrigin === false) {
-            notify(
-              `GitHub stack detected on \`${branchName}\` — publishing the branch for its first stack submission…`,
+          if (stackProbe.branches.length === 0 || !stackProbe.branches.includes(branchName)) {
+            cycleCount = 0;
+            return respond(
+              `Could not identify every branch in the GitHub stack on \`${branchName}\`. ` +
+                "No branches were published and stack synchronization was not started.\n\n" +
+                `### gh stack view output:\n\`\`\`\n${stackProbe.output.trim()}\n\`\`\``,
+              {
+                stackProbeFailed: true,
+                stackViewOutput: stackProbe.output,
+                stackBranches: stackProbe.branches,
+              },
             );
-            const bootstrap = await gitPushToOrigin(cwd, signal);
+          }
+
+          const missingStackBranches: string[] = [];
+          for (const stackBranch of stackProbe.branches) {
+            const branchOnOrigin = await branchExistsOnOrigin(cwd, stackBranch, signal);
+            if (branchOnOrigin === null) {
+              cycleCount = 0;
+              return respond(
+                `Could not determine whether stack branch \`${stackBranch}\` exists on origin. ` +
+                  "No branches were published and stack synchronization was not started; fix remote access and try again.",
+                { stackBootstrapFailed: true, branch: stackBranch, remoteLookupFailed: true },
+              );
+            }
+            if (!branchOnOrigin) missingStackBranches.push(stackBranch);
+          }
+
+          for (const stackBranch of missingStackBranches) {
+            notify(`Publishing missing stack branch \`${stackBranch}\`…`);
+            const bootstrap =
+              stackBranch === branchName
+                ? await gitPushToOrigin(cwd, signal)
+                : await gitPushBranchToOrigin(cwd, stackBranch, signal);
             if (!bootstrap.success) {
               cycleCount = 0;
               return respond(
                 `## ⚠️ GitHub Stack Bootstrap Failed\n\n` +
-                  `The stack branch \`${branchName}\` was not present on origin, so its first stack submission required a bootstrap push. ` +
-                  `That push failed.\n\n` +
+                  `The stack branch \`${stackBranch}\` was not present on origin, and its bootstrap push failed.\n\n` +
                   `### Error output:\n\`\`\`\n${bootstrap.output.trim()}\n\`\`\`\n\n` +
                   `Fix the push error and call \`push_and_check_ci\` again.`,
                 {
                   stackBootstrapFailed: true,
-                  branch: branchName,
+                  branch: stackBranch,
                   errorOutput: bootstrap.output,
                 },
               );
             }
-            notify("Initial stack branch push succeeded — syncing…");
-          } else {
-            notify(`GitHub stack detected on \`${branchName}\` — syncing…`);
           }
+
+          notify(`GitHub stack detected on \`${branchName}\` — syncing…`);
           const syncResult = await runGhStackSync(cwd, signal, stackRunner);
 
           if (!syncResult.success) {

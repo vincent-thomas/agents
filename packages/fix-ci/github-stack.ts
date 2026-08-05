@@ -185,6 +185,7 @@ export type GhStackProbeStatus = "stacked" | "unstacked" | "error";
 export interface GhStackProbeResult {
   status: GhStackProbeStatus;
   output: string;
+  branches: string[];
 }
 
 /**
@@ -200,15 +201,21 @@ export async function probeGhStack(
   try {
     const result = await runner(stackViewArgs(), { cwd, signal });
     const output = commandOutput(result);
+    const parsed = parseStackBranchNames(result.stdout);
     return {
-      status: isStackViewStacked(result.stdout) ? "stacked" : "error",
+      status:
+        isStackViewStacked(result.stdout) && parsed.complete && parsed.branches.length > 0
+          ? "stacked"
+          : "error",
       output: output || "gh stack view returned no recognizable stack data",
+      branches: parsed.branches,
     };
   } catch (error: unknown) {
     const output = errorOutput(error);
     return {
       status: isNotStackOutput(output) ? "unstacked" : "error",
       output,
+      branches: [],
     };
   }
 }
@@ -231,6 +238,84 @@ export function isStackViewStacked(output: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Extract stack branch names from the supported `gh stack view --json` shapes. */
+export function stackBranchNames(output: string): string[] {
+  return parseStackBranchNames(output).branches;
+}
+
+function parseStackBranchNames(output: string): { branches: string[]; complete: boolean } {
+  try {
+    const branches: string[] = [];
+    const complete = collectStackRoot(JSON.parse(output) as unknown, branches);
+    return { branches, complete };
+  } catch {
+    return { branches: [], complete: false };
+  }
+}
+
+function addBranch(branches: string[], value: unknown): boolean {
+  if (typeof value !== "string" || !value.trim()) return false;
+  if (!branches.includes(value)) branches.push(value);
+  return true;
+}
+
+function collectStackRoot(value: unknown, branches: string[]): boolean {
+  if (Array.isArray(value)) return collectBranchCollection(value, branches);
+  if (!value || typeof value !== "object") return false;
+
+  const object = value as Record<string, unknown>;
+  let foundCollection = false;
+  let collectionsComplete = true;
+  for (const key of ["stack", "branches", "entries", "commits"]) {
+    if (!(key in object)) continue;
+    foundCollection = true;
+    if (!collectBranchCollection(object[key], branches)) collectionsComplete = false;
+  }
+  if (foundCollection) {
+    for (const fallback of ["currentBranch", "current", "head", "branch"]) {
+      addBranch(branches, object[fallback]);
+    }
+    return collectionsComplete;
+  }
+
+  for (const key of [
+    "branch",
+    "branchName",
+    "headBranch",
+    "headRefName",
+    "currentBranch",
+    "current",
+    "head",
+  ]) {
+    if (addBranch(branches, object[key])) return true;
+  }
+  return false;
+}
+
+function collectBranchCollection(value: unknown, branches: string[]): boolean {
+  if (typeof value === "string") return addBranch(branches, value);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return false;
+    let complete = true;
+    for (const entry of value) {
+      if (!collectBranchEntry(entry, branches)) complete = false;
+    }
+    return complete;
+  }
+  return collectBranchEntry(value, branches);
+}
+
+function collectBranchEntry(value: unknown, branches: string[]): boolean {
+  if (typeof value === "string") return addBranch(branches, value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+
+  const object = value as Record<string, unknown>;
+  for (const key of ["branch", "branchName", "headBranch", "headRefName", "name"]) {
+    if (addBranch(branches, object[key])) return true;
+  }
+  return collectStackRoot(object, branches);
 }
 
 function hasStackEntries(value: unknown): boolean {

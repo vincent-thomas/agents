@@ -80,6 +80,16 @@ export function gitPushToOrigin(cwd: string, signal?: AbortSignal): Promise<Push
   return runGitPush("git push -u origin HEAD", cwd, signal);
 }
 
+/** Publish a named local branch without switching the current checkout. */
+export function gitPushBranchToOrigin(
+  cwd: string,
+  branch: string,
+  signal?: AbortSignal,
+): Promise<PushResult> {
+  const ref = `refs/heads/${branch}`;
+  return runGitPush(`git push origin ${shellQuote(ref)}:${shellQuote(ref)}`, cwd, signal);
+}
+
 // ---------------------------------------------------------------------------
 // Git conflict paths
 // ---------------------------------------------------------------------------

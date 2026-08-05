@@ -217,6 +217,7 @@ test("create_github_stack restores the owned branch after init traverses branche
 
 test("push_and_check_ci preserves a conflict from the middle of a stack rebase", async () => {
   const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
   try {
     writeFileSync(join(cwd, "file.txt"), "feature\n");
     git(cwd, ["add", "file.txt"]);
@@ -226,6 +227,9 @@ test("push_and_check_ci preserves a conflict from the middle of a stack rebase",
     git(cwd, ["add", "file.txt"]);
     git(cwd, ["commit", "-m", "trunk"]);
     git(cwd, ["switch", "feature"]);
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["push", "origin", "main", "feature"]);
 
     const stackRunner: GhStackCommandRunner = async (args) => {
       if (args[1] === "view") {
@@ -256,6 +260,7 @@ test("push_and_check_ci preserves a conflict from the middle of a stack rebase",
     git(cwd, ["rebase", "--abort"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
   }
 });
 
@@ -291,8 +296,47 @@ test("push_and_check_ci bootstraps an unpublished stack branch before sync", asy
   }
 });
 
+test("push_and_check_ci publishes every missing stack branch before sync", async () => {
+  const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
+  try {
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["branch", "stack-base", "main"]);
+    git(cwd, ["push", "origin", "main"]);
+
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view") {
+        return {
+          stdout:
+            '{"branches":[{"branch":"stack-base"},{"branch":"feature"}],"currentBranch":"feature"}',
+          stderr: "",
+        };
+      }
+      assert.equal(args[1], "sync");
+      assert.notEqual(git(cwd, ["ls-remote", "--heads", "origin", "stack-base"]), "");
+      assert.notEqual(git(cwd, ["ls-remote", "--heads", "origin", "feature"]), "");
+      assert.equal(git(cwd, ["rev-parse", "--abbrev-ref", "@{upstream}"]), "origin/feature");
+      assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+      throw new Error("intentionally stop before CI polling");
+    };
+    const tool = requireTool(registeredTools({ stackRunner }), "push_and_check_ci");
+
+    const result = await tool.execute("push", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.stackSyncFailed, true);
+    assert.deepEqual(calls, ["stack view --json", "stack sync"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
 test("push_and_check_ci stops on stack probe and submit failures", async () => {
   const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
   try {
     const probeFailure: GhStackCommandRunner = async () => {
       throw new Error("gh: unknown command stack");
@@ -304,6 +348,9 @@ test("push_and_check_ci stops on stack probe and submit failures", async () => {
     const probeResult = await probeTool.execute("push", {}, undefined, undefined, { cwd });
     assert.equal(probeResult.details.stackProbeFailed, true);
 
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["push", "origin", "feature"]);
     git(cwd, ["branch", "other"]);
     const calls: string[] = [];
     const submitFailure: GhStackCommandRunner = async (args) => {
@@ -327,5 +374,6 @@ test("push_and_check_ci stops on stack probe and submit failures", async () => {
     assert.deepEqual(calls, ["stack view --json", "stack sync", "stack submit --auto"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
   }
 });

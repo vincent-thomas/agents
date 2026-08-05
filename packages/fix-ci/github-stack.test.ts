@@ -7,6 +7,7 @@ import {
   runGhStackInit,
   runGhStackSubmit,
   runGhStackSync,
+  stackBranchNames,
   stackInitArgs,
   stackSubmitArgs,
   stackSyncArgs,
@@ -70,6 +71,26 @@ suite("GitHub stack command builders", () => {
     assert.equal(isStackViewStacked("[]"), false);
     assert.equal(isStackViewStacked("not json"), false);
   });
+
+  test("extracts ordered unique branches from supported stack view shapes", () => {
+    assert.deepEqual(
+      stackBranchNames(
+        '{"branches":[{"branch":"part-one"},{"branch":"part-two"}],"currentBranch":"part-two"}',
+      ),
+      ["part-one", "part-two"],
+    );
+    assert.deepEqual(stackBranchNames('{"stack":[{"name":"one"},{"headRefName":"two"}]}'), [
+      "one",
+      "two",
+    ]);
+    assert.deepEqual(stackBranchNames('{"branches":["one","two"]}'), ["one", "two"]);
+    assert.deepEqual(stackBranchNames('["one","two"]'), ["one", "two"]);
+    assert.deepEqual(
+      stackBranchNames('{"branch":"two","branches":[{"branch":"one"},{"branch":"two"}]}'),
+      ["one", "two"],
+    );
+    assert.deepEqual(stackBranchNames("not json"), []);
+  });
 });
 
 suite("GitHub stack runner-driven helpers", () => {
@@ -108,6 +129,7 @@ suite("GitHub stack runner-driven helpers", () => {
     assert.deepEqual(await probeGhStack("/workspace", undefined, ordinaryRunner), {
       status: "unstacked",
       output: 'current branch "feature" is not part of a stack',
+      branches: [],
     });
 
     const failedRunner: GhStackCommandRunner = async () => {
@@ -116,6 +138,7 @@ suite("GitHub stack runner-driven helpers", () => {
     assert.deepEqual(await probeGhStack("/workspace", undefined, failedRunner), {
       status: "error",
       output: "gh: unknown command stack",
+      branches: [],
     });
   });
 
@@ -124,13 +147,24 @@ suite("GitHub stack runner-driven helpers", () => {
       stdout: '{"branches":[{"branch":"feature"}]}',
       stderr: "",
     });
-    assert.equal((await probeGhStack("/workspace", undefined, stackedRunner)).status, "stacked");
+    assert.deepEqual(await probeGhStack("/workspace", undefined, stackedRunner), {
+      status: "stacked",
+      output: '{"branches":[{"branch":"feature"}]}',
+      branches: ["feature"],
+    });
 
     const malformedRunner: GhStackCommandRunner = async () => ({
       stdout: "not json",
       stderr: "",
     });
     assert.equal((await probeGhStack("/workspace", undefined, malformedRunner)).status, "error");
+
+    const incompleteRunner: GhStackCommandRunner = async () => ({
+      stdout:
+        '{"stack":[{"branch":"feature"}],"branches":[{"branch":"feature"},{"unknown":"base"}]}',
+      stderr: "",
+    });
+    assert.equal((await probeGhStack("/workspace", undefined, incompleteRunner)).status, "error");
     assert.equal(isNotStackOutput("authentication failed"), false);
   });
 

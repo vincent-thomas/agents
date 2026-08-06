@@ -1591,7 +1591,7 @@ export function createFixCiExtension(options: {
             cycleCount = 0;
             return respond(
               `## ⚠️ GitHub Stack Submit Failed\n\n` +
-                `The stack synced successfully, but \`gh stack submit --auto\` failed.\n\n` +
+                `The stack synced successfully, but \`gh stack submit --auto --no-comments\` failed.\n\n` +
                 `### Error output:\n\`\`\`\n${submitResult.output.trim()}\n\`\`\`\n\n` +
                 `The owned workspace branch was restored. Fix the submission error and call \`push_and_check_ci\` again.`,
               {
@@ -1603,7 +1603,8 @@ export function createFixCiExtension(options: {
                 currentBranch: branchName,
                 errorOutput: submitResult.output,
                 restoreOutput: submitRestoration.restoreOutput,
-                instructions: "Fix the gh stack submit error, then call push_and_check_ci again.",
+                instructions:
+                  "Fix the gh stack submit --auto --no-comments error, then call push_and_check_ci again.",
                 ...stackOwnershipDetails,
               },
             );

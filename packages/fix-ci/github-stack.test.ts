@@ -55,7 +55,7 @@ suite("GitHub stack command builders", () => {
     assert.deepEqual(stackUnstackArgs(), ["stack", "unstack"]);
     assert.deepEqual(stackUnstackLocalArgs(), ["stack", "unstack", "--local"]);
     assert.deepEqual(stackSyncArgs(), ["stack", "sync"]);
-    assert.deepEqual(stackSubmitArgs(), ["stack", "submit", "--auto"]);
+    assert.deepEqual(stackSubmitArgs(), ["stack", "submit", "--auto", "--no-comments"]);
     assert.deepEqual(stackLinkArgs(["first", "second"], "main"), [
       "stack",
       "link",
@@ -377,7 +377,7 @@ suite("GitHub stack runner-driven helpers", () => {
       ["stack", "unstack"],
       ["stack", "unstack", "--local"],
       ["stack", "sync"],
-      ["stack", "submit", "--auto"],
+      ["stack", "submit", "--auto", "--no-comments"],
       ["stack", "link", "--base", "main", "--", "one", "two"],
     ]);
   });

@@ -1222,7 +1222,7 @@ test("push_and_check_ci reclaims refreshed membership before link and readiness"
       "validate",
       "claim",
       "stack sync",
-      "stack submit --auto",
+      "stack submit --auto --no-comments",
       "stack view --json",
       "snapshot",
       "validate",
@@ -1478,7 +1478,7 @@ test("push_and_check_ci wires successful stack submission into readiness", async
     assert.deepEqual(calls, [
       "stack view --json",
       "stack sync",
-      "stack submit --auto",
+      "stack submit --auto --no-comments",
       "stack view --json",
       "stack link --base main -- feature",
     ]);
@@ -1536,7 +1536,7 @@ test("push_and_check_ci rebuilds a remote stack after an exact middle insertion 
     assert.deepEqual(calls, [
       "stack view --json",
       "stack sync",
-      "stack submit --auto",
+      "stack submit --auto --no-comments",
       "stack view --json",
       "stack link --base main -- feature",
       "stack unstack",
@@ -1787,7 +1787,7 @@ test("push_and_check_ci stops before linking when the post-submit stack probe fa
     assert.deepEqual(calls, [
       "stack view --json",
       "stack sync",
-      "stack submit --auto",
+      "stack submit --auto --no-comments",
       "stack view --json",
     ]);
   } finally {
@@ -1836,7 +1836,7 @@ test("push_and_check_ci skips linking and readiness when the stack base is unkno
     assert.deepEqual(calls, [
       "stack view --json",
       "stack sync",
-      "stack submit --auto",
+      "stack submit --auto --no-comments",
       "stack view --json",
     ]);
   } finally {
@@ -1913,7 +1913,7 @@ test("push_and_check_ci restores checkout after a successful remote stack link b
     assert.deepEqual(calls, [
       "stack view --json",
       "stack sync",
-      "stack submit --auto",
+      "stack submit --auto --no-comments",
       "stack view --json",
       "stack link --base main -- feature",
     ]);
@@ -1980,7 +1980,7 @@ test("push_and_check_ci forwards cancellation to link and restores without its a
     assert.deepEqual(calls, [
       "stack view --json",
       "stack sync",
-      "stack submit --auto",
+      "stack submit --auto --no-comments",
       "stack view --json",
       "stack link --base main -- feature",
     ]);
@@ -2035,7 +2035,11 @@ test("push_and_check_ci distinguishes submit restoration failure from link failu
     assert.equal(result.details.remoteStackLinked, false);
     assert.equal(result.details.stackLinkOutput, undefined);
     assert.equal(readinessCalled, false);
-    assert.deepEqual(calls, ["stack view --json", "stack sync", "stack submit --auto"]);
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "stack sync",
+      "stack submit --auto --no-comments",
+    ]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(remote, { recursive: true, force: true });
@@ -2088,7 +2092,7 @@ test("push_and_check_ci stops before readiness when remote stack linking fails",
     assert.deepEqual(calls, [
       "stack view --json",
       "stack sync",
-      "stack submit --auto",
+      "stack submit --auto --no-comments",
       "stack view --json",
       "stack link --base main -- feature",
     ]);
@@ -2134,8 +2138,16 @@ test("push_and_check_ci stops on stack probe and submit failures", async () => {
 
     assert.equal(submitResult.details.stackSubmitFailed, true);
     assert.equal(submitResult.details.workspaceRestored, true);
+    assert.equal(
+      submitResult.details.instructions,
+      "Fix the gh stack submit --auto --no-comments error, then call push_and_check_ci again.",
+    );
     assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
-    assert.deepEqual(calls, ["stack view --json", "stack sync", "stack submit --auto"]);
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "stack sync",
+      "stack submit --auto --no-comments",
+    ]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(remote, { recursive: true, force: true });

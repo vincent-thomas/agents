@@ -163,7 +163,7 @@ export function stackSyncArgs(): string[] {
 }
 
 export function stackSubmitArgs(): string[] {
-  return ["stack", "submit", "--auto"];
+  return ["stack", "submit", "--auto", "--no-comments"];
 }
 
 export function stackLinkArgs(branches: readonly string[], base?: string | null): string[] {

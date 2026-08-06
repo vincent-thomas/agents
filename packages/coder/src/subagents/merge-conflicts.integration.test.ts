@@ -457,7 +457,7 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
       "stack sync",
       "stack view --json",
       "stack sync",
-      "stack submit --auto",
+      "stack submit --auto --no-comments",
       "stack view --json",
       "stack link --base main -- lower tip",
     ]);

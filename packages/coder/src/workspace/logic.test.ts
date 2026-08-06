@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  assertManagedWorkspace,
   assertOwnedWorkspace,
   assertWorkspacePath,
   claimWorkspaceStack,
@@ -13,6 +15,7 @@ import {
   listWorkspaces,
   loadWorkspace,
   removeWorkspaceWorktree,
+  replaceWorkspaceOwnership,
   resolveRegularCheckout,
   resolveRepository,
   updateWorkspace,
@@ -23,6 +26,11 @@ import {
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function repositoryLockPath(store: WorkspaceStore, repository: string): string {
+  const key = createHash("sha256").update(repository).digest("hex");
+  return join(store.stateDir, "workspaces", "locks", `${key}.lock`);
 }
 
 function fixture(): {
@@ -95,6 +103,57 @@ test("claims valid stack metadata and rejects overlap with another workspace", a
     await assert.rejects(
       claimWorkspaceStack(store, second, { baseBranch: "main", branches: ["feature/not-active"] }),
       /Invalid workspace record/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("stale updates preserve a stack claim written after the stale object", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/stale-update");
+    await claimWorkspaceStack(store, workspace, {
+      baseBranch: "main",
+      branches: [workspace.branch, "feature/stale-base"],
+    });
+
+    await updateWorkspace(store, workspace, { sessionName: "updated from stale state" });
+
+    const current = await loadWorkspace(store, workspace.id);
+    assert.deepEqual(current.stack, {
+      baseBranch: "main",
+      branches: [workspace.branch, "feature/stale-base"],
+    });
+    assert.equal(current.sessionName, "updated from stale state");
+  } finally {
+    cleanup();
+  }
+});
+
+test("concurrent overlapping stack claims have exactly one success", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const first = await createWorkspace(store, repo, "feature/concurrent-first");
+    const second = await createWorkspace(store, repo, "feature/concurrent-second");
+    const outcomes = await Promise.allSettled([
+      claimWorkspaceStack(store, first, {
+        baseBranch: "main",
+        branches: [first.branch, "feature/concurrent-shared"],
+      }),
+      claimWorkspaceStack(store, second, {
+        baseBranch: "main",
+        branches: [second.branch, "feature/concurrent-shared"],
+      }),
+    ]);
+
+    assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
+    assert.equal(outcomes.filter((outcome) => outcome.status === "rejected").length, 1);
+    const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+    if (!rejected || rejected.status !== "rejected") throw new Error("Expected a rejected claim.");
+    assert.match(
+      rejected.reason instanceof Error ? rejected.reason.message : String(rejected.reason),
+      /already owned by another workspace/,
     );
   } finally {
     cleanup();
@@ -200,11 +259,84 @@ test("deletes only the requested workspace record", async () => {
     const repository = await resolveRepository(repo);
 
     await deleteWorkspace(store, first.id);
+    await deleteWorkspace(store, first.id);
 
     assert.deepEqual(
       (await listWorkspaces(store, repository.repository)).map((record) => record.id),
       [second.id],
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test("recovers a lock directory owned by a dead PID", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/dead-lock");
+    const lockPath = repositoryLockPath(store, workspace.repository);
+    mkdirSync(lockPath);
+    const child = spawn(process.execPath, ["-e", ""]);
+    const deadPid = child.pid;
+    if (deadPid === undefined) throw new Error("Could not start a lock-owner fixture process.");
+    await new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", () => resolve());
+    });
+    writeFileSync(
+      join(lockPath, "owner.json"),
+      JSON.stringify({ pid: deadPid, token: "abandoned" }),
+    );
+
+    const updated = await updateWorkspace(store, workspace, { sessionName: "recovered" });
+
+    assert.equal(updated.sessionName, "recovered");
+  } finally {
+    cleanup();
+  }
+});
+
+test("times out within a bounded interval for a live workspace lock", async () => {
+  const { repo, store, cleanup } = fixture();
+  let lockPath: string | undefined;
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/live-lock");
+    lockPath = repositoryLockPath(store, workspace.repository);
+    mkdirSync(lockPath);
+    writeFileSync(
+      join(lockPath, "owner.json"),
+      JSON.stringify({ pid: process.pid, token: "held" }),
+    );
+    const startedAt = Date.now();
+
+    await assert.rejects(
+      updateWorkspace(store, workspace, { sessionName: "blocked" }),
+      /Timed out waiting for the workspace registry lock/,
+    );
+
+    assert.ok(Date.now() - startedAt < 3_000);
+  } finally {
+    if (lockPath) rmSync(lockPath, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("legacy ownership restore rejects overlap without overwriting the current record", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const first = await createWorkspace(store, repo, "feature/restore-first");
+    const second = await createWorkspace(store, repo, "feature/restore-second");
+    const stacked = await claimWorkspaceStack(store, first, {
+      baseBranch: "main",
+      branches: [first.branch, "feature/restore-base"],
+    });
+
+    await assert.rejects(
+      replaceWorkspaceOwnership(store, stacked, { branch: second.branch }),
+      /already owned by another workspace/,
+    );
+
+    assert.deepEqual(await loadWorkspace(store, first.id), stacked);
   } finally {
     cleanup();
   }
@@ -320,6 +452,20 @@ test("rejects a command cwd outside the owned worktree", async () => {
     const workspace = await createWorkspace(store, repo, "feature/owned");
 
     await assert.rejects(assertOwnedWorkspace(workspace, repo), /path mismatch/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("validates an explicit managed checkout branch without persisted ownership", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/managed");
+    git(repo, "branch", "feature/adopted");
+    git(workspace.worktree, "switch", "feature/adopted");
+
+    await assertManagedWorkspace(workspace, workspace.worktree, "feature/adopted");
+    await assert.rejects(assertOwnedWorkspace(workspace), /branch mismatch/);
   } finally {
     cleanup();
   }

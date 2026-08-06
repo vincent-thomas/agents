@@ -92,6 +92,131 @@ function recordsDir(store: WorkspaceStore): string {
   return join(store.stateDir, "workspaces", "records");
 }
 
+function repositoryLockPath(store: WorkspaceStore, repository: string): string {
+  const key = createHash("sha256").update(repository).digest("hex");
+  return join(store.stateDir, "workspaces", "locks", `${key}.lock`);
+}
+
+const workspaceLockWaitMs = 1_000;
+const workspaceLockPollMs = 20;
+
+interface WorkspaceLockOwner {
+  pid: number;
+  token: string;
+}
+
+async function readWorkspaceLockOwner(path: string): Promise<WorkspaceLockOwner | undefined> {
+  try {
+    const raw = (await readFile(path, "utf8")).trim();
+    if (/^[0-9]+$/.test(raw)) {
+      const pid = Number(raw);
+      return Number.isSafeInteger(pid) && pid > 0 ? { pid, token: "" } : undefined;
+    }
+    const value: unknown = JSON.parse(raw);
+    if (
+      !value ||
+      typeof value !== "object" ||
+      typeof (value as WorkspaceLockOwner).pid !== "number" ||
+      !Number.isInteger((value as WorkspaceLockOwner).pid) ||
+      (value as WorkspaceLockOwner).pid <= 0
+    ) {
+      return undefined;
+    }
+    return {
+      pid: (value as WorkspaceLockOwner).pid,
+      token:
+        typeof (value as WorkspaceLockOwner).token === "string"
+          ? (value as WorkspaceLockOwner).token
+          : "",
+    };
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    return undefined;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: unknown) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function recoverDeadWorkspaceLock(lockPath: string): Promise<boolean> {
+  const owner = await readWorkspaceLockOwner(join(lockPath, "owner.json"));
+  if (!owner || isProcessAlive(owner.pid)) return false;
+
+  const abandonedPath = `${lockPath}.abandoned-${process.pid}-${randomUUID()}`;
+  try {
+    await rename(lockPath, abandonedPath);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    return false;
+  }
+  await rm(abandonedPath, { recursive: true, force: true });
+  return true;
+}
+
+async function acquireWorkspaceLock(
+  store: WorkspaceStore,
+  repository: string,
+): Promise<() => Promise<void>> {
+  const lockPath = repositoryLockPath(store, repository);
+  await mkdir(dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + workspaceLockWaitMs;
+  const token = randomUUID();
+  const owner: WorkspaceLockOwner = { pid: process.pid, token };
+
+  while (true) {
+    let createdLock = false;
+    try {
+      await mkdir(lockPath);
+      createdLock = true;
+      const temporaryOwner = join(lockPath, `.owner-${randomUUID()}.tmp`);
+      await writeFile(temporaryOwner, `${JSON.stringify(owner)}\n`, "utf8");
+      await rename(temporaryOwner, join(lockPath, "owner.json"));
+      return async () => {
+        const current = await readWorkspaceLockOwner(join(lockPath, "owner.json"));
+        if (current?.token === token && current.pid === process.pid) {
+          await rm(lockPath, { recursive: true, force: true });
+        }
+      };
+    } catch (error: unknown) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!createdLock && code === "EEXIST") {
+        if (await recoverDeadWorkspaceLock(lockPath)) {
+          if (Date.now() >= deadline) {
+            throw new Error(`Timed out waiting for the workspace registry lock for ${repository}.`);
+          }
+          continue;
+        }
+        if (Date.now() >= deadline) {
+          throw new Error(`Timed out waiting for the workspace registry lock for ${repository}.`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, workspaceLockPollMs));
+        continue;
+      }
+      if (createdLock) await rm(lockPath, { recursive: true, force: true });
+      throw error;
+    }
+  }
+}
+
+async function withWorkspaceLock<T>(
+  store: WorkspaceStore,
+  repository: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const release = await acquireWorkspaceLock(store, repository);
+  try {
+    return await action();
+  } finally {
+    await release();
+  }
+}
+
 function recordPath(store: WorkspaceStore, id: string): string {
   return join(recordsDir(store), `${id}.json`);
 }
@@ -163,6 +288,12 @@ export function workspaceOwnsBranch(workspace: AgentWorkspace, branch: string): 
   return workspaceBranches(workspace).includes(branch);
 }
 
+export interface WorkspaceStackClaim {
+  baseBranch: string;
+  branches: string[];
+  activeBranch: string;
+}
+
 function validateWorkspace(workspace: AgentWorkspace, path: string): void {
   parseWorkspace(workspace, path);
 }
@@ -199,7 +330,7 @@ export async function resolveRepository(cwd: string): Promise<{
   return { repository, sourceRoot: await realpath(sourceRoot), head };
 }
 
-export async function saveWorkspace(
+async function saveWorkspaceUnlocked(
   store: WorkspaceStore,
   workspace: AgentWorkspace,
 ): Promise<void> {
@@ -211,16 +342,34 @@ export async function saveWorkspace(
   await rename(temporary, path);
 }
 
+export async function saveWorkspace(
+  store: WorkspaceStore,
+  workspace: AgentWorkspace,
+): Promise<void> {
+  await withWorkspaceLock(store, workspace.repository, () =>
+    saveWorkspaceUnlocked(store, workspace),
+  );
+}
+
 export async function loadWorkspace(store: WorkspaceStore, id: string): Promise<AgentWorkspace> {
   const path = recordPath(store, id);
   return parseWorkspace(JSON.parse(await readFile(path, "utf8")), path);
 }
 
 export async function deleteWorkspace(store: WorkspaceStore, id: string): Promise<void> {
-  await rm(recordPath(store, id), { force: true });
+  let workspace: AgentWorkspace;
+  try {
+    workspace = await loadWorkspace(store, id);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  await withWorkspaceLock(store, workspace.repository, () =>
+    rm(recordPath(store, id), { force: true }),
+  );
 }
 
-export async function listWorkspaces(
+async function listWorkspacesUnlocked(
   store: WorkspaceStore,
   repository: string,
 ): Promise<AgentWorkspace[]> {
@@ -240,6 +389,13 @@ export async function listWorkspaces(
   return records
     .filter((record) => record.repository === repository)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+export async function listWorkspaces(
+  store: WorkspaceStore,
+  repository: string,
+): Promise<AgentWorkspace[]> {
+  return listWorkspacesUnlocked(store, repository);
 }
 
 function gitErrorMessage(error: unknown): string {
@@ -348,7 +504,12 @@ export async function createWorkspace(
   return workspace;
 }
 
-export async function updateWorkspace(
+export interface WorkspaceOwnership {
+  branch: string;
+  stack?: WorkspaceStackMetadata;
+}
+
+async function updateWorkspaceUnlocked(
   store: WorkspaceStore,
   workspace: AgentWorkspace,
   patch: Pick<
@@ -368,14 +529,109 @@ export async function updateWorkspace(
     ...patch,
     updatedAt: new Date().toISOString(),
   };
-  await saveWorkspace(store, updated);
+  await saveWorkspaceUnlocked(store, updated);
   return updated;
 }
 
+export async function updateWorkspace(
+  store: WorkspaceStore,
+  workspace: AgentWorkspace,
+  patch: Pick<
+    Partial<AgentWorkspace>,
+    | "branch"
+    | "stack"
+    | "completionHeadSha"
+    | "completionPrNumber"
+    | "sessionFile"
+    | "sessionName"
+    | "status"
+    | "transition"
+  >,
+): Promise<AgentWorkspace> {
+  return withWorkspaceLock(store, workspace.repository, async () => {
+    const current = await loadWorkspace(store, workspace.id);
+    return updateWorkspaceUnlocked(store, current, patch);
+  });
+}
+
+async function validateWorkspaceOwnershipUnlocked(
+  store: WorkspaceStore,
+  current: AgentWorkspace,
+  ownership: WorkspaceOwnership,
+): Promise<void> {
+  if (current.status !== "active") {
+    throw new Error(`Agent workspace ${current.id} is completed and read-only.`);
+  }
+  if (ownership.stack !== undefined && !isWorkspaceStack(ownership.stack)) {
+    throw new Error("Invalid workspace stack metadata.");
+  }
+  const candidate = { ...current, branch: ownership.branch, stack: ownership.stack };
+  validateWorkspace(candidate, recordPath(store, current.id));
+
+  const ownedBranches = ownership.stack?.branches ?? [ownership.branch];
+  const overlap = (await listWorkspacesUnlocked(store, current.repository))
+    .filter((other) => other.id !== current.id)
+    .flatMap((other) => workspaceBranches(other))
+    .find((branch) => ownedBranches.includes(branch));
+  if (overlap !== undefined) {
+    throw new Error(`Branch ${overlap} is already owned by another workspace.`);
+  }
+}
+
+async function validateWorkspaceStackClaimUnlocked(
+  store: WorkspaceStore,
+  current: AgentWorkspace,
+  claim: WorkspaceStackClaim,
+): Promise<WorkspaceStackMetadata> {
+  const stack: WorkspaceStackMetadata = {
+    baseBranch: claim.baseBranch,
+    branches: claim.branches,
+  };
+  if (!isWorkspaceStack(stack)) {
+    throw new Error("Invalid workspace stack metadata.");
+  }
+  await validateWorkspaceOwnershipUnlocked(store, current, {
+    branch: claim.activeBranch,
+    stack,
+  });
+  return stack;
+}
+
 /**
- * Claim a set of stack branches for an active workspace. The latest record is
- * loaded before checking overlap so callers cannot accidentally update a
- * stale transition/session record.
+ * Validate a stack claim against the latest persisted workspace and all other
+ * workspaces. This is deliberately read-only so callers can preflight the
+ * exact claim they will later persist.
+ */
+export async function validateWorkspaceStackClaim(
+  store: WorkspaceStore,
+  workspace: AgentWorkspace,
+  claim: WorkspaceStackClaim,
+): Promise<void> {
+  await withWorkspaceLock(store, workspace.repository, async () => {
+    const current = await loadWorkspace(store, workspace.id);
+    await validateWorkspaceStackClaimUnlocked(store, current, claim);
+  });
+}
+
+/**
+ * Replace the active cursor and its ownership metadata atomically. An omitted
+ * stack restores legacy ownership of only the active branch.
+ */
+export async function replaceWorkspaceOwnership(
+  store: WorkspaceStore,
+  workspace: AgentWorkspace,
+  ownership: WorkspaceOwnership,
+): Promise<AgentWorkspace> {
+  return withWorkspaceLock(store, workspace.repository, async () => {
+    const current = await loadWorkspace(store, workspace.id);
+    await validateWorkspaceOwnershipUnlocked(store, current, ownership);
+    return updateWorkspaceUnlocked(store, current, ownership);
+  });
+}
+
+/**
+ * Claim a set of stack branches for an active workspace. Loading, validation,
+ * and persistence all happen under one repository lock.
  */
 export async function claimWorkspaceStack(
   store: WorkspaceStore,
@@ -383,25 +639,17 @@ export async function claimWorkspaceStack(
   stack: WorkspaceStackMetadata,
   activeBranch = workspace.branch,
 ): Promise<AgentWorkspace> {
-  if (!isWorkspaceStack(stack)) {
-    throw new Error("Invalid workspace stack metadata.");
-  }
-  const current = await loadWorkspace(store, workspace.id);
-  if (current.status !== "active") {
-    throw new Error(`Agent workspace ${current.id} is completed and read-only.`);
-  }
-  const candidate = { ...current, branch: activeBranch, stack };
-  validateWorkspace(candidate, recordPath(store, current.id));
-
-  const overlap = (await listWorkspaces(store, current.repository))
-    .filter((other) => other.id !== current.id)
-    .flatMap((other) => workspaceBranches(other))
-    .find((branch) => stack.branches.includes(branch));
-  if (overlap !== undefined) {
-    throw new Error(`Branch ${overlap} is already owned by another workspace.`);
-  }
-
-  return updateWorkspace(store, current, { branch: activeBranch, stack });
+  return withWorkspaceLock(store, workspace.repository, async () => {
+    const current = await loadWorkspace(store, workspace.id);
+    const validatedStack = await validateWorkspaceStackClaimUnlocked(store, current, {
+      ...stack,
+      activeBranch,
+    });
+    return updateWorkspaceUnlocked(store, current, {
+      branch: activeBranch,
+      stack: validatedStack,
+    });
+  });
 }
 
 export async function inspectWorkspaceForRemoval(
@@ -486,10 +734,16 @@ export async function assertWorkspacePath(expected: string, cwd = expected): Pro
   }
 }
 
-export async function assertOwnedWorkspace(
+/**
+ * Validate the physical managed checkout without requiring its branch to be in
+ * the workspace's persisted ownership list. This is used while adopting a
+ * stack member whose cursor has not been persisted yet.
+ */
+export async function assertManagedWorkspace(
   workspace: AgentWorkspace,
   cwd = workspace.worktree,
-): Promise<void> {
+  expectedBranch = workspace.branch,
+): Promise<string> {
   if (workspace.status !== "active") {
     throw new Error(`Agent workspace ${workspace.id} is completed and read-only.`);
   }
@@ -498,13 +752,26 @@ export async function assertOwnedWorkspace(
   const currentBranch = (
     await git(actualCwd, ["symbolic-ref", "--quiet", "--short", "HEAD"])
   ).stdout.trim();
-  if (currentBranch !== workspace.branch || !workspaceOwnsBranch(workspace, currentBranch)) {
+  if (currentBranch !== expectedBranch) {
     throw new Error(
-      `Agent workspace branch mismatch: expected ${workspace.branch}, found ${currentBranch}.`,
+      `Agent workspace branch mismatch: expected ${expectedBranch}, found ${currentBranch || "detached HEAD"}.`,
     );
   }
   const repository = await resolveRepository(actualCwd);
   if (repository.repository !== workspace.repository) {
     throw new Error(`Agent workspace ${workspace.id} belongs to a different repository.`);
+  }
+  return currentBranch;
+}
+
+export async function assertOwnedWorkspace(
+  workspace: AgentWorkspace,
+  cwd = workspace.worktree,
+): Promise<void> {
+  const currentBranch = await assertManagedWorkspace(workspace, cwd, workspace.branch);
+  if (!workspaceOwnsBranch(workspace, currentBranch)) {
+    throw new Error(
+      `Agent workspace branch mismatch: expected ${workspace.branch}, found ${currentBranch}.`,
+    );
   }
 }

@@ -1,5 +1,6 @@
 import { currentBranch, getBranchSha } from "./git-utils.ts";
 import {
+  probeGhStackCurrentPullRequest,
   probeGhStackRemote,
   type GhStackCommandRunner,
   type GhStackRemoteStack,
@@ -155,6 +156,91 @@ function compareRemoteStack(
   return mismatches;
 }
 
+function remoteStackView(
+  currentBranch: string,
+  currentPr: { number: number; url: string },
+  remote: GhStackRemoteStack,
+): GhStackView {
+  return {
+    trunk: remote.base.ref,
+    base: remote.base.ref,
+    currentBranch,
+    branches: remote.pullRequests.map((pullRequest) => ({
+      name: pullRequest.head.ref,
+      // The local gh view was unavailable, so retain that fact for the report.
+      head: null,
+      base: remote.base.ref,
+      isCurrent: pullRequest.head.ref === currentBranch,
+      isMerged: pullRequest.mergedAt !== null,
+      isQueued: false,
+      needsRebase: false,
+      pr: {
+        number: pullRequest.number,
+        url: pullRequest.number === currentPr.number ? currentPr.url : null,
+        state: pullRequest.state,
+        draft: pullRequest.draft,
+      },
+    })),
+  };
+}
+
+/**
+ * Recover inspection when local `gh stack view` says unstacked. All lookups
+ * are read-only; only a found, validated remote stack is promoted to a report.
+ */
+export async function inspectUnstackedStack(
+  cwd: string,
+  signal: AbortSignal | undefined,
+  runner: GhStackCommandRunner,
+  controller: WorkspaceController | undefined,
+): Promise<
+  | { status: "found"; report: { text: string; details: Record<string, unknown> } }
+  | { status: "absent"; output: string }
+  | { status: "unavailable"; output: string }
+> {
+  const currentPrProbe = await probeGhStackCurrentPullRequest(cwd, signal, runner);
+  if (currentPrProbe.status === "absent")
+    return { status: "absent", output: currentPrProbe.output };
+  if (currentPrProbe.status === "error") {
+    return { status: "unavailable", output: currentPrProbe.output };
+  }
+
+  const repository = parsePullRequestRepository(currentPrProbe.pullRequest.url);
+  if (!repository) {
+    return {
+      status: "unavailable",
+      output: "could not parse the repository from the current PR URL",
+    };
+  }
+  const activeBranch = (await currentBranch(cwd, signal)) ?? "";
+  const remoteProbe = await probeGhStackRemote(
+    cwd,
+    repository.owner,
+    repository.repository,
+    currentPrProbe.pullRequest.number,
+    signal,
+    runner,
+  );
+  if (remoteProbe.status === "absent") return { status: "absent", output: remoteProbe.output };
+  if (remoteProbe.status === "error") return { status: "unavailable", output: remoteProbe.output };
+  if (
+    !remoteProbe.stack.pullRequests.some(
+      (pullRequest) => pullRequest.number === currentPrProbe.pullRequest.number,
+    )
+  ) {
+    return {
+      status: "unavailable",
+      output: `remote stack response did not include current PR #${currentPrProbe.pullRequest.number}`,
+    };
+  }
+
+  const view = remoteStackView(activeBranch, currentPrProbe.pullRequest, remoteProbe.stack);
+  return {
+    status: "found",
+    report: await inspectStackReport(cwd, view, signal, runner, controller, remoteProbe.stack),
+  };
+}
+
 /** Build the semantic local, remote, and workspace ownership stack report. */
 export async function inspectStackReport(
   cwd: string,
@@ -162,6 +248,7 @@ export async function inspectStackReport(
   signal: AbortSignal | undefined,
   runner: GhStackCommandRunner,
   controller: WorkspaceController | undefined,
+  remoteOverride?: GhStackRemoteStack,
 ): Promise<{ text: string; details: Record<string, unknown> }> {
   const shas = await Promise.all(
     view.branches.map((branch) => getBranchSha(cwd, branch.name, signal)),
@@ -187,32 +274,39 @@ export async function inspectStackReport(
   let remoteStatus: "synchronized" | "mismatch" | "absent" | "unavailable" | "local-only";
   let remoteStack: GhStackRemoteStack | undefined;
   let remoteMismatches: string[] = [];
-  const firstUrl = view.branches.find((branch) => branch.pr?.url)?.pr?.url ?? null;
-  if (!firstUrl) {
-    remoteStatus = "local-only";
+  if (remoteOverride) {
+    remoteStack = remoteOverride;
+    local = enrichRemoteMembers(local, remoteOverride);
+    remoteMismatches = compareRemoteStack(local, baseBranch, remoteOverride);
+    remoteStatus = remoteMismatches.length === 0 ? "synchronized" : "mismatch";
   } else {
-    const repository = parsePullRequestRepository(firstUrl);
-    const firstPr = view.branches.find((branch) => branch.pr?.url)?.pr?.number;
-    if (!repository || !firstPr) {
-      remoteStatus = "unavailable";
-      remoteMismatches = ["could not parse the repository from the local PR URL"];
+    const firstUrl = view.branches.find((branch) => branch.pr?.url)?.pr?.url ?? null;
+    if (!firstUrl) {
+      remoteStatus = "local-only";
     } else {
-      const remoteProbe = await probeGhStackRemote(
-        cwd,
-        repository.owner,
-        repository.repository,
-        firstPr,
-        signal,
-        runner,
-      );
-      if (remoteProbe.status === "found") {
-        remoteStack = remoteProbe.stack;
-        local = enrichRemoteMembers(local, remoteProbe.stack);
-        remoteMismatches = compareRemoteStack(local, baseBranch, remoteProbe.stack);
-        remoteStatus = remoteMismatches.length === 0 ? "synchronized" : "mismatch";
+      const repository = parsePullRequestRepository(firstUrl);
+      const firstPr = view.branches.find((branch) => branch.pr?.url)?.pr?.number;
+      if (!repository || !firstPr) {
+        remoteStatus = "unavailable";
+        remoteMismatches = ["could not parse the repository from the local PR URL"];
       } else {
-        remoteStatus = remoteProbe.status === "absent" ? "absent" : "unavailable";
-        if (remoteProbe.status === "error") remoteMismatches = [remoteProbe.output];
+        const remoteProbe = await probeGhStackRemote(
+          cwd,
+          repository.owner,
+          repository.repository,
+          firstPr,
+          signal,
+          runner,
+        );
+        if (remoteProbe.status === "found") {
+          remoteStack = remoteProbe.stack;
+          local = enrichRemoteMembers(local, remoteProbe.stack);
+          remoteMismatches = compareRemoteStack(local, baseBranch, remoteProbe.stack);
+          remoteStatus = remoteMismatches.length === 0 ? "synchronized" : "mismatch";
+        } else {
+          remoteStatus = remoteProbe.status === "absent" ? "absent" : "unavailable";
+          if (remoteProbe.status === "error") remoteMismatches = [remoteProbe.output];
+        }
       }
     }
   }

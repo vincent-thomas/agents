@@ -7,6 +7,7 @@ import {
   parseGhStackView,
   parseGhStackRemoteStacks,
   probeGhStack,
+  probeGhStackCurrentPullRequest,
   probeGhStackRemote,
   resolveGhStackTarget,
   runGhStackCheckout,
@@ -20,6 +21,7 @@ import {
   stackBranchNames,
   stackCheckoutArgs,
   stackRemoteMembershipArgs,
+  stackCurrentPullRequestArgs,
   stackInitArgs,
   stackLinkArgs,
   stackSubmitArgs,
@@ -437,6 +439,34 @@ suite("GitHub stack runner-driven helpers", () => {
     };
     const result = await runGhStackSync("/workspace", undefined, runner);
     assert.deepEqual(result, { success: false, output: "rebase conflict" });
+  });
+});
+
+suite("current pull request and remote stack probes", () => {
+  test("distinguishes a current PR from a missing PR and lookup errors", async () => {
+    const found = await probeGhStackCurrentPullRequest("/workspace", undefined, async (args) => {
+      assert.deepEqual(args, ["pr", "view", "--json", "number,url"]);
+      return { stdout: '{"number":42,"url":"https://github.com/acme/repo/pull/42"}', stderr: "" };
+    });
+    assert.deepEqual(found, {
+      status: "found",
+      output: '{"number":42,"url":"https://github.com/acme/repo/pull/42"}',
+      pullRequest: { number: 42, url: "https://github.com/acme/repo/pull/42" },
+    });
+    assert.deepEqual(stackCurrentPullRequestArgs(), ["pr", "view", "--json", "number,url"]);
+
+    const absent = await probeGhStackCurrentPullRequest("/workspace", undefined, async () => {
+      throw new Error("no pull requests found for branch feature");
+    });
+    assert.deepEqual(absent, {
+      status: "absent",
+      output: "no pull requests found for branch feature",
+    });
+
+    const error = await probeGhStackCurrentPullRequest("/workspace", undefined, async () => {
+      throw new Error("authentication failed");
+    });
+    assert.deepEqual(error, { status: "error", output: "authentication failed" });
   });
 });
 

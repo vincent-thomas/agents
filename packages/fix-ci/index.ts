@@ -65,7 +65,7 @@ import {
   type StackReadinessResult,
   type StackReadinessRunner,
 } from "./stack-readiness.ts";
-import { inspectStackReport } from "./stack-inspection.ts";
+import { inspectStackReport, inspectUnstackedStack } from "./stack-inspection.ts";
 import {
   cleanupCheckout,
   restoreBranchSignalFree,
@@ -1054,9 +1054,32 @@ export function createFixCiExtension(options: {
         await options.assertWorkspace(cwd);
         const probe = await probeGhStack(cwd, signal, stackRunner);
         if (probe.status === "unstacked") {
+          const remoteFallback = await inspectUnstackedStack(
+            cwd,
+            signal,
+            stackRunner,
+            options.workspaceController,
+          );
+          if (remoteFallback.status === "found") {
+            return respond(remoteFallback.report.text, remoteFallback.report.details);
+          }
+          if (remoteFallback.status === "unavailable") {
+            return respond(
+              "The local GitHub stack metadata says unstacked, and authoritative remote stack membership could not be determined. Inspection did not switch branches, push, or mutate remote membership.",
+              {
+                status: "partial",
+                local: { status: "unstacked", output: probe.output },
+                remote: { status: "unavailable", output: remoteFallback.output },
+              },
+            );
+          }
           return respond(
             "The current branch is not part of a GitHub stack. Inspection did not switch branches, push, or mutate remote membership.",
-            { status: "unstacked", local: { status: "unstacked" }, remote: { status: "absent" } },
+            {
+              status: "unstacked",
+              local: { status: "unstacked", output: probe.output },
+              remote: { status: "absent", output: remoteFallback.output },
+            },
           );
         }
         if (probe.status !== "stacked" || !probe.view) {

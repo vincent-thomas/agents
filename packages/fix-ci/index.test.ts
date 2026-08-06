@@ -2231,6 +2231,80 @@ test("inspect_stack enriches remote PR details without mutating local state", as
   }
 });
 
+test("inspect_stack falls back to authoritative remote membership when local metadata is unstacked", async () => {
+  const cwd = createRepository();
+  try {
+    const featureSha = git(cwd, ["rev-parse", "feature"]);
+    const remote = remoteStack([{ number: 42, branch: "feature", sha: featureSha }]);
+    const calls: string[] = [];
+    const runner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[0] === "pr") {
+        return {
+          stdout: '{"number":42,"url":"https://github.com/acme/repo/pull/42"}',
+          stderr: "",
+        };
+      }
+      if (args[0] === "api") return { stdout: JSON.stringify(remote), stderr: "" };
+      throw new Error('current branch "feature" is not part of a stack');
+    };
+    const ownership = controllerFixture({
+      activeBranch: "feature",
+      branches: ["feature"],
+      baseBranch: "main",
+    });
+    const beforeBranch = git(cwd, ["branch", "--show-current"]);
+    const beforeHead = git(cwd, ["rev-parse", "HEAD"]);
+    const result = await requireTool(
+      registeredTools({ stackRunner: runner, workspaceController: ownership.controller }),
+      "inspect_stack",
+    ).execute("inspect-remote-fallback", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.status, "partial");
+    assert.equal((result.details.remote as { status: string }).status, "synchronized");
+    assert.equal((result.details.ownership as { status: string }).status, "synchronized");
+    const member = (result.details.local as { members: Array<Record<string, unknown>> }).members[0];
+    assert.equal(member.prNumber, 42);
+    assert.equal(member.remoteSha, featureSha);
+    assert.match(result.content?.[0]?.text ?? "", /Remote: synchronized/);
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "pr view --json number,url",
+      "api --method GET repos/acme/repo/stacks?pull_request=42",
+    ]);
+    assert.equal(git(cwd, ["branch", "--show-current"]), beforeBranch);
+    assert.equal(git(cwd, ["rev-parse", "HEAD"]), beforeHead);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("inspect_stack reports remote lookup errors instead of unstacked", async () => {
+  const cwd = createRepository();
+  try {
+    const runner: GhStackCommandRunner = async (args) => {
+      if (args[0] === "pr") {
+        return {
+          stdout: '{"number":42,"url":"https://github.com/acme/repo/pull/42"}',
+          stderr: "",
+        };
+      }
+      if (args[0] === "api") throw new Error("authentication failed");
+      throw new Error('current branch "feature" is not part of a stack');
+    };
+    const result = await requireTool(
+      registeredTools({ stackRunner: runner }),
+      "inspect_stack",
+    ).execute("inspect-remote-error", {}, undefined, undefined, { cwd });
+    assert.equal(result.details.status, "partial");
+    assert.equal((result.details.remote as { status: string }).status, "unavailable");
+    assert.equal((result.details.remote as { output: string }).output, "authentication failed");
+    assert.doesNotMatch(result.content?.[0]?.text ?? "", /not part of a GitHub stack\./);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("checkout_stack_branch adopts exact and PR-selected members with descendants", async () => {
   const cwd = createRepository();
   try {

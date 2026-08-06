@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   assertManagedWorkspace,
@@ -270,12 +270,11 @@ test("deletes only the requested workspace record", async () => {
   }
 });
 
-test("recovers a lock directory owned by a dead PID", async () => {
+test("recovers a lock file owned by a dead PID", async () => {
   const { repo, store, cleanup } = fixture();
   try {
     const workspace = await createWorkspace(store, repo, "feature/dead-lock");
     const lockPath = repositoryLockPath(store, workspace.repository);
-    mkdirSync(lockPath);
     const child = spawn(process.execPath, ["-e", ""]);
     const deadPid = child.pid;
     if (deadPid === undefined) throw new Error("Could not start a lock-owner fixture process.");
@@ -283,10 +282,7 @@ test("recovers a lock directory owned by a dead PID", async () => {
       child.once("error", reject);
       child.once("exit", () => resolve());
     });
-    writeFileSync(
-      join(lockPath, "owner.json"),
-      JSON.stringify({ pid: deadPid, token: "abandoned" }),
-    );
+    writeFileSync(lockPath, JSON.stringify({ pid: deadPid, token: "abandoned" }));
 
     const updated = await updateWorkspace(store, workspace, { sessionName: "recovered" });
 
@@ -302,11 +298,7 @@ test("times out within a bounded interval for a live workspace lock", async () =
   try {
     const workspace = await createWorkspace(store, repo, "feature/live-lock");
     lockPath = repositoryLockPath(store, workspace.repository);
-    mkdirSync(lockPath);
-    writeFileSync(
-      join(lockPath, "owner.json"),
-      JSON.stringify({ pid: process.pid, token: "held" }),
-    );
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: "held" }));
     const startedAt = Date.now();
 
     await assert.rejects(
@@ -317,6 +309,23 @@ test("times out within a bounded interval for a live workspace lock", async () =
     assert.ok(Date.now() - startedAt < 3_000);
   } finally {
     if (lockPath) rmSync(lockPath, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("ignores an orphaned incomplete owner temp file", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/orphaned-lock-temp");
+    const lockPath = repositoryLockPath(store, workspace.repository);
+    const temporaryOwner = join(dirname(lockPath), ".lock-owner-crash-window.tmp");
+    writeFileSync(temporaryOwner, '{"pid":');
+
+    const updated = await updateWorkspace(store, workspace, { sessionName: "not blocked" });
+
+    assert.equal(updated.sessionName, "not blocked");
+    assert.equal(readFileSync(temporaryOwner, "utf8"), '{"pid":');
+  } finally {
     cleanup();
   }
 });

@@ -787,26 +787,68 @@ function positiveSafeInteger(value: string): number | undefined {
   return Number.isFinite(number) && Number.isSafeInteger(number) && number > 0 ? number : undefined;
 }
 
-function pullRequestNumberFromTarget(target: string): number | undefined {
-  if (/^#[1-9][0-9]*$/.test(target)) return positiveSafeInteger(target.slice(1));
-  if (/^[1-9][0-9]*$/.test(target)) return positiveSafeInteger(target);
+type PullRequestTarget =
+  | { kind: "number"; number: number }
+  | {
+      kind: "url";
+      number: number;
+      scheme: string;
+      host: string;
+      owner: string;
+      repository: string;
+    };
+
+function parsePullRequestUrl(value: string): PullRequestTarget | undefined {
   try {
-    const url = new URL(target);
+    const url = new URL(value);
     if (
       (url.protocol !== "http:" && url.protocol !== "https:") ||
       !url.hostname ||
       url.username ||
       url.password ||
-      target.includes("?") ||
-      target.includes("#")
+      url.search ||
+      url.hash
     ) {
       return undefined;
     }
-    const match = url.pathname.match(/^\/[^/]+\/[^/]+\/pull\/([1-9][0-9]*)$/);
-    return match ? positiveSafeInteger(match[1]) : undefined;
+    const match = url.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/([1-9][0-9]*)\/?$/);
+    const number = match ? positiveSafeInteger(match[3]) : undefined;
+    if (!match || number === undefined) return undefined;
+    return {
+      kind: "url",
+      scheme: url.protocol.slice(0, -1).toLowerCase(),
+      host: url.host.toLowerCase(),
+      owner: match[1],
+      repository: match[2],
+      number,
+    };
   } catch {
     return undefined;
   }
+}
+
+function parsePullRequestTarget(target: string): PullRequestTarget | undefined {
+  if (/^#[1-9][0-9]*$/.test(target)) {
+    const number = positiveSafeInteger(target.slice(1));
+    return number === undefined ? undefined : { kind: "number", number };
+  }
+  if (/^[1-9][0-9]*$/.test(target)) {
+    const number = positiveSafeInteger(target);
+    return number === undefined ? undefined : { kind: "number", number };
+  }
+  return parsePullRequestUrl(target);
+}
+
+function samePullRequestRepository(target: PullRequestTarget, localUrl: string | null): boolean {
+  if (target.kind !== "url" || localUrl === null) return false;
+  const local = parsePullRequestUrl(localUrl);
+  return (
+    local?.kind === "url" &&
+    local.host === target.host &&
+    local.owner === target.owner &&
+    local.repository === target.repository &&
+    local.number === target.number
+  );
 }
 
 /** Resolve a user target strictly against the PRs present in a local view. */
@@ -824,16 +866,21 @@ export function resolveGhStackTarget(view: GhStackView, target: string): GhStack
 
   const trimmed = target.trim();
   if (!trimmed) return { status: "invalid", reason: "target is empty" };
-  const pullRequestNumber = pullRequestNumberFromTarget(trimmed);
-  if (pullRequestNumber === undefined) {
+  const pullRequestTarget = parsePullRequestTarget(trimmed);
+  if (pullRequestTarget === undefined) {
     return { status: "invalid", reason: `invalid stack target: ${target}` };
   }
 
-  const matches = view.branches.filter((branch) => branch.pr?.number === pullRequestNumber);
+  const matches = view.branches.filter((branch) => {
+    if (branch.pr?.number !== pullRequestTarget.number) return false;
+    return pullRequestTarget.kind === "number"
+      ? true
+      : samePullRequestRepository(pullRequestTarget, branch.pr.url);
+  });
   if (matches.length > 1) {
     return {
       status: "ambiguous",
-      reason: `pull request target matches multiple stack members: #${pullRequestNumber}`,
+      reason: `pull request target matches multiple stack members: #${pullRequestTarget.number}`,
     };
   }
   if (matches.length === 0) {

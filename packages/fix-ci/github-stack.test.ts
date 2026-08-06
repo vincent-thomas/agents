@@ -276,7 +276,7 @@ suite("enriched stack view parsing and target resolution", () => {
     assert.equal(resolveGhStackTarget(view, "not-a-selector").status, "invalid");
   });
 
-  test("rejects unsafe PR numbers and ambiguous PR URLs", () => {
+  test("rejects unsafe PR numbers and mismatched PR URLs", () => {
     const view = parseGhStackView(enrichedViewJson);
     assert.ok(view);
     for (const target of [
@@ -290,8 +290,42 @@ suite("enriched stack view parsing and target resolution", () => {
       assert.equal(resolveGhStackTarget(view, target).status, "invalid", target);
     }
     assert.equal(
-      resolveGhStackTarget(view, "https://github.example.test/acme/repo/pull/41").branch,
-      "feature/one",
+      resolveGhStackTarget(view, "https://github.example.test/acme/repo/pull/41").status,
+      "nonmember",
+    );
+    assert.equal(
+      resolveGhStackTarget(view, "https://github.com/other/repo/pull/41").status,
+      "nonmember",
+    );
+  });
+
+  test("matches a valid GitHub Enterprise PR URL", () => {
+    const view = parseGhStackView(
+      JSON.stringify({
+        branches: [
+          {
+            name: "feature/ghes",
+            isCurrent: true,
+            isMerged: false,
+            isQueued: false,
+            needsRebase: false,
+            pr: {
+              number: 41,
+              url: "https://ghe.example.test/acme/repo/pull/41",
+              state: "OPEN",
+            },
+          },
+        ],
+      }),
+    );
+    assert.ok(view);
+    assert.equal(
+      resolveGhStackTarget(view, "https://GHE.EXAMPLE.TEST/acme/repo/pull/41").branch,
+      "feature/ghes",
+    );
+    assert.equal(
+      resolveGhStackTarget(view, "https://ghe.example.test/acme/other/pull/41").status,
+      "nonmember",
     );
   });
 });

@@ -1,6 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -144,8 +154,17 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+async function restoreDetachedWorkspaceLock(detachedPath: string, lockPath: string): Promise<void> {
+  try {
+    await link(detachedPath, lockPath);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  await rm(detachedPath, { force: true });
+}
+
 async function recoverDeadWorkspaceLock(lockPath: string): Promise<boolean> {
-  const owner = await readWorkspaceLockOwner(join(lockPath, "owner.json"));
+  const owner = await readWorkspaceLockOwner(lockPath);
   if (!owner || isProcessAlive(owner.pid)) return false;
 
   const abandonedPath = `${lockPath}.abandoned-${process.pid}-${randomUUID()}`;
@@ -155,8 +174,39 @@ async function recoverDeadWorkspaceLock(lockPath: string): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
     return false;
   }
-  await rm(abandonedPath, { recursive: true, force: true });
+
+  const movedOwner = await readWorkspaceLockOwner(abandonedPath);
+  if (
+    !movedOwner ||
+    movedOwner.pid !== owner.pid ||
+    movedOwner.token !== owner.token ||
+    isProcessAlive(movedOwner.pid)
+  ) {
+    await restoreDetachedWorkspaceLock(abandonedPath, lockPath);
+    return false;
+  }
+  await rm(abandonedPath, { force: true });
   return true;
+}
+
+async function releaseWorkspaceLock(lockPath: string, owner: WorkspaceLockOwner): Promise<void> {
+  const current = await readWorkspaceLockOwner(lockPath);
+  if (current?.token !== owner.token || current.pid !== owner.pid) return;
+
+  const releasedPath = `${lockPath}.released-${process.pid}-${randomUUID()}`;
+  try {
+    await rename(lockPath, releasedPath);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+
+  const movedOwner = await readWorkspaceLockOwner(releasedPath);
+  if (movedOwner?.token === owner.token && movedOwner.pid === owner.pid) {
+    await rm(releasedPath, { force: true });
+  } else {
+    await restoreDetachedWorkspaceLock(releasedPath, lockPath);
+  }
 }
 
 async function acquireWorkspaceLock(
@@ -166,26 +216,22 @@ async function acquireWorkspaceLock(
   const lockPath = repositoryLockPath(store, repository);
   await mkdir(dirname(lockPath), { recursive: true });
   const deadline = Date.now() + workspaceLockWaitMs;
-  const token = randomUUID();
-  const owner: WorkspaceLockOwner = { pid: process.pid, token };
+  const owner: WorkspaceLockOwner = { pid: process.pid, token: randomUUID() };
 
   while (true) {
-    let createdLock = false;
+    const temporaryOwner = join(
+      dirname(lockPath),
+      `.${basename(lockPath)}.owner-${randomUUID()}.tmp`,
+    );
     try {
-      await mkdir(lockPath);
-      createdLock = true;
-      const temporaryOwner = join(lockPath, `.owner-${randomUUID()}.tmp`);
       await writeFile(temporaryOwner, `${JSON.stringify(owner)}\n`, "utf8");
-      await rename(temporaryOwner, join(lockPath, "owner.json"));
-      return async () => {
-        const current = await readWorkspaceLockOwner(join(lockPath, "owner.json"));
-        if (current?.token === token && current.pid === process.pid) {
-          await rm(lockPath, { recursive: true, force: true });
-        }
-      };
+      await link(temporaryOwner, lockPath);
+      await rm(temporaryOwner, { force: true });
+      return () => releaseWorkspaceLock(lockPath, owner);
     } catch (error: unknown) {
+      await rm(temporaryOwner, { force: true });
       const code = (error as NodeJS.ErrnoException).code;
-      if (!createdLock && code === "EEXIST") {
+      if (code === "EEXIST") {
         if (await recoverDeadWorkspaceLock(lockPath)) {
           if (Date.now() >= deadline) {
             throw new Error(`Timed out waiting for the workspace registry lock for ${repository}.`);
@@ -198,7 +244,6 @@ async function acquireWorkspaceLock(
         await new Promise((resolve) => setTimeout(resolve, workspaceLockPollMs));
         continue;
       }
-      if (createdLock) await rm(lockPath, { recursive: true, force: true });
       throw error;
     }
   }

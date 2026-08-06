@@ -4,6 +4,7 @@ import {
   createWorkspace,
   listWorkspaces,
   resolveRepository,
+  workspaceOwnsBranch,
   type AgentWorkspace,
   type WorkspaceStore,
 } from "./logic.ts";
@@ -81,7 +82,7 @@ export async function selectWorkspace(options: {
   );
 
   if (options.branch !== undefined) {
-    const existing = active.find((workspace) => workspace.branch === options.branch);
+    const existing = active.find((workspace) => workspaceOwnsBranch(workspace, options.branch!));
     if (existing) return { workspace: existing, created: false };
     return {
       workspace: await dependencies.createWorkspace(options.store, options.cwd, options.branch),

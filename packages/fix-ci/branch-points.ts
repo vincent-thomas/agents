@@ -96,6 +96,29 @@ async function rollbackRefs(
   return errors.join("\n");
 }
 
+/**
+ * Roll back only refs created by a successful preparation. The commit list is
+ * the resolved list returned by that preparation, rather than caller-supplied
+ * commit-ish values, so update-ref's expected-old-value guard remains exact.
+ */
+export async function cleanupBranchPoints(
+  cwd: string,
+  branches: readonly string[],
+  commits: readonly string[],
+  createdBranches: readonly string[],
+): Promise<string> {
+  const created: { branch: string; commit: string }[] = [];
+  const errors: string[] = [];
+  for (const branch of createdBranches) {
+    const index = branches.indexOf(branch);
+    const commit = index >= 0 ? commits[index] : undefined;
+    if (commit) created.push({ branch, commit });
+    else errors.push(`Could not roll back local branch \`${branch}\`: no resolved commit.`);
+  }
+  const rollbackOutput = await rollbackRefs(cwd, created);
+  return [errors.join("\n"), rollbackOutput].filter(Boolean).join("\n");
+}
+
 async function validateBranchName(
   cwd: string,
   branch: string,

@@ -75,6 +75,9 @@ Before finishing, inspect the staged and unstaged Git diff, ensure no conflict
 markers remain, and verify that `git ls-files -u` returns no unmerged paths.
 The host will resume you if conflicts remain, the cascading stack rebase reaches
 another conflict, or required validation fails. Fix all reported issues and
-stage those fixes before reporting again. Report the files resolved and the
-semantic choice made for each conflict. The host owns validation and completion
-of the Git operation.
+stage those fixes before reporting again.
+
+Return a compact final response under exactly these headings: `Resolved`,
+`Verification`, and `Blockers`. Under `Resolved`, report every file resolved
+and the semantic choice made for each conflict. Keep verification and blockers
+brief. The host owns validation and completion of the Git operation.

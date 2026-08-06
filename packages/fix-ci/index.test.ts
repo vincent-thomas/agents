@@ -39,6 +39,35 @@ function createRepository(): string {
   return cwd;
 }
 
+function addOrigin(cwd: string): string {
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
+  git(remote, ["init", "--bare"]);
+  git(cwd, ["remote", "add", "origin", remote]);
+  git(cwd, ["push", "origin", "main", "feature"]);
+  return remote;
+}
+
+function readyStack(branches: readonly string[]) {
+  return {
+    allChecksPassed: true,
+    allReady: true,
+    branches: branches.map((branch, index) => ({
+      branch,
+      sha: `sha-${index}`,
+      prNumber: index + 1,
+      prState: "OPEN" as const,
+      prHeadRefOid: `sha-${index}`,
+      isDraft: true,
+      checks: [],
+      timedOut: false,
+      polls: 0,
+      mode: `commit sha-${index}`,
+      failureLogs: [],
+      ready: true,
+    })),
+  };
+}
+
 function registeredTools(options: {
   stackRunner: GhStackCommandRunner;
   restoreBranch?: WorkspaceBranchRestorer;
@@ -917,6 +946,246 @@ test("push_and_check_ci wires successful stack submission into readiness", async
       "stack sync",
       "stack submit --auto",
       "stack view --json",
+      "stack link --base main -- feature",
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci rebuilds a remote stack after an exact middle insertion rejection", async () => {
+  const cwd = createRepository();
+  const remote = addOrigin(cwd);
+  try {
+    const calls: string[] = [];
+    let viewCount = 0;
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view") {
+        viewCount++;
+        return { stdout: '{"trunk":"main","branches":[{"branch":"feature"}]}', stderr: "" };
+      }
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      if (args[1] === "submit") return { stdout: "submitted", stderr: "" };
+      if (
+        args[1] === "link" &&
+        calls.filter((call) => call.startsWith("stack link")).length === 1
+      ) {
+        const error = new Error("gh stack link failed") as Error & { stderr: string };
+        error.stderr =
+          "Cannot update stack: new PRs must be added to the top of the existing stack";
+        throw error;
+      }
+      if (args[1] === "unstack") return { stdout: "remote unstacked", stderr: "" };
+      if (args[1] === "init") return { stdout: "local tracking restored", stderr: "" };
+      assert.deepEqual(args, ["stack", "link", "--base", "main", "--", "feature"]);
+      return { stdout: "retry linked", stderr: "" };
+    };
+    let readinessCalled = false;
+    const tool = requireTool(
+      registeredTools({
+        stackRunner,
+        stackReadinessRunner: async (_cwd, branches) => {
+          readinessCalled = true;
+          return readyStack(branches);
+        },
+      }),
+      "push_and_check_ci",
+    );
+
+    const result = await tool.execute("rebuild", {}, undefined, undefined, { cwd });
+
+    assert.equal(readinessCalled, true);
+    assert.equal(result.details.remoteStackRebuilt, true);
+    assert.equal(result.details.remoteStackLinked, true);
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "stack sync",
+      "stack submit --auto",
+      "stack view --json",
+      "stack link --base main -- feature",
+      "stack unstack",
+      "stack init --base main -- feature",
+      "stack link --base main -- feature",
+    ]);
+    assert.equal(
+      result.details.initialLinkOutput,
+      "Cannot update stack: new PRs must be added to the top of the existing stack",
+    );
+    assert.equal(result.details.remoteUnstackOutput, "remote unstacked");
+    assert.equal(result.details.localInitOutput, "local tracking restored");
+    assert.equal(result.details.retryLinkOutput, "retry linked");
+    assert.equal(result.details.initialLinkRestorationOutput, "");
+    assert.equal(result.details.remoteUnstackRestorationOutput, "");
+    assert.equal(result.details.localInitRestorationOutput, "");
+    assert.equal(result.details.retryLinkRestorationOutput, "");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci stops after remote unstack failure without readiness", async () => {
+  const cwd = createRepository();
+  const remote = addOrigin(cwd);
+  try {
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view")
+        return { stdout: '{"trunk":"main","branches":[{"branch":"feature"}]}', stderr: "" };
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      if (args[1] === "submit") return { stdout: "submitted", stderr: "" };
+      if (
+        args[1] === "link" &&
+        calls.filter((call) => call.startsWith("stack link")).length === 1
+      ) {
+        throw new Error(
+          "Cannot update stack: new PRs must be added to the top of the existing stack",
+        );
+      }
+      if (args[1] === "unstack") throw new Error("remote unstack failed");
+      if (args[1] === "init") return { stdout: "tracking cleanup", stderr: "" };
+      throw new Error("retry must not run");
+    };
+    let readinessCalled = false;
+    const result = await requireTool(
+      registeredTools({
+        stackRunner,
+        stackReadinessRunner: async () => {
+          readinessCalled = true;
+          return readyStack(["feature"]);
+        },
+      }),
+      "push_and_check_ci",
+    ).execute("unstack-failure", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.remoteStackRebuildAttempted, true);
+    assert.equal(result.details.remoteUnstackSucceeded, false);
+    assert.equal(result.details.remoteStackState, "unknown");
+    assert.equal(result.details.remoteStackUnstacked, undefined);
+    assert.equal(result.details.remoteStackRebuilt, false);
+    assert.equal(result.details.remoteStackLinked, false);
+    assert.equal(readinessCalled, false);
+    assert.deepEqual(calls.slice(-2), ["stack unstack", "stack init --base main -- feature"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci reports failed local tracking recovery after remote unstack", async () => {
+  const cwd = createRepository();
+  const remote = addOrigin(cwd);
+  try {
+    let linkCount = 0;
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      if (args[1] === "view")
+        return { stdout: '{"trunk":"main","branches":[{"branch":"feature"}]}', stderr: "" };
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      if (args[1] === "submit") return { stdout: "submitted", stderr: "" };
+      if (args[1] === "link") {
+        linkCount++;
+        if (linkCount === 1)
+          throw new Error(
+            "Cannot update stack: new PRs must be added to the top of the existing stack",
+          );
+        throw new Error("retry must not run");
+      }
+      if (args[1] === "unstack") return { stdout: "remote unstacked", stderr: "" };
+      throw new Error("local tracking recovery failed");
+    };
+    const result = await requireTool(registeredTools({ stackRunner }), "push_and_check_ci").execute(
+      "init-failure",
+      {},
+      undefined,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.remoteUnstackSucceeded, true);
+    assert.equal(result.details.remoteStackState, "unstacked");
+    assert.equal(result.details.localInitAttempted, true);
+    assert.equal(result.details.localInitSucceeded, false);
+    assert.equal(result.details.localTrackingRecoveryFailed, true);
+    assert.equal(result.details.remoteStackRebuilt, false);
+    assert.equal(result.details.remoteStackLinked, false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci cleans up cancellation signal-free before retrying a rebuilt stack", async () => {
+  const cwd = createRepository();
+  const remote = addOrigin(cwd);
+  try {
+    const controller = new AbortController();
+    const signals: (AbortSignal | undefined)[] = [];
+    let linkCount = 0;
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args, options) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view")
+        return { stdout: '{"trunk":"main","branches":[{"branch":"feature"}]}', stderr: "" };
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      if (args[1] === "submit") return { stdout: "submitted", stderr: "" };
+      if (args[1] === "link") {
+        signals.push(options.signal);
+        git(cwd, ["switch", "main"]);
+        linkCount++;
+        if (linkCount === 1) {
+          throw new Error(
+            "Cannot update stack: new PRs must be added to the top of the existing stack",
+          );
+        }
+        assert.equal(options.signal, controller.signal);
+        assert.equal(options.signal?.aborted, true);
+        throw new Error("retry cancelled");
+      }
+      if (args[1] === "unstack") {
+        signals.push(options.signal);
+        git(cwd, ["switch", "main"]);
+        controller.abort();
+        return { stdout: "remote unstacked", stderr: "" };
+      }
+      if (args[1] === "init") {
+        signals.push(options.signal);
+        git(cwd, ["switch", "main"]);
+        return { stdout: "local tracking restored", stderr: "" };
+      }
+      return { stdout: "ok", stderr: "" };
+    };
+    const restoreSignals: (AbortSignal | undefined)[] = [];
+    const result = await requireTool(
+      registeredTools({
+        stackRunner,
+        restoreBranch: async (_cwd, branch, signal) => {
+          restoreSignals.push(signal);
+          assert.equal(branch, "feature");
+          git(cwd, ["switch", branch]);
+          return { success: true, output: `restored ${branch}` };
+        },
+      }),
+      "push_and_check_ci",
+    ).execute("cancel-rebuild", {}, controller.signal, undefined, { cwd });
+
+    assert.equal(signals[0], controller.signal);
+    assert.equal(signals[1], controller.signal);
+    assert.equal(signals[2], undefined);
+    assert.equal(signals[3], controller.signal);
+    assert.equal(result.details.remoteStackState, "unstacked");
+    assert.equal(result.details.remoteUnstackSucceeded, true);
+    assert.equal(result.details.retryLinkSucceeded, false);
+    assert.equal(result.details.remoteStackRebuilt, false);
+    assert.equal(result.details.remoteStackLinked, false);
+    assert.equal(result.details.readinessSkipped, true);
+    assert.deepEqual(restoreSignals, [undefined, undefined, undefined, undefined]);
+    assert.deepEqual(calls.slice(-4), [
+      "stack link --base main -- feature",
+      "stack unstack",
+      "stack init --base main -- feature",
       "stack link --base main -- feature",
     ]);
   } finally {

@@ -146,6 +146,10 @@ export function stackViewArgs(): string[] {
   return ["stack", "view", "--json"];
 }
 
+export function stackUnstackArgs(): string[] {
+  return ["stack", "unstack"];
+}
+
 export function stackUnstackLocalArgs(): string[] {
   return ["stack", "unstack", "--local"];
 }
@@ -168,6 +172,16 @@ export function stackLinkArgs(branches: readonly string[], base?: string | null)
   ];
 }
 
+/** Match only the gh stack rejection for inserting PRs in the middle. */
+export function isMiddleInsertionRejectionOutput(output: string): boolean {
+  const diagnostic = "Cannot update stack: new PRs must be added to the top of the existing stack";
+  return output.split(/\r?\n/).some((line) => {
+    const normalized = line.trim();
+    const withoutLivePrefix = normalized.startsWith("✗ ") ? normalized.slice(2).trim() : normalized;
+    return withoutLivePrefix === diagnostic;
+  });
+}
+
 export function runGhStackInit(
   cwd: string,
   branches: readonly string[],
@@ -176,6 +190,14 @@ export function runGhStackInit(
   runner: GhStackCommandRunner = runGhStackCommand,
 ): Promise<GhStackOperationResult> {
   return runStackOperation(stackInitArgs(branches, base), cwd, signal, runner);
+}
+
+export function runGhStackUnstack(
+  cwd: string,
+  signal?: AbortSignal,
+  runner: GhStackCommandRunner = runGhStackCommand,
+): Promise<GhStackOperationResult> {
+  return runStackOperation(stackUnstackArgs(), cwd, signal, runner);
 }
 
 export function runGhStackUnstackLocal(

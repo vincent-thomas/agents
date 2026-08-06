@@ -47,11 +47,13 @@ import {
 import {
   probeGhStack,
   runGhStackInit,
+  runGhStackUnstack,
   runGhStackUnstackLocal,
   runGhStackSubmit,
   runGhStackLink,
   runGhStackSync,
   runGhStackCommand,
+  isMiddleInsertionRejectionOutput,
   restoreWorkspaceBranch,
   type GhStackCommandRunner,
   type WorkspaceBranchRestorer,
@@ -1013,7 +1015,7 @@ export function createFixCiExtension(options: {
           }
 
           notify("Stack submitted — linking the remote stack…");
-          const stackLinkResult = await runGhStackLink(
+          let stackLinkResult = await runGhStackLink(
             cwd,
             postSubmitStackProbe.branches,
             stackBase,
@@ -1024,6 +1026,174 @@ export function createFixCiExtension(options: {
           // submit boundary was already restored, so readiness starts from the
           // owned checkout and a failed link cannot leak another branch.
           const linkRestoration = await restoreOwnedBranch(cwd, branchName);
+          let remoteStackRebuilt = false;
+          let remoteStackRebuildOutputs:
+            | {
+                initialLinkOutput: string;
+                initialLinkRestorationOutput: string;
+                remoteUnstackOutput: string;
+                remoteUnstackRestorationOutput: string;
+                localInitOutput: string;
+                localInitRestorationOutput: string;
+                retryLinkOutput?: string;
+                retryLinkRestorationOutput?: string;
+              }
+            | undefined;
+
+          // GitHub rejects adding a new middle PR to an already-submitted
+          // stack. Rebuild only for that exact rejection: a generic link
+          // failure must never destructively unstack the remote stack.
+          if (
+            !stackLinkResult.success &&
+            linkRestoration.restored &&
+            isMiddleInsertionRejectionOutput(stackLinkResult.output)
+          ) {
+            notify("Remote stack link rejected a middle insertion — rebuilding the remote stack…");
+            const remoteUnstack = await runGhStackUnstack(cwd, signal, stackRunner);
+            const remoteUnstackRestoration = await restoreOwnedBranch(cwd, branchName);
+
+            // Keep remote unstack caller-signal-aware: cancellation must not
+            // be reported as a completed remote mutation. It may nevertheless
+            // partially remove gh's local tracking, so local init is mandatory
+            // recovery and intentionally ignores the caller's signal.
+            const localInit = await runGhStackInit(
+              cwd,
+              postSubmitStackProbe.branches,
+              stackBase,
+              undefined,
+              stackRunner,
+            );
+            const localInitRestoration = await restoreOwnedBranch(cwd, branchName);
+            remoteStackRebuildOutputs = {
+              initialLinkOutput: stackLinkResult.output,
+              initialLinkRestorationOutput: linkRestoration.restoreOutput,
+              remoteUnstackOutput: remoteUnstack.output,
+              remoteUnstackRestorationOutput: remoteUnstackRestoration.restoreOutput,
+              localInitOutput: localInit.output,
+              localInitRestorationOutput: localInitRestoration.restoreOutput,
+            };
+
+            const reconstructionDetails = {
+              stackSubmitSucceeded: true,
+              stackLinkFailed: true,
+              remoteStackLinkFailed: true,
+              stackLinkAttempted: true,
+              stackLinkSucceeded: false,
+              remoteStackLinked: false,
+              remoteStackRebuildAttempted: true,
+              remoteStackRebuilt: false,
+              remoteUnstackAttempted: true,
+              remoteUnstackSucceeded: remoteUnstack.success,
+              remoteStackState: remoteUnstack.success ? "unstacked" : "unknown",
+              localInitAttempted: true,
+              localInitSucceeded: localInit.success,
+              localTrackingRecovered: localInit.success && localInitRestoration.restored,
+              workspaceRestored: localInitRestoration.restored,
+              currentBranch: localInitRestoration.currentBranch,
+              ...remoteStackRebuildOutputs,
+              ...postSubmitStackProbeInfo,
+            };
+
+            if (!remoteUnstack.success || !remoteUnstackRestoration.restored) {
+              cycleCount = 0;
+              return respond(
+                "The remote stack link required rebuilding, but remote unstack or checkout restoration failed. Local tracking cleanup was attempted; readiness was skipped. Stop and inspect the workspace and remote stack manually.",
+                {
+                  ...reconstructionDetails,
+                  remoteUnstackRestorationSucceeded: remoteUnstackRestoration.restored,
+                  remoteStackRebuildFailed: true,
+                  retryLinkAttempted: false,
+                  retryLinkSucceeded: false,
+                  readinessSkipped: true,
+                  instructions: "Stop and inspect the workspace manually.",
+                },
+              );
+            }
+
+            if (!localInit.success || !localInitRestoration.restored) {
+              cycleCount = 0;
+              return respond(
+                "The remote stack was unstacked, but local stack tracking recovery failed. Readiness was skipped; stop and inspect the workspace manually.",
+                {
+                  ...reconstructionDetails,
+                  remoteUnstackRestorationSucceeded: true,
+                  localTrackingRecoveryFailed: true,
+                  remoteStackRebuildFailed: true,
+                  retryLinkAttempted: false,
+                  retryLinkSucceeded: false,
+                  readinessSkipped: true,
+                  instructions: "Stop and inspect the workspace manually.",
+                },
+              );
+            }
+
+            notify("Remote stack rebuilt — retrying the remote stack link…");
+            const retryLink = await runGhStackLink(
+              cwd,
+              postSubmitStackProbe.branches,
+              stackBase,
+              signal,
+              stackRunner,
+            );
+            const retryLinkRestoration = await restoreOwnedBranch(cwd, branchName);
+            remoteStackRebuildOutputs.retryLinkOutput = retryLink.output;
+            remoteStackRebuildOutputs.retryLinkRestorationOutput =
+              retryLinkRestoration.restoreOutput;
+            stackLinkResult = retryLink;
+            if (!retryLink.success || !retryLinkRestoration.restored) {
+              cycleCount = 0;
+              return respond(
+                retryLink.success
+                  ? "The remote stack was rebuilt and linked, but the owned workspace branch could not be restored before readiness checking. Stop and inspect the workspace manually."
+                  : "The remote stack was rebuilt, but the retry of remote stack linking failed. Readiness was skipped.",
+                {
+                  ...reconstructionDetails,
+                  remoteUnstackRestorationSucceeded: true,
+                  localTrackingRecovered: true,
+                  localInitSucceeded: true,
+                  retryLinkAttempted: true,
+                  retryLinkSucceeded: retryLink.success,
+                  remoteStackRebuilt: retryLink.success,
+                  remoteStackLinked: retryLink.success,
+                  remoteStackState: retryLink.success ? "linked" : "unstacked",
+                  remoteStackRebuildFailed: true,
+                  stackLinkSucceeded: retryLink.success,
+                  readinessSkipped: true,
+                  workspaceRestored: retryLinkRestoration.restored,
+                  currentBranch: retryLinkRestoration.currentBranch,
+                  ...remoteStackRebuildOutputs,
+                  ...(retryLinkRestoration.restored ? {} : { workspaceRestorationFailed: true }),
+                  instructions:
+                    retryLink.success && !retryLinkRestoration.restored
+                      ? "Stop and inspect the workspace manually."
+                      : "Fix the remote stack link error, then call push_and_check_ci again.",
+                },
+              );
+            }
+            remoteStackRebuilt = true;
+            if (signal?.aborted) {
+              cycleCount = 0;
+              return respond(
+                "The remote stack was rebuilt and linked, but the operation was cancelled before readiness checking. The owned workspace branch was restored.",
+                {
+                  ...reconstructionDetails,
+                  remoteUnstackRestorationSucceeded: true,
+                  localTrackingRecovered: true,
+                  retryLinkAttempted: true,
+                  retryLinkSucceeded: true,
+                  remoteStackRebuilt: true,
+                  remoteStackLinked: true,
+                  remoteStackState: "linked",
+                  stackLinkSucceeded: true,
+                  workspaceRestored: true,
+                  currentBranch: retryLinkRestoration.currentBranch,
+                  ...remoteStackRebuildOutputs,
+                  readinessSkipped: true,
+                },
+              );
+            }
+          }
+
           if (!stackLinkResult.success) {
             cycleCount = 0;
             const restorationMessage = linkRestoration.restored
@@ -1047,6 +1217,8 @@ export function createFixCiExtension(options: {
                 errorOutput: stackLinkResult.output,
                 restoreOutput: linkRestoration.restoreOutput,
                 ...(linkRestoration.restored ? {} : { workspaceRestorationFailed: true }),
+                remoteStackRebuildAttempted: false,
+                remoteStackRebuilt: false,
                 ...postSubmitStackProbeInfo,
                 instructions: linkRestoration.restored
                   ? "Fix the remote stack link error, then call push_and_check_ci again."
@@ -1065,6 +1237,8 @@ export function createFixCiExtension(options: {
                 remoteStackLinked: true,
                 stackLinkRestorationFailed: true,
                 workspaceRestorationFailed: true,
+                remoteStackRebuildAttempted: false,
+                remoteStackRebuilt: false,
                 workspaceRestored: false,
                 currentBranch: linkRestoration.currentBranch,
                 stackLinkOutput: stackLinkResult.output,
@@ -1102,6 +1276,11 @@ export function createFixCiExtension(options: {
             stackLinkSucceeded: true,
             stackLinkOutput: stackLinkResult.output,
             remoteStackLinked: true,
+            remoteStackRebuildAttempted: remoteStackRebuildOutputs !== undefined,
+            remoteStackRebuilt,
+            ...(remoteStackRebuildOutputs
+              ? { remoteStackState: "linked", ...remoteStackRebuildOutputs }
+              : {}),
             workspaceRestored: true,
             ...postSubmitStackProbeInfo,
           });

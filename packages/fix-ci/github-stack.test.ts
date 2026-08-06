@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { suite, test } from "node:test";
 import {
+  isMiddleInsertionRejectionOutput,
   isNotStackOutput,
   isStackViewStacked,
   probeGhStack,
   runGhStackInit,
+  runGhStackUnstack,
   runGhStackUnstackLocal,
   runGhStackSubmit,
   runGhStackLink,
@@ -14,6 +16,7 @@ import {
   stackInitArgs,
   stackLinkArgs,
   stackSubmitArgs,
+  stackUnstackArgs,
   stackUnstackLocalArgs,
   stackSyncArgs,
   stackViewArgs,
@@ -38,6 +41,7 @@ suite("GitHub stack command builders", () => {
 
   test("builds official view, sync, submit, and link commands", () => {
     assert.deepEqual(stackViewArgs(), ["stack", "view", "--json"]);
+    assert.deepEqual(stackUnstackArgs(), ["stack", "unstack"]);
     assert.deepEqual(stackUnstackLocalArgs(), ["stack", "unstack", "--local"]);
     assert.deepEqual(stackSyncArgs(), ["stack", "sync"]);
     assert.deepEqual(stackSubmitArgs(), ["stack", "submit", "--auto"]);
@@ -51,6 +55,31 @@ suite("GitHub stack command builders", () => {
       "second",
     ]);
     assert.deepEqual(stackLinkArgs(["feature"], null), ["stack", "link", "--", "feature"]);
+    assert.equal(
+      isMiddleInsertionRejectionOutput(
+        "HTTP 422: Unprocessable Entity\n\n✗ Cannot update stack: new PRs must be added to the top of the existing stack",
+      ),
+      true,
+    );
+    assert.equal(
+      isMiddleInsertionRejectionOutput(
+        "Cannot update stack: new PRs must be added to the top of the existing stack (HTTP 422)",
+      ),
+      false,
+    );
+    assert.equal(
+      isMiddleInsertionRejectionOutput(
+        "  HTTP 422  \r\n  ✗   Cannot update stack: new PRs must be added to the top of the existing stack  \r\n  details",
+      ),
+      true,
+    );
+    assert.equal(
+      isMiddleInsertionRejectionOutput(
+        "prefix Cannot update stack: new PRs must be added to the top of the existing stack",
+      ),
+      false,
+    );
+    assert.equal(isMiddleInsertionRejectionOutput("remote link failed"), false);
   });
 
   test("injects rerere without mutating the original environment", () => {
@@ -145,6 +174,7 @@ suite("GitHub stack runner-driven helpers", () => {
       return { stdout: "ok", stderr: "" };
     };
 
+    assert.equal((await runGhStackUnstack("/workspace", undefined, runner)).success, true);
     assert.equal((await runGhStackUnstackLocal("/workspace", undefined, runner)).success, true);
     assert.equal((await runGhStackSync("/workspace", undefined, runner)).success, true);
     assert.equal((await runGhStackSubmit("/workspace", undefined, runner)).success, true);
@@ -153,6 +183,7 @@ suite("GitHub stack runner-driven helpers", () => {
       true,
     );
     assert.deepEqual(calls, [
+      ["stack", "unstack"],
       ["stack", "unstack", "--local"],
       ["stack", "sync"],
       ["stack", "submit", "--auto"],

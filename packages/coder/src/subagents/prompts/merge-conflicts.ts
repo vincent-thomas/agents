@@ -2,6 +2,11 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { detectGitOperation, gitPathExists, refExists } from "../../git-operation.ts";
+import {
+  probeGhStackCurrentPullRequest,
+  probeGhStackRemote,
+  type GhStackCommandRunner,
+} from "@vt-agent/git_push/github-stack.ts";
 import type { SubagentPromptContext, SubagentPromptFn } from "../catalog.ts";
 
 const execFileAsync = promisify(execFile);
@@ -136,6 +141,69 @@ async function probeStack(
   }
 }
 
+function parsePullRequestRepository(urlText: string): { owner: string; repository: string } | null {
+  try {
+    const url = new URL(urlText);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) {
+      return null;
+    }
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (parts.length !== 4 || parts[2] !== "pull" || !/^[1-9][0-9]*$/.test(parts[3])) return null;
+    if (!parts[0] || !parts[1]) return null;
+    return { owner: parts[0], repository: parts[1] };
+  } catch {
+    return null;
+  }
+}
+
+async function probeRemoteStackAfterUnstacked(
+  cwd: string,
+  commandOutput: CommandOutputFn,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const runner: GhStackCommandRunner = async (args, options) => ({
+    stdout: await commandOutput("gh", [...args], options.cwd, options.signal),
+    stderr: "",
+  });
+
+  const currentPr = await probeGhStackCurrentPullRequest(cwd, signal, runner);
+  throwIfAborted(signal);
+  if (currentPr.status === "absent") return false;
+  if (currentPr.status === "error") {
+    throw new Error(`gh pr view failed while checking stack membership:\n${currentPr.output}`);
+  }
+
+  const repository = parsePullRequestRepository(currentPr.pullRequest.url);
+  if (!repository) {
+    throw new Error(
+      "Could not parse the repository from the current PR URL while checking stack membership",
+    );
+  }
+  const remote = await probeGhStackRemote(
+    cwd,
+    repository.owner,
+    repository.repository,
+    currentPr.pullRequest.number,
+    signal,
+    runner,
+  );
+  throwIfAborted(signal);
+  if (remote.status === "absent") return false;
+  if (remote.status === "error") {
+    throw new Error(`gh api stack membership lookup failed:\n${remote.output}`);
+  }
+  if (
+    !remote.stack.pullRequests.some(
+      (pullRequest) => pullRequest.number === currentPr.pullRequest.number,
+    )
+  ) {
+    throw new Error(
+      `Remote stack response did not include current PR #${currentPr.pullRequest.number}`,
+    );
+  }
+  return true;
+}
+
 async function abortMerge(cwd: string, commandOutput: CommandOutputFn): Promise<void> {
   if (!(await refExists("MERGE_HEAD", cwd, commandOutput))) return;
   try {
@@ -226,7 +294,10 @@ async function buildMergeConflictsPrompt(
     throw new Error("The worktree must be clean before preparing conflict resolution");
   }
 
-  if (await probeStack(cwd, commandOutput, signal)) {
+  const locallyStacked = await probeStack(cwd, commandOutput, signal);
+  const remotelyStacked =
+    !locallyStacked && (await probeRemoteStackAfterUnstacked(cwd, commandOutput, signal));
+  if (locallyStacked || remotelyStacked) {
     const ownedBranch = (
       await commandOutput("git", ["branch", "--show-current"], cwd, signal)
     ).trim();

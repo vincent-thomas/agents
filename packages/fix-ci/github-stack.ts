@@ -648,6 +648,63 @@ export type GhStackRemoteProbeResult =
   | { status: "absent"; output: string }
   | { status: "error"; output: string };
 
+export interface GhStackCurrentPullRequest {
+  number: number;
+  url: string;
+}
+
+export type GhStackCurrentPullRequestProbeResult =
+  | { status: "found"; output: string; pullRequest: GhStackCurrentPullRequest }
+  | { status: "absent"; output: string }
+  | { status: "error"; output: string };
+
+/** Arguments for the read-only current-branch pull request lookup. */
+export function stackCurrentPullRequestArgs(): string[] {
+  return ["pr", "view", "--json", "number,url"];
+}
+
+function isNoPullRequestOutput(output: string): boolean {
+  return /no pull requests? found for (?:the )?branch/i.test(output);
+}
+
+/**
+ * Resolve the current branch's PR without relying on local `gh stack` metadata.
+ * A missing PR is distinct from a failed or malformed lookup.
+ */
+export async function probeGhStackCurrentPullRequest(
+  cwd: string,
+  signal?: AbortSignal,
+  runner: GhStackCommandRunner = runGhStackCommand,
+): Promise<GhStackCurrentPullRequestProbeResult> {
+  try {
+    const result = await runner(stackCurrentPullRequestArgs(), { cwd, signal });
+    const output = commandOutput(result);
+    try {
+      const value = JSON.parse(result.stdout) as { number?: unknown; url?: unknown };
+      if (
+        !Number.isSafeInteger(value.number) ||
+        (value.number as number) <= 0 ||
+        typeof value.url !== "string" ||
+        !value.url.trim()
+      ) {
+        return { status: "error", output };
+      }
+      return {
+        status: "found",
+        output,
+        pullRequest: { number: value.number as number, url: value.url.trim() },
+      };
+    } catch {
+      return { status: "error", output };
+    }
+  } catch (error: unknown) {
+    const output = errorOutput(error);
+    return isNoPullRequestOutput(output)
+      ? { status: "absent", output }
+      : { status: "error", output };
+  }
+}
+
 /** Arguments for the read-only public stack membership endpoint. */
 export function stackRemoteMembershipArgs(
   owner: string,

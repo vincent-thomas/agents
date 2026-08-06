@@ -255,6 +255,8 @@ export interface GhStackProbeResult {
   branches: string[];
   /** The stack trunk/base branch when the view JSON identifies it. */
   baseBranch: string | null;
+  /** The parsed enriched view, when this CLI returned one. */
+  view?: GhStackView;
 }
 
 /**
@@ -282,6 +284,7 @@ export async function probeGhStack(
       output: output || "gh stack view returned no recognizable stack data",
       branches: parsed.branches,
       baseBranch: enriched ? (enriched.trunk ?? enriched.base) : stackBaseBranch(result.stdout),
+      ...(enriched ? { view: enriched } : {}),
     };
   } catch (error: unknown) {
     const output = errorOutput(error);
@@ -305,6 +308,7 @@ export interface GhStackViewPullRequest {
   number: number;
   url: string | null;
   state: string;
+  draft?: boolean;
 }
 
 /** One ordered branch as reported by the enriched official stack view JSON. */
@@ -444,7 +448,10 @@ function parseGhStackViewPullRequest(value: unknown): GhStackViewPullRequest | n
     !object.state.trim() ||
     (object.url !== undefined &&
       object.url !== null &&
-      (typeof object.url !== "string" || !object.url.trim()))
+      (typeof object.url !== "string" || !object.url.trim())) ||
+    (object.draft !== undefined && typeof object.draft !== "boolean") ||
+    (object.isDraft !== undefined && typeof object.isDraft !== "boolean") ||
+    (object.is_draft !== undefined && typeof object.is_draft !== "boolean")
   ) {
     return null;
   }
@@ -452,6 +459,9 @@ function parseGhStackViewPullRequest(value: unknown): GhStackViewPullRequest | n
     number: object.number as number,
     url: typeof object.url === "string" ? object.url.trim() : null,
     state: object.state.trim(),
+    ...(typeof (object.draft ?? object.isDraft ?? object.is_draft) === "boolean"
+      ? { draft: (object.draft ?? object.isDraft ?? object.is_draft) as boolean }
+      : {}),
   };
 }
 

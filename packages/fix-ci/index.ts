@@ -46,6 +46,8 @@ import {
 } from "./logic.ts";
 import {
   probeGhStack,
+  resolveGhStackTarget,
+  runGhStackCheckout,
   runGhStackInit,
   runGhStackUnstack,
   runGhStackUnstackLocal,
@@ -63,7 +65,23 @@ import {
   type StackReadinessResult,
   type StackReadinessRunner,
 } from "./stack-readiness.ts";
+import { inspectStackReport } from "./stack-inspection.ts";
+import {
+  cleanupCheckout,
+  restoreBranchSignalFree,
+  verifyRefreshedStack,
+} from "./stack-checkout.ts";
 import { shellQuote } from "./shell-quote.ts";
+import type {
+  WorkspaceController,
+  WorkspaceControllerClaim,
+  WorkspaceControllerSnapshot,
+} from "./stack-workspace.ts";
+export type {
+  WorkspaceController,
+  WorkspaceControllerClaim,
+  WorkspaceControllerSnapshot,
+} from "./stack-workspace.ts";
 
 const MAX_CYCLES = 5;
 
@@ -85,6 +103,7 @@ export function createFixCiExtension(options: {
   assertWorkspace: (cwd: string) => Promise<void>;
   stackRunner?: GhStackCommandRunner;
   restoreBranch?: WorkspaceBranchRestorer;
+  workspaceController?: WorkspaceController;
   stackReadinessRunner?: StackReadinessRunner;
 }) {
   return function (pi: ExtensionAPI) {
@@ -705,6 +724,286 @@ export function createFixCiExtension(options: {
             ...(branchPointsSupplied
               ? { branchPoints: providedBranchPoints, materializedBranches }
               : {}),
+          },
+        );
+      },
+    });
+
+    // ── Tool: inspect_stack ─────────────────────────────────────────────────
+    pi.registerTool({
+      name: "inspect_stack",
+      label: "Inspect GitHub Stack",
+      description:
+        "Semantic read-only inspection of the local GitHub stack, authoritative remote stack membership, " +
+        "and host workspace ownership. It does not switch branches, push, or mutate remote membership. " +
+        "Reports which descendants a commit on the active branch will restack.",
+      parameters: TObject({}),
+
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const cwd = ctx.cwd;
+        await options.assertWorkspace(cwd);
+        const probe = await probeGhStack(cwd, signal, stackRunner);
+        if (probe.status === "unstacked") {
+          return respond(
+            "The current branch is not part of a GitHub stack. Inspection did not switch branches, push, or mutate remote membership.",
+            { status: "unstacked", local: { status: "unstacked" }, remote: { status: "absent" } },
+          );
+        }
+        if (probe.status !== "stacked" || !probe.view) {
+          return respond(
+            "The GitHub stack view was malformed or incomplete. Inspection did not switch branches, push, or mutate remote membership.",
+            {
+              status: "malformed",
+              local: { status: "malformed", output: probe.output, branches: probe.branches },
+              remote: { status: "unavailable" },
+            },
+          );
+        }
+
+        const report = await inspectStackReport(
+          cwd,
+          probe.view,
+          signal,
+          stackRunner,
+          options.workspaceController,
+        );
+        return respond(report.text, report.details);
+      },
+    });
+
+    // ── Tool: checkout_stack_branch ─────────────────────────────────────────
+    pi.registerTool({
+      name: "checkout_stack_branch",
+      label: "Checkout GitHub Stack Branch",
+      description:
+        "Switch to another member of the current local GitHub stack, adopting the complete stack " +
+        "only after the checkout is verified. The working tree must be clean.",
+      parameters: TObject({
+        target: TString({ description: "Stack branch name, PR number, #PR, or PR URL." }),
+      }),
+
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const cwd = ctx.cwd;
+        await options.assertWorkspace(cwd);
+        if (!options.workspaceController) {
+          return respond(
+            "Stack branch checkout is unavailable because no workspace controller was injected.",
+            { unavailable: true, reason: "workspace-controller-missing" },
+          );
+        }
+        const target = typeof params.target === "string" ? params.target : "";
+        if (await isWorktreeDirty(cwd, signal)) {
+          return respond(
+            "The working tree must be clean before checking out a stack branch. No state was changed.",
+            { dirtyWorkingTree: true, rollback: "not-needed" },
+          );
+        }
+        const originalBranch = await currentBranch(cwd, signal);
+        if (!originalBranch) {
+          return respond("Could not determine the current branch; no checkout was attempted.", {
+            unavailable: true,
+            reason: "current-branch-unknown",
+          });
+        }
+        const probe = await probeGhStack(cwd, signal, stackRunner);
+        if (probe.status !== "stacked" || !probe.view) {
+          return respond(
+            probe.status === "unstacked"
+              ? "The current branch is not part of a complete local GitHub stack; no checkout was attempted."
+              : "The local GitHub stack view was malformed or unavailable; no checkout was attempted.",
+            { checkoutFailed: true, localStatus: probe.status, output: probe.output },
+          );
+        }
+        const resolution = resolveGhStackTarget(probe.view, target);
+        if (resolution.status !== "resolved") {
+          return respond(`Cannot checkout stack target: ${resolution.reason}.`, {
+            invalidTarget: true,
+            target,
+            resolution,
+            branches: probe.view.branches.map((branch) => branch.name),
+          });
+        }
+        const baseBranch = probe.view.trunk ?? probe.view.base;
+        if (!baseBranch) {
+          return respond(
+            "The local GitHub stack view does not identify a base branch; no checkout or workspace ownership validation was attempted.",
+            {
+              checkoutFailed: true,
+              invalidStackMetadata: true,
+              baseBranch: null,
+              validationAttempted: false,
+            },
+          );
+        }
+        const claim = {
+          baseBranch,
+          branches: probe.view.branches.map((branch) => branch.name),
+          activeBranch: resolution.branch,
+        } satisfies WorkspaceControllerClaim;
+        let originalSnapshot: WorkspaceControllerSnapshot;
+        try {
+          // Capture ownership before validation so every post-claim failure can
+          // restore the exact durable state that preceded this checkout.
+          const snapshot = await options.workspaceController.snapshot(cwd);
+          // Keep an immutable caller-owned copy in case the host reuses its
+          // returned arrays while applying a claim.
+          originalSnapshot = { ...snapshot, branches: [...snapshot.branches] };
+        } catch (error: unknown) {
+          return respond(
+            "Could not snapshot workspace ownership; no checkout or validation was attempted.",
+            {
+              unavailable: true,
+              reason: "workspace-snapshot-failed",
+              error: errorMessage(error),
+              claim,
+            },
+          );
+        }
+
+        try {
+          await options.workspaceController.validate(cwd, claim);
+        } catch (error: unknown) {
+          if (signal?.aborted) {
+            const rollback = await cleanupCheckout(
+              cwd,
+              originalBranch,
+              originalSnapshot,
+              restoreBranch,
+              options.workspaceController,
+            );
+            return respond(`Checkout cancelled during workspace validation. ${rollback.text}`, {
+              cancelled: true,
+              validationFailed: true,
+              claim,
+              ...rollback.details,
+            });
+          }
+          return respond(
+            `Workspace ownership validation rejected stack branch \`${resolution.branch}\`; no checkout was attempted.`,
+            { ownership: "mismatch", validationFailed: true, error: errorMessage(error), claim },
+          );
+        }
+
+        let checkoutOutput = "";
+        let checkoutAttempted = false;
+        if (originalBranch !== resolution.branch) {
+          checkoutAttempted = true;
+          const checkout = await runGhStackCheckout(cwd, resolution.branch, signal, stackRunner);
+          checkoutOutput = checkout.output;
+          if (!checkout.success || signal?.aborted) {
+            const rollback = await restoreBranchSignalFree(cwd, originalBranch, restoreBranch);
+            return respond(`GitHub stack checkout failed. ${rollback.text}`, {
+              checkoutFailed: true,
+              checkoutAttempted,
+              cancelled: signal?.aborted === true,
+              output: checkout.output,
+              ...rollback.details,
+            });
+          }
+        }
+
+        const actualBranch = await currentBranch(cwd);
+        const refreshed = await probeGhStack(cwd, undefined, stackRunner);
+        const verified = await verifyRefreshedStack(
+          actualBranch,
+          refreshed,
+          claim,
+          async () => !(await isWorktreeDirty(cwd)),
+        );
+        if (!verified) {
+          const rollback = await restoreBranchSignalFree(cwd, originalBranch, restoreBranch);
+          return respond(
+            `The checkout could not be verified; no workspace ownership was claimed. ${rollback.text}`,
+            {
+              checkoutFailed: true,
+              verificationFailed: true,
+              checkoutAttempted,
+              checkoutOutput,
+              actualBranch,
+              refreshedStatus: refreshed.status,
+              ...rollback.details,
+            },
+          );
+        }
+
+        if (signal?.aborted) {
+          const rollback = await cleanupCheckout(
+            cwd,
+            originalBranch,
+            originalSnapshot,
+            restoreBranch,
+            options.workspaceController,
+          );
+          return respond(
+            `Checkout cancelled before workspace ownership was claimed. ${rollback.text}`,
+            {
+              cancelled: true,
+              checkoutAttempted,
+              checkoutOutput,
+              ...rollback.details,
+            },
+          );
+        }
+
+        try {
+          await options.workspaceController.claim(cwd, claim);
+        } catch (error: unknown) {
+          const rollback = await cleanupCheckout(
+            cwd,
+            originalBranch,
+            originalSnapshot,
+            restoreBranch,
+            options.workspaceController,
+          );
+          return respond(
+            `Workspace ownership claim failed after checkout. ${rollback.text} The registry was restored only if verification succeeded.`,
+            {
+              checkoutFailed: true,
+              claimFailed: true,
+              checkoutAttempted,
+              checkoutOutput,
+              error: errorMessage(error),
+              ...rollback.details,
+            },
+          );
+        }
+        try {
+          await options.assertWorkspace(cwd);
+        } catch (error: unknown) {
+          const rollback = await cleanupCheckout(
+            cwd,
+            originalBranch,
+            originalSnapshot,
+            restoreBranch,
+            options.workspaceController,
+          );
+          return respond(
+            `Workspace verification failed after the ownership claim. ${rollback.text}`,
+            {
+              checkoutFailed: true,
+              assertWorkspaceFailed: true,
+              claimSucceeded: true,
+              checkoutAttempted,
+              checkoutOutput,
+              error: errorMessage(error),
+              ...rollback.details,
+            },
+          );
+        }
+        const descendants = claim.branches.slice(claim.branches.indexOf(claim.activeBranch) + 1);
+        return respond(
+          checkoutAttempted
+            ? `Checked out \`${claim.activeBranch}\` in the GitHub stack. A future commit/push on this branch will restack descendants: ${descendants.length > 0 ? descendants.map((branch) => `\`${branch}\``).join(", ") : "none"}.`
+            : `Already on \`${claim.activeBranch}\`; workspace ownership was adopted for the GitHub stack. A future commit/push will restack descendants: ${descendants.length > 0 ? descendants.map((branch) => `\`${branch}\``).join(", ") : "none"}.`,
+          {
+            checkoutSucceeded: true,
+            checkoutAttempted,
+            activeBranch: claim.activeBranch,
+            branches: claim.branches,
+            baseBranch: claim.baseBranch,
+            descendants,
+            checkoutOutput,
+            ownership: "synchronized",
           },
         );
       },
@@ -1623,6 +1922,12 @@ export function createFixCiExtension(options: {
 }
 
 export default createFixCiExtension;
+
+// ── Stack helpers ────────────────────────────────────────────────────────────
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

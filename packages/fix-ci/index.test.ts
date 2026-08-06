@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createFixCiExtension } from "./index.ts";
 import type { GhStackCommandRunner, WorkspaceBranchRestorer } from "./github-stack.ts";
+import type { WorkspaceController } from "./index.ts";
 import type { StackReadinessRunner } from "./stack-readiness.ts";
 
 type RegisteredTool = {
@@ -16,7 +17,10 @@ type RegisteredTool = {
     signal: AbortSignal | undefined,
     onUpdate: undefined,
     context: { cwd: string },
-  ): Promise<{ details: Record<string, unknown> }>;
+  ): Promise<{
+    details: Record<string, unknown>;
+    content?: Array<{ type: string; text: string }>;
+  }>;
 };
 
 function git(cwd: string, args: string[]): string {
@@ -71,13 +75,16 @@ function readyStack(branches: readonly string[]) {
 function registeredTools(options: {
   stackRunner: GhStackCommandRunner;
   restoreBranch?: WorkspaceBranchRestorer;
+  workspaceController?: WorkspaceController;
   stackReadinessRunner?: StackReadinessRunner;
+  assertWorkspace?: () => void | Promise<void>;
 }): RegisteredTool[] {
   const tools: RegisteredTool[] = [];
   const extension = createFixCiExtension({
-    assertWorkspace: async () => {},
+    assertWorkspace: options.assertWorkspace ?? (async () => {}),
     stackRunner: options.stackRunner,
     restoreBranch: options.restoreBranch,
+    workspaceController: options.workspaceController,
     stackReadinessRunner: options.stackReadinessRunner,
   });
   extension({
@@ -92,6 +99,127 @@ function requireTool(tools: RegisteredTool[], name: string): RegisteredTool {
   const tool = tools.find((candidate) => candidate.name === name);
   assert.ok(tool, `missing tool ${name}`);
   return tool;
+}
+
+type StackFixtureMember = {
+  branch: string;
+  /** Set null to model an enriched view that omits its local head. */
+  head?: string | null;
+  pr?: { number: number; state?: string; draft?: boolean; url?: string };
+};
+
+/** Small enriched-view runner whose current marker follows the real checkout. */
+function stackFixture(
+  cwd: string,
+  members: readonly StackFixtureMember[],
+  options: {
+    base?: string;
+    remote?: unknown;
+    checkout?: (branch: string, signal: AbortSignal | undefined) => void;
+  } = {},
+): { runner: GhStackCommandRunner; calls: string[] } {
+  const calls: string[] = [];
+  const base = options.base ?? "main";
+  const runner: GhStackCommandRunner = async (args, runnerOptions) => {
+    calls.push(args.join(" "));
+    if (args[0] === "api") {
+      assert.notEqual(options.remote, undefined, "unexpected remote API request");
+      return { stdout: JSON.stringify(options.remote), stderr: "" };
+    }
+    if (args[1] === "view") {
+      const current = git(cwd, ["branch", "--show-current"]);
+      return {
+        stdout: JSON.stringify({
+          trunk: base,
+          currentBranch: current,
+          branches: members.map((member) => ({
+            name: member.branch,
+            head: member.head === undefined ? git(cwd, ["rev-parse", member.branch]) : member.head,
+            base,
+            isCurrent: member.branch === current,
+            isMerged: false,
+            isQueued: false,
+            needsRebase: false,
+            ...(member.pr
+              ? {
+                  pr: {
+                    number: member.pr.number,
+                    url: member.pr.url ?? `https://github.com/acme/repo/pull/${member.pr.number}`,
+                    state: member.pr.state ?? "OPEN",
+                    draft: member.pr.draft ?? true,
+                  },
+                }
+              : {}),
+          })),
+        }),
+        stderr: "",
+      };
+    }
+    if (args[1] === "checkout") {
+      const branch = args[3];
+      assert.equal(typeof branch, "string");
+      const targetBranch = branch as string;
+      git(cwd, ["switch", "--", targetBranch]);
+      options.checkout?.(targetBranch, runnerOptions.signal);
+      return { stdout: `checked out ${branch}`, stderr: "" };
+    }
+    throw new Error(`unexpected stack command: ${args.join(" ")}`);
+  };
+  return { runner, calls };
+}
+
+function remoteStack(
+  members: readonly {
+    number: number;
+    branch: string;
+    sha: string;
+    state?: string;
+    draft?: boolean;
+  }[],
+  base = "main",
+) {
+  return [
+    {
+      id: 1,
+      number: 99,
+      url: "https://github.com/acme/repo/stack/99",
+      base: { ref: base },
+      open: true,
+      pull_requests: members.map((member) => ({
+        number: member.number,
+        state: member.state ?? "OPEN",
+        draft: member.draft ?? false,
+        merged_at: null,
+        head: { ref: member.branch, sha: member.sha },
+      })),
+    },
+  ];
+}
+
+function controllerFixture(
+  snapshot: { activeBranch: string | null; branches: string[]; baseBranch: string | null },
+  options: { validate?: () => void; claim?: () => void; restore?: () => void } = {},
+) {
+  const calls: string[] = [];
+  const controller: WorkspaceController = {
+    snapshot: async () => {
+      calls.push("snapshot");
+      return snapshot;
+    },
+    validate: async () => {
+      calls.push("validate");
+      options.validate?.();
+    },
+    claim: async () => {
+      calls.push("claim");
+      options.claim?.();
+    },
+    restore: async () => {
+      calls.push("restore");
+      options.restore?.();
+    },
+  };
+  return { controller, calls };
 }
 
 test("create_github_stack materializes branch points without switching checkout", async () => {
@@ -1605,5 +1733,544 @@ test("push_and_check_ci stops on stack probe and submit failures", async () => {
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("inspect_stack enriches remote PR details without mutating local state", async () => {
+  const cwd = createRepository();
+  try {
+    git(cwd, ["branch", "middle", "main"]);
+    const members = [
+      { branch: "main", pr: { number: 11 } },
+      { branch: "middle", pr: { number: 12 } },
+      { branch: "feature", pr: { number: 13 } },
+    ];
+    const remote = remoteStack(
+      members.map((member) => ({
+        number: member.pr.number,
+        branch: member.branch,
+        sha: git(cwd, ["rev-parse", member.branch]),
+        state: member.branch === "middle" ? "CLOSED" : "OPEN",
+        draft: member.branch !== "middle",
+      })),
+    );
+    const fixture = stackFixture(cwd, members, { remote });
+    const ownership = controllerFixture({
+      activeBranch: "feature",
+      branches: ["main", "middle", "feature"],
+      baseBranch: "main",
+    });
+    const beforeBranch = git(cwd, ["branch", "--show-current"]);
+    const beforeHead = git(cwd, ["rev-parse", "HEAD"]);
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner, workspaceController: ownership.controller }),
+      "inspect_stack",
+    ).execute("inspect", {}, undefined, undefined, { cwd });
+
+    const local = result.details.local as { members: Array<Record<string, unknown>> };
+    assert.equal(result.details.status, "synchronized");
+    assert.equal((result.details.remote as { status: string }).status, "synchronized");
+    assert.equal((result.details.ownership as { status: string }).status, "synchronized");
+    assert.equal(local.members[1].state, "CLOSED");
+    assert.equal(local.members[1].draft, false);
+    assert.equal(local.members[1].sha, git(cwd, ["rev-parse", "middle"]));
+    assert.equal(local.members[1].remoteSha, git(cwd, ["rev-parse", "middle"]));
+    assert.equal(local.members[1].shaMismatch, false);
+    assert.deepEqual(ownership.calls, ["snapshot"]);
+    assert.equal(git(cwd, ["branch", "--show-current"]), beforeBranch);
+    assert.equal(git(cwd, ["rev-parse", "HEAD"]), beforeHead);
+
+    const mismatchRemote = remoteStack([
+      { number: 11, branch: "main", sha: "remote-main" },
+      { number: 12, branch: "middle", sha: "remote-middle" },
+      { number: 13, branch: "feature", sha: "remote-feature" },
+    ]);
+    const mismatchFixture = stackFixture(cwd, members, { remote: mismatchRemote });
+    const mismatch = await requireTool(
+      registeredTools({ stackRunner: mismatchFixture.runner }),
+      "inspect_stack",
+    ).execute("inspect-mismatch", {}, undefined, undefined, { cwd });
+    const mismatchMember = (mismatch.details.local as { members: Array<Record<string, unknown>> })
+      .members[1];
+    assert.equal(mismatch.details.status, "mismatch");
+    assert.equal(mismatchMember.shaMismatch, true);
+    assert.equal(mismatchMember.remoteSha, "remote-middle");
+    assert.match(mismatch.content?.[0]?.text ?? "", /SHA mismatch/);
+
+    const localOnlyFixture = stackFixture(cwd, [{ branch: "main" }, { branch: "feature" }]);
+    const localOnly = await requireTool(
+      registeredTools({ stackRunner: localOnlyFixture.runner }),
+      "inspect_stack",
+    ).execute("inspect-local-only", {}, undefined, undefined, { cwd });
+    assert.equal(
+      localOnly.details.remote && (localOnly.details.remote as { status: string }).status,
+      "local-only",
+    );
+    assert.equal(git(cwd, ["branch", "--show-current"]), beforeBranch);
+    assert.equal(git(cwd, ["rev-parse", "HEAD"]), beforeHead);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("checkout_stack_branch adopts exact and PR-selected members with descendants", async () => {
+  const cwd = createRepository();
+  try {
+    git(cwd, ["branch", "middle", "main"]);
+    const members = [
+      { branch: "main", pr: { number: 21 } },
+      { branch: "middle", pr: { number: 22 } },
+      { branch: "feature", pr: { number: 23 } },
+    ];
+    const fixture = stackFixture(cwd, members);
+    const claims: unknown[] = [];
+    const controller: WorkspaceController = {
+      snapshot: async () => ({
+        activeBranch: "feature",
+        branches: ["main", "middle", "feature"],
+        baseBranch: "main",
+      }),
+      validate: async (_cwd, claim) => claims.push({ phase: "validate", claim }),
+      claim: async (_cwd, claim) => claims.push({ phase: "claim", claim }),
+      restore: async () => {},
+    };
+    const tool = requireTool(
+      registeredTools({ stackRunner: fixture.runner, workspaceController: controller }),
+      "checkout_stack_branch",
+    );
+    const exact = await tool.execute(
+      "checkout-middle",
+      { target: "middle" },
+      undefined,
+      undefined,
+      { cwd },
+    );
+    assert.equal(exact.details.checkoutSucceeded, true, JSON.stringify(exact));
+    assert.equal(exact.details.activeBranch, "middle");
+    assert.deepEqual(exact.details.descendants, ["feature"]);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "middle");
+
+    const selected = await tool.execute("checkout-pr", { target: "#23" }, undefined, undefined, {
+      cwd,
+    });
+    assert.equal(selected.details.checkoutSucceeded, true);
+    assert.equal(selected.details.activeBranch, "feature");
+    assert.deepEqual(selected.details.descendants, []);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+    assert.equal(
+      (claims as Array<{ phase: string }>).filter((entry) => entry.phase === "claim").length,
+      2,
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("checkout_stack_branch rejects dirty and nonmember targets without checkout or claim", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = stackFixture(cwd, [
+      { branch: "main", pr: { number: 31 } },
+      { branch: "feature", pr: { number: 32 } },
+    ]);
+    const calls: string[] = [];
+    const controller: WorkspaceController = {
+      snapshot: async () => ({
+        activeBranch: "feature",
+        branches: ["main", "feature"],
+        baseBranch: "main",
+      }),
+      validate: async () => calls.push("validate"),
+      claim: async () => calls.push("claim"),
+      restore: async () => {},
+    };
+    const tool = requireTool(
+      registeredTools({ stackRunner: fixture.runner, workspaceController: controller }),
+      "checkout_stack_branch",
+    );
+    writeFileSync(join(cwd, "dirty.txt"), "dirty\n");
+    const dirty = await tool.execute("dirty", { target: "main" }, undefined, undefined, { cwd });
+    assert.equal(dirty.details.dirtyWorkingTree, true);
+    git(cwd, ["clean", "-fd"]);
+    const nonmember = await tool.execute("nonmember", { target: "999" }, undefined, undefined, {
+      cwd,
+    });
+    assert.equal(nonmember.details.invalidTarget, true);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(fixture.calls, ["stack view --json"]);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("checkout_stack_branch restores after traversal failure and does not pass the caller signal", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = stackFixture(
+      cwd,
+      [
+        { branch: "main", pr: { number: 41 } },
+        { branch: "feature", pr: { number: 42 } },
+      ],
+      {
+        checkout: () => {
+          throw new Error("traversal failed");
+        },
+      },
+    );
+    const restoreSignals: (AbortSignal | undefined)[] = [];
+    const controller: WorkspaceController = {
+      snapshot: async () => ({
+        activeBranch: "feature",
+        branches: ["main", "feature"],
+        baseBranch: "main",
+      }),
+      validate: async () => {},
+      claim: async () => {
+        throw new Error("claim must not run");
+      },
+      restore: async () => {},
+    };
+    const result = await requireTool(
+      registeredTools({
+        stackRunner: fixture.runner,
+        workspaceController: controller,
+        restoreBranch: async (_cwd, branch, signal) => {
+          restoreSignals.push(signal);
+          git(cwd, ["switch", "--", branch]);
+          return { success: true, output: "restored" };
+        },
+      }),
+      "checkout_stack_branch",
+    ).execute("traverse-failure", { target: "main" }, new AbortController().signal, undefined, {
+      cwd,
+    });
+    assert.equal(result.details.checkoutFailed, true);
+    assert.equal(result.details.claimFailed, undefined);
+    assert.deepEqual(restoreSignals, [undefined]);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("checkout_stack_branch restores after claim failure without reporting success", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = stackFixture(cwd, [
+      { branch: "main", pr: { number: 51 } },
+      { branch: "feature", pr: { number: 52 } },
+    ]);
+    const restoreSignals: (AbortSignal | undefined)[] = [];
+    const result = await requireTool(
+      registeredTools({
+        stackRunner: fixture.runner,
+        workspaceController: {
+          snapshot: async () => ({
+            activeBranch: "feature",
+            branches: ["main", "feature"],
+            baseBranch: "main",
+          }),
+          validate: async () => {},
+          claim: async () => {
+            throw new Error("registry is read-only");
+          },
+          restore: async () => {},
+        },
+        restoreBranch: async (_cwd, branch, signal) => {
+          restoreSignals.push(signal);
+          git(cwd, ["switch", "--", branch]);
+          return { success: true, output: "restored" };
+        },
+      }),
+      "checkout_stack_branch",
+    ).execute("claim-failure", { target: "main" }, undefined, undefined, { cwd });
+    assert.equal(result.details.claimFailed, true);
+    assert.equal(result.details.checkoutSucceeded, undefined);
+    assert.deepEqual(restoreSignals, [undefined]);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("checkout_stack_branch cancels after checkout, restores signal-free, and skips claim", async () => {
+  const cwd = createRepository();
+  try {
+    const cancellation = new AbortController();
+    const fixture = stackFixture(
+      cwd,
+      [
+        { branch: "main", pr: { number: 61 } },
+        { branch: "feature", pr: { number: 62 } },
+      ],
+      {
+        checkout: (_branch, signal) => {
+          cancellation.abort();
+          assert.equal(signal, cancellation.signal);
+        },
+      },
+    );
+    const calls: string[] = [];
+    const result = await requireTool(
+      registeredTools({
+        stackRunner: fixture.runner,
+        workspaceController: {
+          snapshot: async () => ({
+            activeBranch: "feature",
+            branches: ["main", "feature"],
+            baseBranch: "main",
+          }),
+          validate: async () => {},
+          claim: async () => calls.push("claim"),
+          restore: async () => {},
+        },
+        restoreBranch: async (_cwd, branch, signal) => {
+          calls.push(`restore:${signal === undefined ? "signal-free" : "signalled"}`);
+          git(cwd, ["switch", "--", branch]);
+          return { success: true, output: "restored" };
+        },
+      }),
+      "checkout_stack_branch",
+    ).execute("cancel", { target: "main" }, cancellation.signal, undefined, { cwd });
+    assert.equal(result.details.cancelled, true);
+    assert.deepEqual(calls, ["restore:signal-free"]);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("checkout_stack_branch rejects an unknown base before validation", async () => {
+  const cwd = createRepository();
+  try {
+    const calls: string[] = [];
+    const runner: GhStackCommandRunner = async (args) => {
+      assert.deepEqual(args, ["stack", "view", "--json"]);
+      return {
+        stdout: JSON.stringify({
+          currentBranch: "feature",
+          branches: [
+            {
+              name: "main",
+              isCurrent: false,
+              isMerged: false,
+              isQueued: false,
+              needsRebase: false,
+            },
+            {
+              name: "feature",
+              isCurrent: true,
+              isMerged: false,
+              isQueued: false,
+              needsRebase: false,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    };
+    const result = await requireTool(
+      registeredTools({
+        stackRunner: runner,
+        workspaceController: {
+          snapshot: async () => ({
+            activeBranch: "feature",
+            branches: ["main", "feature"],
+            baseBranch: null,
+          }),
+          validate: async () => calls.push("validate"),
+          claim: async () => calls.push("claim"),
+          restore: async () => {},
+        },
+      }),
+      "checkout_stack_branch",
+    ).execute("unknown-base", { target: "feature" }, undefined, undefined, { cwd });
+    assert.equal(result.details.invalidStackMetadata, true);
+    assert.deepEqual(calls, []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("checkout_stack_branch cancels during validation on a no-op target without claiming", async () => {
+  const cwd = createRepository();
+  try {
+    const cancellation = new AbortController();
+    const calls: string[] = [];
+    const fixture = stackFixture(cwd, [
+      { branch: "main", pr: { number: 71 } },
+      { branch: "feature", pr: { number: 72 } },
+    ]);
+    const result = await requireTool(
+      registeredTools({
+        stackRunner: fixture.runner,
+        workspaceController: {
+          snapshot: async () => ({
+            activeBranch: "feature",
+            branches: ["main", "feature"],
+            baseBranch: "main",
+          }),
+          validate: async () => cancellation.abort(),
+          claim: async () => calls.push("claim"),
+          restore: async () => calls.push("restore"),
+        },
+      }),
+      "checkout_stack_branch",
+    ).execute("cancel-no-op", { target: "feature" }, cancellation.signal, undefined, { cwd });
+    assert.equal(result.details.cancelled, true);
+    assert.deepEqual(calls, ["restore"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("checkout_stack_branch restores branch and workspace after post-claim assertion failure", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = stackFixture(cwd, [
+      { branch: "main", pr: { number: 81 } },
+      { branch: "feature", pr: { number: 82 } },
+    ]);
+    let assertions = 0;
+    const calls: string[] = [];
+    const result = await requireTool(
+      registeredTools({
+        stackRunner: fixture.runner,
+        assertWorkspace: async () => {
+          assertions++;
+          if (assertions > 1) throw new Error("workspace assertion failed");
+        },
+        workspaceController: {
+          snapshot: async () => ({
+            activeBranch: "feature",
+            branches: ["main", "feature"],
+            baseBranch: "main",
+          }),
+          validate: async () => {},
+          claim: async () => calls.push("claim"),
+          restore: async () => calls.push("restore"),
+        },
+        restoreBranch: async (_cwd, branch) => {
+          calls.push(`branch:${branch}`);
+          git(cwd, ["switch", "--", branch]);
+          return { success: true, output: "restored" };
+        },
+      }),
+      "checkout_stack_branch",
+    ).execute("assert-failure", { target: "main" }, undefined, undefined, { cwd });
+    assert.equal(result.details.assertWorkspaceFailed, true);
+    assert.equal(result.details.claimSucceeded, true);
+    assert.equal(result.details.rolledBack, true);
+    assert.equal(result.details.workspaceRolledBack, true);
+    assert.deepEqual(calls, ["claim", "branch:feature", "restore"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("checkout_stack_branch reports structured rollback failure when branch restore rejects", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = stackFixture(cwd, [
+      { branch: "main", pr: { number: 91 } },
+      { branch: "feature", pr: { number: 92 } },
+    ]);
+    const result = await requireTool(
+      registeredTools({
+        stackRunner: fixture.runner,
+        workspaceController: {
+          snapshot: async () => ({
+            activeBranch: "feature",
+            branches: ["main", "feature"],
+            baseBranch: "main",
+          }),
+          validate: async () => {},
+          claim: async () => {
+            throw new Error("claim rejected");
+          },
+          restore: async () => {},
+        },
+        restoreBranch: async () => {
+          throw new Error("restore rejected");
+        },
+      }),
+      "checkout_stack_branch",
+    ).execute("restore-rejection", { target: "main" }, undefined, undefined, { cwd });
+    assert.equal(result.details.claimFailed, true);
+    assert.equal(result.details.rolledBack, false);
+    assert.equal(result.details.rollbackRestoreFailed, true);
+    assert.equal(result.details.workspaceRolledBack, true);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("inspect_stack reports partial aggregate status without a workspace controller", async () => {
+  const cwd = createRepository();
+  try {
+    const members = [
+      { branch: "main", pr: { number: 101 } },
+      { branch: "feature", pr: { number: 102 } },
+    ];
+    const fixture = stackFixture(cwd, members, {
+      remote: remoteStack(
+        members.map((member) => ({
+          number: member.pr.number,
+          branch: member.branch,
+          sha: git(cwd, ["rev-parse", member.branch]),
+        })),
+      ),
+    });
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner }),
+      "inspect_stack",
+    ).execute("partial", {}, undefined, undefined, { cwd });
+    assert.equal(result.details.status, "partial");
+    assert.equal((result.details.remote as { status: string }).status, "synchronized");
+    assert.equal((result.details.ownership as { status: string }).status, "unavailable");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("inspect_stack reports enriched local head mismatch", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = stackFixture(cwd, [
+      { branch: "main", head: "wrong-main" },
+      { branch: "feature" },
+    ]);
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner }),
+      "inspect_stack",
+    ).execute("head-mismatch", {}, undefined, undefined, { cwd });
+    const member = (result.details.local as { members: Array<Record<string, unknown>> }).members[0];
+    assert.equal(member.localHeadMismatch, true);
+    assert.equal(member.localHeadVerification, "mismatch");
+    assert.equal(result.details.status, "mismatch");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("inspect_stack marks omitted enriched heads unavailable rather than mismatched", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = stackFixture(cwd, [
+      { branch: "main", head: null },
+      { branch: "feature", head: null },
+    ]);
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner }),
+      "inspect_stack",
+    ).execute("head-unavailable", {}, undefined, undefined, { cwd });
+    const members = (result.details.local as { members: Array<Record<string, unknown>> }).members;
+    assert.equal(members[0].localHeadVerification, "unavailable");
+    assert.equal(members[0].localHeadMismatch, false);
+    assert.equal((result.details.local as { status: string }).status, "partial");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
   }
 });

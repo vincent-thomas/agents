@@ -395,7 +395,11 @@ test("push_and_check_ci wires successful stack submission into readiness", async
       (result.details.branches as Array<{ branch: string }>).map((branch) => branch.branch),
       ["stack-base", "feature"],
     );
-    assert.deepEqual(calls, ["stack view --json", "stack sync", "stack submit --auto"]);
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "stack sync",
+      "stack submit --auto --no-comments",
+    ]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(remote, { recursive: true, force: true });
@@ -438,8 +442,16 @@ test("push_and_check_ci stops on stack probe and submit failures", async () => {
 
     assert.equal(submitResult.details.stackSubmitFailed, true);
     assert.equal(submitResult.details.workspaceRestored, true);
+    assert.equal(
+      submitResult.details.instructions,
+      "Fix the gh stack submit --auto --no-comments error, then call push_and_check_ci again.",
+    );
     assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
-    assert.deepEqual(calls, ["stack view --json", "stack sync", "stack submit --auto"]);
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "stack sync",
+      "stack submit --auto --no-comments",
+    ]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(remote, { recursive: true, force: true });

@@ -151,7 +151,7 @@ export function stackSyncArgs(): string[] {
 }
 
 export function stackSubmitArgs(): string[] {
-  return ["stack", "submit", "--auto"];
+  return ["stack", "submit", "--auto", "--no-comments"];
 }
 
 export function runGhStackInit(

@@ -31,10 +31,10 @@ suite("GitHub stack command builders", () => {
     assert.deepEqual(stackInitArgs(["feature/a"]), ["stack", "init", "--", "feature/a"]);
   });
 
-  test("builds official view, sync, and submit commands", () => {
+  test("builds stack submit without the CLI-generated PR footer", () => {
     assert.deepEqual(stackViewArgs(), ["stack", "view", "--json"]);
     assert.deepEqual(stackSyncArgs(), ["stack", "sync"]);
-    assert.deepEqual(stackSubmitArgs(), ["stack", "submit", "--auto"]);
+    assert.deepEqual(stackSubmitArgs(), ["stack", "submit", "--auto", "--no-comments"]);
   });
 
   test("injects rerere without mutating the original environment", () => {
@@ -118,7 +118,7 @@ suite("GitHub stack runner-driven helpers", () => {
     assert.equal((await runGhStackSubmit("/workspace", undefined, runner)).success, true);
     assert.deepEqual(calls, [
       ["stack", "sync"],
-      ["stack", "submit", "--auto"],
+      ["stack", "submit", "--auto", "--no-comments"],
     ]);
   });
 

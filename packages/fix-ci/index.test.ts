@@ -844,17 +844,23 @@ test("push_and_check_ci wires successful stack submission into readiness", async
     git(cwd, ["push", "origin", "main", "feature", "stack-base"]);
 
     const calls: string[] = [];
+    let viewCount = 0;
     const stackRunner: GhStackCommandRunner = async (args) => {
       calls.push(args.join(" "));
       if (args[1] === "view") {
+        viewCount += 1;
         return {
-          stdout: '{"trunk":"main","branches":[{"branch":"stack-base"},{"branch":"feature"}]}',
+          stdout:
+            viewCount === 1
+              ? '{"trunk":"main","branches":[{"branch":"stack-base"},{"branch":"feature"}]}'
+              : '{"trunk":"main","branches":[{"branch":"feature"}]}',
           stderr: "",
         };
       }
       if (args[1] === "sync") return { stdout: "synced", stderr: "" };
-      assert.equal(args[1], "submit");
-      return { stdout: "submitted", stderr: "" };
+      if (args[1] === "submit") return { stdout: "submitted", stderr: "" };
+      assert.deepEqual(args, ["stack", "link", "--base", "main", "--", "feature"]);
+      return { stdout: "linked", stderr: "" };
     };
     let readinessBranches: readonly string[] = [];
     const stackReadinessRunner: StackReadinessRunner = async (_cwd, branches) => {
@@ -885,14 +891,404 @@ test("push_and_check_ci wires successful stack submission into readiness", async
 
     const result = await tool.execute("push", {}, undefined, undefined, { cwd });
 
-    assert.deepEqual(readinessBranches, ["stack-base", "feature"]);
+    assert.deepEqual(readinessBranches, ["feature"]);
     assert.equal(result.details.allChecksPassed, true);
     assert.equal(result.details.allReady, true);
+    assert.equal(result.details.stackSubmitSucceeded, true);
+    assert.equal(result.details.stackLinkAttempted, true);
+    assert.equal(result.details.stackLinkSucceeded, true);
+    assert.equal(result.details.remoteStackLinked, true);
+    assert.equal(result.details.stackLinkOutput, "linked");
+    assert.equal(viewCount, 2);
+    assert.equal(
+      (result.details.postSubmitStackProbe as { output: string }).output,
+      '{"trunk":"main","branches":[{"branch":"feature"}]}',
+    );
+    assert.equal(
+      result.details.postSubmitStackProbeOutput,
+      '{"trunk":"main","branches":[{"branch":"feature"}]}',
+    );
     assert.deepEqual(
       (result.details.branches as Array<{ branch: string }>).map((branch) => branch.branch),
-      ["stack-base", "feature"],
+      ["feature"],
     );
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "stack sync",
+      "stack submit --auto",
+      "stack view --json",
+      "stack link --base main -- feature",
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci stops before linking when the post-submit stack probe fails", async () => {
+  const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
+  try {
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["push", "origin", "main", "feature"]);
+
+    const calls: string[] = [];
+    const viewSignals: (AbortSignal | undefined)[] = [];
+    let viewCount = 0;
+    const stackRunner: GhStackCommandRunner = async (args, options) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view") {
+        viewSignals.push(options.signal);
+        viewCount += 1;
+        if (viewCount === 2) throw new Error("post-submit probe failed");
+        return { stdout: '{"trunk":"main","branches":[{"branch":"feature"}]}', stderr: "" };
+      }
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      assert.equal(args[1], "submit");
+      return { stdout: "submitted", stderr: "" };
+    };
+    const controller = new AbortController();
+    let readinessCalled = false;
+    const tool = requireTool(
+      registeredTools({
+        stackRunner,
+        stackReadinessRunner: async () => {
+          readinessCalled = true;
+          throw new Error("readiness must not run after post-submit probe failure");
+        },
+      }),
+      "push_and_check_ci",
+    );
+
+    const result = await tool.execute(
+      "post-submit-probe-failure",
+      {},
+      controller.signal,
+      undefined,
+      { cwd },
+    );
+
+    assert.deepEqual(viewSignals, [controller.signal, controller.signal]);
+    assert.equal(result.details.stackSubmitSucceeded, true);
+    assert.equal(result.details.stackLinkFailed, true);
+    assert.equal(result.details.stackLinkAttempted, false);
+    assert.equal(result.details.remoteStackLinked, false);
+    assert.equal(result.details.postSubmitStackProbeFailed, true);
+    assert.equal(
+      (result.details.postSubmitStackProbe as { output: string }).output,
+      "post-submit probe failed",
+    );
+    assert.equal(result.details.postSubmitStackProbeOutput, "post-submit probe failed");
+    assert.equal(readinessCalled, false);
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "stack sync",
+      "stack submit --auto",
+      "stack view --json",
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci skips linking and readiness when the stack base is unknown", async () => {
+  const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
+  try {
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["push", "origin", "main", "feature"]);
+
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view") {
+        return { stdout: '{"branches":[{"branch":"feature"}]}', stderr: "" };
+      }
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      assert.equal(args[1], "submit");
+      return { stdout: "submitted", stderr: "" };
+    };
+    let readinessCalled = false;
+    const stackReadinessRunner: StackReadinessRunner = async () => {
+      readinessCalled = true;
+      throw new Error("readiness must not run when the stack base is unknown");
+    };
+    const tool = requireTool(
+      registeredTools({ stackRunner, stackReadinessRunner }),
+      "push_and_check_ci",
+    );
+
+    const result = await tool.execute("unknown-base", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.stackLinkFailed, true);
+    assert.equal(result.details.remoteStackLinkFailed, true);
+    assert.equal(result.details.stackLinkAttempted, false);
+    assert.equal(result.details.remoteStackLinked, false);
+    assert.equal(result.details.stackBaseUnknown, true);
+    assert.equal(result.details.stackLinkOutput, undefined);
+    assert.equal(readinessCalled, false);
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "stack sync",
+      "stack submit --auto",
+      "stack view --json",
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci restores checkout after a successful remote stack link before readiness", async () => {
+  const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
+  try {
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["push", "origin", "main", "feature"]);
+    git(cwd, ["branch", "other"]);
+
+    const restoreSignals: (AbortSignal | undefined)[] = [];
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view") {
+        return { stdout: '{"trunk":"main","branches":[{"branch":"feature"}]}', stderr: "" };
+      }
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      if (args[1] === "submit") return { stdout: "submitted", stderr: "" };
+      assert.deepEqual(args, ["stack", "link", "--base", "main", "--", "feature"]);
+      git(cwd, ["switch", "other"]);
+      return { stdout: "linked", stderr: "" };
+    };
+    const stackReadinessRunner: StackReadinessRunner = async () => {
+      assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+      return {
+        allChecksPassed: true,
+        allReady: true,
+        branches: [
+          {
+            branch: "feature",
+            sha: "sha-feature",
+            prNumber: 1,
+            prState: "OPEN",
+            prHeadRefOid: "sha-feature",
+            isDraft: true,
+            checks: [],
+            timedOut: false,
+            polls: 0,
+            mode: "commit sha-feature",
+            failureLogs: [],
+            ready: true,
+          },
+        ],
+      };
+    };
+    const tool = requireTool(
+      registeredTools({
+        stackRunner,
+        stackReadinessRunner,
+        restoreBranch: async (_cwd, branch, signal) => {
+          restoreSignals.push(signal);
+          git(cwd, ["switch", branch]);
+          return { success: true, output: "restored" };
+        },
+      }),
+      "push_and_check_ci",
+    );
+
+    const result = await tool.execute("link-restoration", {}, undefined, undefined, { cwd });
+
+    assert.deepEqual(restoreSignals, [undefined]);
+    assert.equal(result.details.stackLinkAttempted, true);
+    assert.equal(result.details.stackLinkSucceeded, true);
+    assert.equal(result.details.remoteStackLinked, true);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "stack sync",
+      "stack submit --auto",
+      "stack view --json",
+      "stack link --base main -- feature",
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci forwards cancellation to link and restores without its aborted signal", async () => {
+  const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
+  try {
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["push", "origin", "main", "feature"]);
+    git(cwd, ["branch", "other"]);
+
+    const controller = new AbortController();
+    const linkSignals: (AbortSignal | undefined)[] = [];
+    const restoreSignals: (AbortSignal | undefined)[] = [];
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args, options) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view") {
+        return { stdout: '{"trunk":"main","branches":[{"branch":"feature"}]}', stderr: "" };
+      }
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      if (args[1] === "submit") return { stdout: "submitted", stderr: "" };
+      linkSignals.push(options.signal);
+      assert.deepEqual(args, ["stack", "link", "--base", "main", "--", "feature"]);
+      git(cwd, ["switch", "other"]);
+      controller.abort();
+      throw new Error("link cancelled");
+    };
+    let readinessCalled = false;
+    const stackReadinessRunner: StackReadinessRunner = async () => {
+      readinessCalled = true;
+      throw new Error("readiness must not run after link cancellation");
+    };
+    const tool = requireTool(
+      registeredTools({
+        stackRunner,
+        stackReadinessRunner,
+        restoreBranch: async (_cwd, branch, signal) => {
+          restoreSignals.push(signal);
+          git(cwd, ["switch", branch]);
+          return { success: true, output: "restored" };
+        },
+      }),
+      "push_and_check_ci",
+    );
+
+    const result = await tool.execute("link-cancelled", {}, controller.signal, undefined, { cwd });
+
+    assert.deepEqual(linkSignals, [controller.signal]);
+    assert.deepEqual(restoreSignals, [undefined]);
+    assert.equal(result.details.stackLinkFailed, true);
+    assert.equal(result.details.remoteStackLinkFailed, true);
+    assert.equal(result.details.stackLinkAttempted, true);
+    assert.equal(result.details.remoteStackLinked, false);
+    assert.equal(readinessCalled, false);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "stack sync",
+      "stack submit --auto",
+      "stack view --json",
+      "stack link --base main -- feature",
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci distinguishes submit restoration failure from link failure", async () => {
+  const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
+  try {
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["push", "origin", "main", "feature"]);
+    git(cwd, ["branch", "other"]);
+
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view") {
+        return { stdout: '{"trunk":"main","branches":[{"branch":"feature"}]}', stderr: "" };
+      }
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      assert.equal(args[1], "submit");
+      git(cwd, ["switch", "other"]);
+      return { stdout: "submitted", stderr: "" };
+    };
+    let readinessCalled = false;
+    const tool = requireTool(
+      registeredTools({
+        stackRunner,
+        restoreBranch: async () => ({ success: false, output: "restore failed" }),
+        stackReadinessRunner: async () => {
+          readinessCalled = true;
+          throw new Error("readiness must not run after submit restoration failure");
+        },
+      }),
+      "push_and_check_ci",
+    );
+
+    const result = await tool.execute("submit-restoration-failure", {}, undefined, undefined, {
+      cwd,
+    });
+
+    assert.equal(result.details.stackSubmitSucceeded, true);
+    assert.equal(result.details.stackSubmitRestorationFailed, true);
+    assert.equal(result.details.stackLinkFailed, undefined);
+    assert.equal(result.details.remoteStackLinkFailed, undefined);
+    assert.equal(result.details.stackLinkAttempted, false);
+    assert.equal(result.details.remoteStackLinked, false);
+    assert.equal(result.details.stackLinkOutput, undefined);
+    assert.equal(readinessCalled, false);
     assert.deepEqual(calls, ["stack view --json", "stack sync", "stack submit --auto"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci stops before readiness when remote stack linking fails", async () => {
+  const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
+  try {
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["push", "origin", "main", "feature"]);
+    git(cwd, ["branch", "other"]);
+
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[1] === "view") {
+        return { stdout: '{"trunk":"main","branches":[{"branch":"feature"}]}', stderr: "" };
+      }
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      if (args[1] === "submit") return { stdout: "submitted", stderr: "" };
+      assert.deepEqual(args, ["stack", "link", "--base", "main", "--", "feature"]);
+      git(cwd, ["switch", "other"]);
+      throw new Error("remote link failed");
+    };
+    let readinessCalled = false;
+    const stackReadinessRunner: StackReadinessRunner = async () => {
+      readinessCalled = true;
+      throw new Error("readiness must not run after link failure");
+    };
+    const tool = requireTool(
+      registeredTools({ stackRunner, stackReadinessRunner }),
+      "push_and_check_ci",
+    );
+
+    const result = await tool.execute("link-failure", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.stackSubmitSucceeded, true);
+    assert.equal(result.details.stackLinkFailed, true);
+    assert.equal(result.details.remoteStackLinkFailed, true);
+    assert.equal(result.details.stackLinkAttempted, true);
+    assert.equal(result.details.stackLinkSucceeded, false);
+    assert.equal(result.details.remoteStackLinked, false);
+    assert.equal(result.details.workspaceRestored, true);
+    assert.equal(result.details.stackLinkOutput, "remote link failed");
+    assert.equal(readinessCalled, false);
+    assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "stack sync",
+      "stack submit --auto",
+      "stack view --json",
+      "stack link --base main -- feature",
+    ]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(remote, { recursive: true, force: true });

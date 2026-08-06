@@ -158,6 +158,16 @@ export function stackSubmitArgs(): string[] {
   return ["stack", "submit", "--auto"];
 }
 
+export function stackLinkArgs(branches: readonly string[], base?: string | null): string[] {
+  return [
+    "stack",
+    "link",
+    ...(base !== undefined && base !== null ? ["--base", base] : []),
+    "--",
+    ...branches,
+  ];
+}
+
 export function runGhStackInit(
   cwd: string,
   branches: readonly string[],
@@ -190,6 +200,16 @@ export function runGhStackSubmit(
   runner: GhStackCommandRunner = runGhStackCommand,
 ): Promise<GhStackOperationResult> {
   return runStackOperation(stackSubmitArgs(), cwd, signal, runner);
+}
+
+export function runGhStackLink(
+  cwd: string,
+  branches: readonly string[],
+  base?: string | null,
+  signal?: AbortSignal,
+  runner: GhStackCommandRunner = runGhStackCommand,
+): Promise<GhStackOperationResult> {
+  return runStackOperation(stackLinkArgs(branches, base), cwd, signal, runner);
 }
 
 export type GhStackProbeStatus = "stacked" | "unstacked" | "error";

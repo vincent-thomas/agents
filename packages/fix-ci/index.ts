@@ -49,6 +49,7 @@ import {
   runGhStackInit,
   runGhStackUnstackLocal,
   runGhStackSubmit,
+  runGhStackLink,
   runGhStackSync,
   runGhStackCommand,
   restoreWorkspaceBranch,
@@ -893,12 +894,33 @@ export function createFixCiExtension(options: {
           const submitRestoration = await restoreOwnedBranch(cwd, branchName);
           if (!submitRestoration.restored) {
             cycleCount = 0;
+            if (submitResult.success) {
+              return respond(
+                `GitHub stack submission completed, but the owned workspace branch could not be restored before remote linking. ` +
+                  `It started on \`${branchName}\` and is now on \`${submitRestoration.currentBranch ?? "no branch"}\`. ` +
+                  "Remote linking and readiness checking were skipped; stop and inspect the workspace manually.",
+                {
+                  stackSubmitSucceeded: true,
+                  stackSubmitRestorationFailed: true,
+                  stackLinkAttempted: false,
+                  remoteStackLinked: false,
+                  workspaceRestored: false,
+                  originalBranch: branchName,
+                  currentBranch: submitRestoration.currentBranch,
+                  errorOutput: submitRestoration.restoreOutput,
+                  restoreOutput: submitRestoration.restoreOutput,
+                },
+              );
+            }
             return respond(
-              `GitHub stack submission ${submitResult.success ? "completed" : "failed"}, but the owned workspace branch was not restored. ` +
+              `GitHub stack submission failed, and the owned workspace branch was not restored. ` +
                 `It started on \`${branchName}\` and is now on \`${submitRestoration.currentBranch ?? "no branch"}\`. ` +
                 "Stop and inspect the workspace manually.",
               {
-                stackSubmitFailed: !submitResult.success,
+                stackSubmitFailed: true,
+                stackSubmitSucceeded: false,
+                stackLinkAttempted: false,
+                remoteStackLinked: false,
                 workspaceRestored: false,
                 originalBranch: branchName,
                 currentBranch: submitRestoration.currentBranch,
@@ -916,6 +938,9 @@ export function createFixCiExtension(options: {
                 `The owned workspace branch was restored. Fix the submission error and call \`push_and_check_ci\` again.`,
               {
                 stackSubmitFailed: true,
+                stackSubmitSucceeded: false,
+                stackLinkAttempted: false,
+                remoteStackLinked: false,
                 workspaceRestored: true,
                 currentBranch: branchName,
                 errorOutput: submitResult.output,
@@ -924,12 +949,138 @@ export function createFixCiExtension(options: {
               },
             );
           }
+
+          notify("Stack submitted — refreshing stack metadata before linking…");
+          const postSubmitStackProbe = await probeGhStack(cwd, signal, stackRunner);
+          const postSubmitStackProbeDetails = {
+            status: postSubmitStackProbe.status,
+            output: postSubmitStackProbe.output,
+            branches: postSubmitStackProbe.branches,
+            baseBranch: postSubmitStackProbe.baseBranch,
+          };
+          const postSubmitStackProbeInfo = {
+            postSubmitStackProbe: postSubmitStackProbeDetails,
+            postSubmitStackProbeDetails,
+            postSubmitStackProbeOutput: postSubmitStackProbe.output,
+            postSubmitStackProbeStatus: postSubmitStackProbe.status,
+            postSubmitStackProbeBranches: postSubmitStackProbe.branches,
+            postSubmitStackProbeBaseBranch: postSubmitStackProbe.baseBranch,
+            postSubmitStackBranches: postSubmitStackProbe.branches,
+            postSubmitStackBase: postSubmitStackProbe.baseBranch,
+          };
+
+          if (
+            postSubmitStackProbe.status !== "stacked" ||
+            postSubmitStackProbe.branches.length === 0
+          ) {
+            cycleCount = 0;
+            return respond(
+              "GitHub stack submission completed and the owned workspace branch was restored, but a fresh stack probe did not report a complete stack. Remote linking and readiness checking were skipped; inspect the stack metadata and call push_and_check_ci again.\n\n" +
+                "### Post-submit gh stack view output:\n```\n" +
+                postSubmitStackProbe.output.trim() +
+                "\n```",
+              {
+                stackSubmitSucceeded: true,
+                stackLinkFailed: true,
+                remoteStackLinkFailed: true,
+                stackLinkAttempted: false,
+                remoteStackLinked: false,
+                postSubmitStackProbeFailed: true,
+                workspaceRestored: true,
+                currentBranch: branchName,
+                ...postSubmitStackProbeInfo,
+              },
+            );
+          }
+
+          const stackBase = postSubmitStackProbe.baseBranch?.trim() || null;
+          if (!stackBase) {
+            cycleCount = 0;
+            return respond(
+              "GitHub stack submission completed and the owned workspace branch was restored, but the refreshed stack base branch could not be determined. Remote linking and readiness checking were skipped; inspect the stack metadata and call push_and_check_ci again.",
+              {
+                stackSubmitSucceeded: true,
+                stackLinkFailed: true,
+                remoteStackLinkFailed: true,
+                stackLinkAttempted: false,
+                remoteStackLinked: false,
+                stackBaseUnknown: true,
+                workspaceRestored: true,
+                currentBranch: branchName,
+                ...postSubmitStackProbeInfo,
+              },
+            );
+          }
+
+          notify("Stack submitted — linking the remote stack…");
+          const stackLinkResult = await runGhStackLink(
+            cwd,
+            postSubmitStackProbe.branches,
+            stackBase,
+            signal,
+            stackRunner,
+          );
+          // Linking can traverse branches too. Restore again even though the
+          // submit boundary was already restored, so readiness starts from the
+          // owned checkout and a failed link cannot leak another branch.
+          const linkRestoration = await restoreOwnedBranch(cwd, branchName);
+          if (!stackLinkResult.success) {
+            cycleCount = 0;
+            const restorationMessage = linkRestoration.restored
+              ? "The owned workspace branch was restored."
+              : "The owned workspace branch could not be restored safely; stop and inspect the workspace manually.";
+            return respond(
+              `## ⚠️ Remote GitHub Stack Link Failed\n\n` +
+                `\`gh stack link\` failed.\n\n### Error output:\n\`\`\`\n${stackLinkResult.output.trim()}\n\`\`\`` +
+                `\n\n${restorationMessage}`,
+              {
+                stackSubmitSucceeded: true,
+                stackLinkFailed: true,
+                remoteStackLinkFailed: true,
+                stackLinkAttempted: true,
+                stackLinkSucceeded: false,
+                remoteStackLinked: false,
+                workspaceRestored: linkRestoration.restored,
+                currentBranch: linkRestoration.currentBranch,
+                stackLinkOutput: stackLinkResult.output,
+                output: stackLinkResult.output,
+                errorOutput: stackLinkResult.output,
+                restoreOutput: linkRestoration.restoreOutput,
+                ...(linkRestoration.restored ? {} : { workspaceRestorationFailed: true }),
+                ...postSubmitStackProbeInfo,
+                instructions: linkRestoration.restored
+                  ? "Fix the remote stack link error, then call push_and_check_ci again."
+                  : "Stop and inspect the workspace manually.",
+              },
+            );
+          }
+          if (!linkRestoration.restored) {
+            cycleCount = 0;
+            return respond(
+              "Remote GitHub stack linking succeeded, but the owned workspace branch could not be restored before readiness checking. Stop and inspect the workspace manually.",
+              {
+                stackSubmitSucceeded: true,
+                stackLinkAttempted: true,
+                stackLinkSucceeded: true,
+                remoteStackLinked: true,
+                stackLinkRestorationFailed: true,
+                workspaceRestorationFailed: true,
+                workspaceRestored: false,
+                currentBranch: linkRestoration.currentBranch,
+                stackLinkOutput: stackLinkResult.output,
+                errorOutput: linkRestoration.restoreOutput,
+                restoreOutput: linkRestoration.restoreOutput,
+                ...postSubmitStackProbeInfo,
+              },
+            );
+          }
+
           pushedSha = (await getHeadSha(cwd, signal)) ?? undefined;
-          notify("Stack submitted. Resolving and checking every stack branch…");
+          notify("Stack submitted and linked. Resolving and checking every stack branch…");
 
           const stackReadiness = await stackReadinessRunner(
             cwd,
-            stackProbe.branches,
+            postSubmitStackProbe.branches,
             signal,
             notify,
             {
@@ -946,6 +1097,13 @@ export function createFixCiExtension(options: {
             allReady: stackReadiness.allReady,
             success: stackReadiness.allReady,
             branches: stackReadiness.branches,
+            stackSubmitSucceeded: true,
+            stackLinkAttempted: true,
+            stackLinkSucceeded: true,
+            stackLinkOutput: stackLinkResult.output,
+            remoteStackLinked: true,
+            workspaceRestored: true,
+            ...postSubmitStackProbeInfo,
           });
         } else {
           // ── 2. Check if base branch is ahead — merge if so ─────────────

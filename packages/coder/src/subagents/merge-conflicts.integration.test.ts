@@ -243,7 +243,7 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
       assert.equal(args[0], "stack");
       if (args[1] === "view") {
         return {
-          stdout: '{"branches":[{"branch":"lower"},{"branch":"tip"}]}',
+          stdout: '{"trunk":"main","branches":[{"branch":"lower"},{"branch":"tip"}]}',
           stderr: "",
         };
       }
@@ -261,9 +261,12 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
         }
         return { stdout: "stack synced", stderr: "" };
       }
-      assert.equal(args[1], "submit");
-      submitCalls += 1;
-      return { stdout: "stack submitted", stderr: "" };
+      if (args[1] === "submit") {
+        submitCalls += 1;
+        return { stdout: "stack submitted", stderr: "" };
+      }
+      assert.deepEqual(args, ["stack", "link", "--base", "main", "--", "lower", "tip"]);
+      return { stdout: "stack linked", stderr: "" };
     };
 
     const readinessRunner: StackReadinessRunner = async (_cwd, branches) => ({
@@ -455,6 +458,8 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
       "stack view --json",
       "stack sync",
       "stack submit --auto",
+      "stack view --json",
+      "stack link --base main -- lower tip",
     ]);
     assert.deepEqual(
       (secondPush.details.branches as Array<{ branch: string }>).map(({ branch }) => branch),

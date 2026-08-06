@@ -7,10 +7,12 @@ import {
   runGhStackInit,
   runGhStackUnstackLocal,
   runGhStackSubmit,
+  runGhStackLink,
   runGhStackSync,
   stackBaseBranch,
   stackBranchNames,
   stackInitArgs,
+  stackLinkArgs,
   stackSubmitArgs,
   stackUnstackLocalArgs,
   stackSyncArgs,
@@ -34,11 +36,21 @@ suite("GitHub stack command builders", () => {
     assert.deepEqual(stackInitArgs(["feature/a"]), ["stack", "init", "--", "feature/a"]);
   });
 
-  test("builds official view, sync, and submit commands", () => {
+  test("builds official view, sync, submit, and link commands", () => {
     assert.deepEqual(stackViewArgs(), ["stack", "view", "--json"]);
     assert.deepEqual(stackUnstackLocalArgs(), ["stack", "unstack", "--local"]);
     assert.deepEqual(stackSyncArgs(), ["stack", "sync"]);
     assert.deepEqual(stackSubmitArgs(), ["stack", "submit", "--auto"]);
+    assert.deepEqual(stackLinkArgs(["first", "second"], "main"), [
+      "stack",
+      "link",
+      "--base",
+      "main",
+      "--",
+      "first",
+      "second",
+    ]);
+    assert.deepEqual(stackLinkArgs(["feature"], null), ["stack", "link", "--", "feature"]);
   });
 
   test("injects rerere without mutating the original environment", () => {
@@ -126,7 +138,7 @@ suite("GitHub stack runner-driven helpers", () => {
     assert.deepEqual(result, { success: true, output: "created" });
   });
 
-  test("runs sync then submit with official arguments", async () => {
+  test("runs sync, submit, and link with official arguments", async () => {
     const calls: string[][] = [];
     const runner: GhStackCommandRunner = async (args) => {
       calls.push([...args]);
@@ -136,10 +148,15 @@ suite("GitHub stack runner-driven helpers", () => {
     assert.equal((await runGhStackUnstackLocal("/workspace", undefined, runner)).success, true);
     assert.equal((await runGhStackSync("/workspace", undefined, runner)).success, true);
     assert.equal((await runGhStackSubmit("/workspace", undefined, runner)).success, true);
+    assert.equal(
+      (await runGhStackLink("/workspace", ["one", "two"], "main", undefined, runner)).success,
+      true,
+    );
     assert.deepEqual(calls, [
       ["stack", "unstack", "--local"],
       ["stack", "sync"],
       ["stack", "submit", "--auto"],
+      ["stack", "link", "--base", "main", "--", "one", "two"],
     ]);
   });
 

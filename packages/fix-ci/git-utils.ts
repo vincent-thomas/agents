@@ -6,6 +6,7 @@
  * that boundary.
  */
 import { execAsync, execSucceeds, tryExec } from "./exec-async.ts";
+import { shellQuote } from "./shell-quote.ts";
 
 // ---------------------------------------------------------------------------
 // Working tree checks
@@ -37,6 +38,19 @@ export async function isWorktreeDirty(cwd: string, signal?: AbortSignal): Promis
 /** Returns the current branch name, or null if not in a git repo. */
 export async function currentBranch(cwd: string, signal?: AbortSignal): Promise<string | null> {
   return tryExec("git branch --show-current", { cwd, timeout: 5_000, signal });
+}
+
+/** Resolve an existing local branch to its full commit SHA without changing checkout. */
+export async function getBranchSha(
+  cwd: string,
+  branch: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  return tryExec(`git rev-parse --verify ${shellQuote(`refs/heads/${branch}`)}`, {
+    cwd,
+    timeout: 5_000,
+    signal,
+  });
 }
 
 /**

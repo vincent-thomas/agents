@@ -61,6 +61,64 @@ test("instructs the agent how to materialize independently valid stacked PRs", a
   assert.match(result.systemPrompt, /each PR boundary an independently valid commit/);
   assert.match(result.systemPrompt, /branch_points ordered base-to-tip/);
   assert.match(result.systemPrompt, /owned workspace branch must be the final stack branch/);
+  assert.match(result.systemPrompt, /inspect_stack/);
+  assert.match(result.systemPrompt, /checkout_stack_branch/);
+  assert.match(result.systemPrompt, /push_and_check_ci/);
+  assert.match(result.systemPrompt, /active cursor/);
+});
+
+test("summary and status follow the mutable active branch cursor", async () => {
+  const initial = {
+    ...workspace("created"),
+    stack: { baseBranch: "main", branches: ["feature/parser", "feature/tip"] },
+  };
+  let sessionInfoChanged: any;
+  let workspaceCommand: any;
+  const statuses: string[] = [];
+  const notices: string[] = [];
+  const extension = createWorkspaceExtension({
+    store: {} as never,
+    initialWorkspace: initial,
+    created: false,
+    dependencies: {
+      assertOwnedWorkspace: async () => undefined,
+      loadWorkspace: async () => initial,
+      updateWorkspace: async (_store, current) => current,
+    },
+  });
+  extension({
+    on(event, handler) {
+      if (event === "session_info_changed") sessionInfoChanged = handler;
+    },
+    registerCommand(_name, command) {
+      workspaceCommand = command.handler;
+    },
+  } as never);
+
+  await sessionInfoChanged(
+    { name: "Stack" },
+    {
+      sessionManager: { getSessionFile: () => "/sessions/stack.jsonl" },
+      ui: { setStatus: (_id: string, text: string) => statuses.push(text) },
+    },
+  );
+  await workspaceCommand({}, { ui: { notify: (text: string) => notices.push(text) } });
+  initial.branch = "feature/tip";
+  await sessionInfoChanged(
+    { name: "Stack" },
+    {
+      sessionManager: { getSessionFile: () => "/sessions/stack.jsonl" },
+      ui: { setStatus: (_id: string, text: string) => statuses.push(text) },
+    },
+  );
+  await workspaceCommand({}, { ui: { notify: (text: string) => notices.push(text) } });
+
+  assert.match(statuses[0]!, /active feature\/parser/);
+  assert.match(statuses[1]!, /active feature\/tip/);
+  assert.match(notices[0]!, /Stack: feature\/parser → feature\/tip/);
+  assert.match(notices[0]!, /Stack base branch: main/);
+  assert.match(notices[0]!, /Base commit: abc123/);
+  assert.match(notices[1]!, /Active branch \(cursor\): feature\/tip/);
 });
 
 test("persists session metadata against the latest transition record", async () => {

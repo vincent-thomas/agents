@@ -18,6 +18,7 @@ import { createStandupExtension } from "@vt-agent/standup";
 import rootCauseExtension from "./extensions/root-cause/index.ts";
 import clearExtension from "./extensions/clear/index.ts";
 import { createWorkspaceExtension } from "./workspace/extension.ts";
+import { createWorkspaceStackController } from "./workspace/stack-controller.ts";
 import { createGotoExtension, createGotoWorkspace } from "./workspace/goto.ts";
 import {
   createSessionPointerExtension,
@@ -138,8 +139,13 @@ const assertWorkspace = async (cwd: string) =>
     ? assertOwnedWorkspace(currentWorkspace, cwd)
     : assertWorkspacePath(runtimeCwd, cwd);
 await assertWorkspace(runtimeCwd);
+const workspaceController = createWorkspaceStackController({
+  store,
+  getWorkspace: () => currentWorkspace,
+});
 const { safetyExtensions, workspaceExtensions, subagentExtensions } = createExtensionProfiles({
   assertWorkspace,
+  workspaceController,
 });
 
 const currentSessionFile = await sessionPointerStore.read(runtimeCwd);

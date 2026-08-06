@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createFixCiExtension } from "./index.ts";
 import type { GhStackCommandRunner, WorkspaceBranchRestorer } from "./github-stack.ts";
-import type { WorkspaceController } from "./index.ts";
+import type { WorkspaceController, WorkspaceControllerClaim } from "./index.ts";
 import type { StackReadinessRunner } from "./stack-readiness.ts";
 
 type RegisteredTool = {
@@ -197,29 +197,52 @@ function remoteStack(
 }
 
 function controllerFixture(
-  snapshot: { activeBranch: string | null; branches: string[]; baseBranch: string | null },
-  options: { validate?: () => void; claim?: () => void; restore?: () => void } = {},
+  initialSnapshot: { activeBranch: string | null; branches: string[]; baseBranch: string | null },
+  options: {
+    validate?: (claim: WorkspaceControllerClaim) => void;
+    claim?: (claim: WorkspaceControllerClaim) => void;
+    restore?: () => void;
+    onCall?: (call: string) => void;
+  } = {},
 ) {
+  let state = {
+    activeBranch: initialSnapshot.activeBranch,
+    branches: [...initialSnapshot.branches],
+    baseBranch: initialSnapshot.baseBranch,
+  };
   const calls: string[] = [];
+  const claims: WorkspaceControllerClaim[] = [];
+  const record = (call: string) => {
+    calls.push(call);
+    options.onCall?.(call);
+  };
   const controller: WorkspaceController = {
     snapshot: async () => {
-      calls.push("snapshot");
-      return snapshot;
+      record("snapshot");
+      return { ...state, branches: [...state.branches] };
     },
-    validate: async () => {
-      calls.push("validate");
-      options.validate?.();
+    validate: async (_cwd, claim) => {
+      record("validate");
+      options.validate?.(claim);
     },
-    claim: async () => {
-      calls.push("claim");
-      options.claim?.();
+    claim: async (_cwd, claim) => {
+      record("claim");
+      options.claim?.(claim);
+      claims.push({ ...claim, branches: [...claim.branches] });
+      state = { ...claim, branches: [...claim.branches] };
     },
-    restore: async () => {
-      calls.push("restore");
+    restore: async (_cwd, snapshot) => {
+      record("restore");
       options.restore?.();
+      state = { ...snapshot, branches: [...snapshot.branches] };
     },
   };
-  return { controller, calls };
+  return {
+    controller,
+    calls,
+    claims,
+    snapshot: () => ({ ...state, branches: [...state.branches] }),
+  };
 }
 
 test("create_github_stack materializes branch points without switching checkout", async () => {
@@ -256,6 +279,219 @@ test("create_github_stack materializes branch points without switching checkout"
     assert.deepEqual(result.details.materializedBranches, ["stack-first"]);
     assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
     assert.deepEqual(calls, ["stack init -- stack-first feature"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("create_github_stack adopts an ordinary explicit-base stack", async () => {
+  const cwd = createRepository();
+  try {
+    const stackCalls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      stackCalls.push(args.join(" "));
+      assert.deepEqual(args, ["stack", "init", "--base", "main", "--", "main", "feature"]);
+      return { stdout: "initialized", stderr: "" };
+    };
+    const ownership = controllerFixture({
+      activeBranch: "feature",
+      branches: ["feature"],
+      baseBranch: null,
+    });
+    const result = await requireTool(
+      registeredTools({ stackRunner, workspaceController: ownership.controller }),
+      "create_github_stack",
+    ).execute(
+      "adopt-ordinary",
+      { branches: ["main", "feature"], base: "main" },
+      undefined,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.stackCreated, true, JSON.stringify(result.details));
+    assert.equal(result.details.workspaceOwnership, "adopted");
+    assert.deepEqual(result.details.branches, ["main", "feature"]);
+    assert.equal(result.details.base, "main");
+    assert.deepEqual(result.details.workspaceOwnershipClaim, {
+      activeBranch: "feature",
+      branches: ["main", "feature"],
+      baseBranch: "main",
+    });
+    assert.deepEqual(ownership.claims, [
+      { activeBranch: "feature", branches: ["main", "feature"], baseBranch: "main" },
+    ]);
+    assert.deepEqual(ownership.snapshot(), {
+      activeBranch: "feature",
+      branches: ["main", "feature"],
+      baseBranch: "main",
+    });
+    assert.deepEqual(stackCalls, ["stack init --base main -- main feature"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("create_github_stack preserves materialized refs when ownership adoption fails", async () => {
+  const cwd = createRepository();
+  try {
+    writeFileSync(join(cwd, "file.txt"), "feature\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature"]);
+    writeFileSync(join(cwd, "file.txt"), "feature two\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature two"]);
+    const stackCalls: string[] = [];
+    let stackInitialized = false;
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      stackCalls.push(args.join(" "));
+      assert.deepEqual(args, [
+        "stack",
+        "init",
+        "--base",
+        "main",
+        "--",
+        "main",
+        "middle",
+        "feature",
+      ]);
+      stackInitialized = true;
+      return { stdout: "initialized", stderr: "" };
+    };
+    const ownership = controllerFixture(
+      { activeBranch: "feature", branches: ["feature"], baseBranch: null },
+      {
+        claim: () => {
+          throw new Error("registry rejected adoption");
+        },
+      },
+    );
+    const result = await requireTool(
+      registeredTools({ stackRunner, workspaceController: ownership.controller }),
+      "create_github_stack",
+    ).execute(
+      "adopt-failure",
+      {
+        branches: ["main", "middle", "feature"],
+        base: "main",
+        branch_points: ["main", "HEAD~1", "HEAD"],
+      },
+      undefined,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.workspaceOwnershipFailed, true, JSON.stringify(result.details));
+    assert.equal(result.details.stackCreated, undefined);
+    assert.equal(stackInitialized, true);
+    assert.deepEqual(stackCalls, ["stack init --base main -- main middle feature"]);
+    for (const branch of ["main", "middle", "feature"]) {
+      assert.equal(
+        spawnSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd })
+          .status,
+        0,
+      );
+    }
+    assert.deepEqual(ownership.snapshot(), {
+      activeBranch: "feature",
+      branches: ["feature"],
+      baseBranch: null,
+    });
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("create_github_stack adopts existing and replacement stacks exactly", async () => {
+  const cwd = createRepository();
+  try {
+    writeFileSync(join(cwd, "file.txt"), "feature\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature"]);
+    writeFileSync(join(cwd, "file.txt"), "feature two\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature two"]);
+    const stackCalls: string[] = [];
+    let initCount = 0;
+    let viewCount = 0;
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      stackCalls.push(args.join(" "));
+      if (args[1] === "init") {
+        initCount++;
+        if (initCount < 3) throw new Error("current branch is already part of a stack");
+        return { stdout: "replacement initialized", stderr: "" };
+      }
+      if (args[1] === "view") {
+        viewCount++;
+        return {
+          stdout: JSON.stringify({
+            trunk: "main",
+            branches:
+              viewCount <= 2
+                ? [{ branch: "main" }, { branch: "feature" }]
+                : [{ branch: "main" }, { branch: "middle" }, { branch: "feature" }],
+          }),
+          stderr: "",
+        };
+      }
+      assert.deepEqual(args, ["stack", "unstack", "--local"]);
+      return { stdout: "unstacked", stderr: "" };
+    };
+    const ownership = controllerFixture({
+      activeBranch: "feature",
+      branches: ["feature"],
+      baseBranch: null,
+    });
+    const tool = requireTool(
+      registeredTools({ stackRunner, workspaceController: ownership.controller }),
+      "create_github_stack",
+    );
+    const existing = await tool.execute(
+      "adopt-existing",
+      { branches: ["main", "feature"], base: "main" },
+      undefined,
+      undefined,
+      { cwd },
+    );
+    const replacement = await tool.execute(
+      "adopt-replacement",
+      {
+        branches: ["main", "middle", "feature"],
+        base: "main",
+        branch_points: ["main", "HEAD~1", "HEAD"],
+      },
+      undefined,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(existing.details.stackCreated, true, JSON.stringify(existing.details));
+    assert.equal(existing.details.workspaceOwnership, "adopted");
+    assert.equal(replacement.details.stackCreated, true, JSON.stringify(replacement.details));
+    assert.equal(replacement.details.workspaceOwnership, "adopted");
+    assert.deepEqual(replacement.details.workspaceOwnershipClaim, {
+      activeBranch: "feature",
+      branches: ["main", "middle", "feature"],
+      baseBranch: "main",
+    });
+    assert.deepEqual(ownership.claims, [
+      { activeBranch: "feature", branches: ["main", "feature"], baseBranch: "main" },
+      { activeBranch: "feature", branches: ["main", "middle", "feature"], baseBranch: "main" },
+    ]);
+    assert.deepEqual(ownership.snapshot(), {
+      activeBranch: "feature",
+      branches: ["main", "middle", "feature"],
+      baseBranch: "main",
+    });
+    assert.deepEqual(stackCalls, [
+      "stack init --base main -- main feature",
+      "stack view --json",
+      "stack init --base main -- main middle feature",
+      "stack view --json",
+      "stack unstack --local",
+      "stack init --base main -- main middle feature",
+      "stack view --json",
+    ]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -867,6 +1103,176 @@ test("create_github_stack restores the owned branch after init traverses branche
     assert.equal(result.details.stackCreated, true);
     assert.equal(git(cwd, ["branch", "--show-current"]), "feature");
     assert.deepEqual(calls, ["stack init -- feature"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci claims a legacy singleton before stack sync", async () => {
+  const cwd = createRepository();
+  const remote = addOrigin(cwd);
+  try {
+    const events: string[] = [];
+    const ownership = controllerFixture(
+      { activeBranch: "feature", branches: ["feature"], baseBranch: "main" },
+      { onCall: (call) => events.push(call) },
+    );
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      events.push(args.join(" "));
+      if (args[1] === "view") {
+        return {
+          stdout: '{"trunk":"main","branches":[{"branch":"main"},{"branch":"feature"}]}',
+          stderr: "",
+        };
+      }
+      assert.deepEqual(args, ["stack", "sync"]);
+      assert.deepEqual(ownership.snapshot(), {
+        activeBranch: "feature",
+        branches: ["main", "feature"],
+        baseBranch: "main",
+      });
+      throw new Error("stop after ownership adoption");
+    };
+    const result = await requireTool(
+      registeredTools({ stackRunner, workspaceController: ownership.controller }),
+      "push_and_check_ci",
+    ).execute("legacy-push", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.stackSyncFailed, true, JSON.stringify(result.details));
+    assert.equal(result.details.workspaceOwnership, "adopted");
+    assert.deepEqual(ownership.claims, [
+      { activeBranch: "feature", branches: ["main", "feature"], baseBranch: "main" },
+    ]);
+    assert.deepEqual(events, ["stack view --json", "snapshot", "validate", "claim", "stack sync"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci reclaims refreshed membership before link and readiness", async () => {
+  const cwd = createRepository();
+  git(cwd, ["branch", "middle", "main"]);
+  const remote = addOrigin(cwd);
+  try {
+    git(cwd, ["push", "origin", "middle"]);
+    const events: string[] = [];
+    const ownership = controllerFixture(
+      { activeBranch: "feature", branches: ["feature"], baseBranch: "main" },
+      { onCall: (call) => events.push(call) },
+    );
+    let viewCount = 0;
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      events.push(args.join(" "));
+      if (args[1] === "view") {
+        viewCount++;
+        return {
+          stdout: JSON.stringify({
+            trunk: "main",
+            branches:
+              viewCount === 1
+                ? [{ branch: "main" }, { branch: "feature" }]
+                : [{ branch: "main" }, { branch: "middle" }, { branch: "feature" }],
+          }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "sync") return { stdout: "synced", stderr: "" };
+      if (args[1] === "submit") return { stdout: "submitted", stderr: "" };
+      assert.deepEqual(args, [
+        "stack",
+        "link",
+        "--base",
+        "main",
+        "--",
+        "main",
+        "middle",
+        "feature",
+      ]);
+      return { stdout: "linked", stderr: "" };
+    };
+    const result = await requireTool(
+      registeredTools({
+        stackRunner,
+        workspaceController: ownership.controller,
+        stackReadinessRunner: async (_cwd, branches) => {
+          events.push("readiness");
+          assert.deepEqual(branches, ["main", "middle", "feature"]);
+          return readyStack(branches);
+        },
+      }),
+      "push_and_check_ci",
+    ).execute("refreshed-push", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.stackSubmitSucceeded, true, JSON.stringify(result.details));
+    assert.equal(result.details.stackLinkSucceeded, true);
+    assert.equal(result.details.allReady, true);
+    assert.deepEqual(result.details.workspaceOwnershipClaim, {
+      activeBranch: "feature",
+      branches: ["main", "middle", "feature"],
+      baseBranch: "main",
+    });
+    assert.deepEqual(ownership.claims, [
+      { activeBranch: "feature", branches: ["main", "feature"], baseBranch: "main" },
+      { activeBranch: "feature", branches: ["main", "middle", "feature"], baseBranch: "main" },
+    ]);
+    assert.deepEqual(events, [
+      "stack view --json",
+      "snapshot",
+      "validate",
+      "claim",
+      "stack sync",
+      "stack submit --auto",
+      "stack view --json",
+      "snapshot",
+      "validate",
+      "claim",
+      "stack link --base main -- main middle feature",
+      "readiness",
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci skips claim and stack mutation when validation is cancelled", async () => {
+  const cwd = createRepository();
+  try {
+    const cancellation = new AbortController();
+    const events: string[] = [];
+    const ownership = controllerFixture(
+      { activeBranch: "feature", branches: ["feature"], baseBranch: "main" },
+      {
+        onCall: (call) => events.push(call),
+        validate: () => cancellation.abort(),
+      },
+    );
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      events.push(args.join(" "));
+      assert.deepEqual(args, ["stack", "view", "--json"]);
+      return {
+        stdout: '{"trunk":"main","branches":[{"branch":"main"},{"branch":"feature"}]}',
+        stderr: "",
+      };
+    };
+    const result = await requireTool(
+      registeredTools({ stackRunner, workspaceController: ownership.controller }),
+      "push_and_check_ci",
+    ).execute("cancel-before-claim", {}, cancellation.signal, undefined, { cwd });
+
+    assert.equal(result.details.stackSyncFailed, true, JSON.stringify(result.details));
+    assert.equal(result.details.workspaceOwnershipFailed, true);
+    assert.equal(
+      (result.details.workspaceOwnershipFailure as { stage: string; cancelled: boolean }).stage,
+      "cancelled",
+    );
+    assert.equal(
+      (result.details.workspaceOwnershipFailure as { stage: string; cancelled: boolean }).cancelled,
+      true,
+    );
+    assert.deepEqual(ownership.claims, []);
+    assert.deepEqual(events, ["stack view --json", "snapshot", "validate"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

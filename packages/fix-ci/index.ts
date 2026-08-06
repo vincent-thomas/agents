@@ -99,6 +99,10 @@ function respond(text: string, details: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text }], details };
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function createFixCiExtension(options: {
   assertWorkspace: (cwd: string) => Promise<void>;
   stackRunner?: GhStackCommandRunner;
@@ -129,6 +133,122 @@ export function createFixCiExtension(options: {
       const restored = current === originalBranch && clean;
       if (restored) await options.assertWorkspace(cwd);
       return { restored, currentBranch: current, workingTreeClean: clean, restoreOutput };
+    };
+
+    /** Adopt a verified local stack into the host registry without changing the checkout. */
+    const adoptStackOwnership = async (
+      cwd: string,
+      branches: readonly string[],
+      baseBranch: string | null | undefined,
+      activeBranch: string | null | undefined,
+      signal: AbortSignal | undefined,
+    ): Promise<{ success: boolean; details: Record<string, unknown> }> => {
+      if (!options.workspaceController) {
+        return { success: true, details: { workspaceOwnership: "unavailable" } };
+      }
+
+      const normalizedBranches = [...branches];
+      const claim: WorkspaceControllerClaim = {
+        branches: normalizedBranches,
+        baseBranch: baseBranch?.trim() ?? "",
+        activeBranch: activeBranch?.trim() ?? "",
+      };
+      const failure = (stage: string, error?: unknown, extra: Record<string, unknown> = {}) => ({
+        success: false,
+        details: {
+          workspaceOwnership: "unavailable",
+          workspaceOwnershipFailed: true,
+          workspaceOwnershipFailure: {
+            stage,
+            ...(error === undefined ? {} : { error: errorMessage(error) }),
+            claim,
+            ...extra,
+          },
+        },
+      });
+
+      if (
+        claim.branches.length === 0 ||
+        !claim.baseBranch ||
+        !claim.activeBranch ||
+        !claim.branches.includes(claim.activeBranch)
+      ) {
+        return failure("invalid-claim", undefined, { reason: "exact-stack-metadata-required" });
+      }
+
+      let prior: WorkspaceControllerSnapshot;
+      try {
+        const snapshot = await options.workspaceController.snapshot(cwd);
+        prior = { ...snapshot, branches: [...snapshot.branches] };
+      } catch (error: unknown) {
+        return failure("snapshot", error);
+      }
+
+      const unchanged =
+        prior.activeBranch === claim.activeBranch &&
+        prior.baseBranch === claim.baseBranch &&
+        JSON.stringify(prior.branches) === JSON.stringify(claim.branches);
+
+      try {
+        await options.workspaceController.validate(cwd, claim);
+      } catch (error: unknown) {
+        return failure("validate", error, { priorSnapshot: prior });
+      }
+
+      if (signal?.aborted) {
+        return failure("cancelled", undefined, { priorSnapshot: prior, cancelled: true });
+      }
+
+      const rollback = async (stage: string, error: unknown) => {
+        try {
+          await options.workspaceController!.restore(cwd, prior);
+          const restored = await options.workspaceController!.snapshot(cwd);
+          const verified =
+            restored.activeBranch === prior.activeBranch &&
+            restored.baseBranch === prior.baseBranch &&
+            JSON.stringify(restored.branches) === JSON.stringify(prior.branches);
+          return failure(stage, error, {
+            priorSnapshot: prior,
+            cancelled: signal?.aborted === true,
+            rollback: {
+              attempted: true,
+              verified,
+              snapshot: restored,
+              ...(verified ? {} : { expected: prior }),
+            },
+          });
+        } catch (rollbackError: unknown) {
+          return failure(stage, error, {
+            priorSnapshot: prior,
+            cancelled: signal?.aborted === true,
+            rollback: {
+              attempted: true,
+              verified: false,
+              error: errorMessage(rollbackError),
+            },
+          });
+        }
+      };
+
+      try {
+        await options.workspaceController.claim(cwd, claim);
+      } catch (error: unknown) {
+        return rollback("claim", error);
+      }
+
+      try {
+        await options.assertWorkspace(cwd);
+      } catch (error: unknown) {
+        return rollback("assertWorkspace", error);
+      }
+
+      return {
+        success: true,
+        details: {
+          workspaceOwnership: unchanged ? "unchanged" : "adopted",
+          workspaceOwnershipClaim: claim,
+        },
+      };
     };
 
     // ── Tool: create_github_stack ────────────────────────────────────────────
@@ -473,6 +593,91 @@ export function createFixCiExtension(options: {
                   },
                 );
               }
+              let adoptionBase = replacementBase ?? null;
+              let adoptionProbeOutput: string | undefined;
+              if (options.workspaceController && !adoptionBase) {
+                // The first view may be an older CLI shape without a base. A
+                // signal-free refresh is required before persisting ownership.
+                const adoptionProbe = await probeGhStack(cwd, undefined, stackRunner);
+                adoptionProbeOutput = adoptionProbe.output;
+                const exact =
+                  adoptionProbe.status === "stacked" &&
+                  adoptionProbe.branches.length === branches.length &&
+                  adoptionProbe.branches.every((branch, index) => branch === branches[index]) &&
+                  adoptionProbe.branches.includes(originalBranch) &&
+                  (!adoptionProbe.view ||
+                    (adoptionProbe.view.currentBranch === originalBranch &&
+                      adoptionProbe.view.branches.filter((branch) => branch.isCurrent).length ===
+                        1 &&
+                      adoptionProbe.view.branches.some(
+                        (branch) => branch.isCurrent && branch.name === originalBranch,
+                      ))) &&
+                  Boolean(adoptionProbe.baseBranch?.trim());
+                if (!exact) {
+                  const rollbackOutput = await rollback();
+                  return respond(
+                    "The local GitHub stack exists, but its base could not be verified for workspace ownership adoption. The existing stack was left in place.",
+                    {
+                      stackExtensionFailed: true,
+                      stackCreationFailed: true,
+                      workspaceOwnershipFailed: true,
+                      workspaceOwnership: "unavailable",
+                      workspaceOwnershipFailure: {
+                        stage: "probe",
+                        reason: "exact-stack-metadata-required",
+                        probeOutput: adoptionProbe.output,
+                        branches: adoptionProbe.branches,
+                        baseBranch: adoptionProbe.baseBranch,
+                      },
+                      previousStackRestored: true,
+                      workspaceRestored: true,
+                      rollbackOutput,
+                      previousBranches,
+                      previousBase,
+                      requestedBranches: branches,
+                      currentBranch: originalBranch,
+                      ...(branchPointsSupplied
+                        ? { branchPoints: providedBranchPoints, materializedBranches }
+                        : {}),
+                    },
+                  );
+                }
+                adoptionBase = adoptionProbe.baseBranch!.trim();
+              }
+              const ownership = await adoptStackOwnership(
+                cwd,
+                branches,
+                adoptionBase,
+                originalBranch,
+                signal,
+              );
+              if (!ownership.success) {
+                const rollbackOutput = await rollback();
+                return respond(
+                  "The local GitHub stack exists, but workspace ownership adoption failed. The stack was not reported as created; fix the workspace ownership issue and try again.",
+                  {
+                    stackExtensionFailed: true,
+                    stackCreationFailed: true,
+                    previousStackRestored: true,
+                    workspaceRestored: true,
+                    rollbackOutput,
+                    previousBranches,
+                    previousBase,
+                    requestedBranches: branches,
+                    branches,
+                    base: adoptionBase,
+                    adoptionProbeOutput,
+                    ...ownership.details,
+                    ...(branchPointsSupplied
+                      ? {
+                          branchPoints: providedBranchPoints,
+                          materializedBranches,
+                          resolvedCommits: materializedCommits,
+                        }
+                      : {}),
+                  },
+                );
+              }
               return respond(
                 `GitHub stack already exists for ${branches.map((branch) => `\`${branch}\``).join(", ")}. The workspace was restored. Call \`push_and_check_ci\` to submit and check CI.`,
                 {
@@ -484,7 +689,9 @@ export function createFixCiExtension(options: {
                   previousBase,
                   requestedBranches: branches,
                   branches,
-                  base: replacementBase ?? null,
+                  base: adoptionBase,
+                  adoptionProbeOutput,
+                  ...ownership.details,
                   ...(branchPointsSupplied
                     ? {
                         branchPoints: providedBranchPoints,
@@ -639,6 +846,40 @@ export function createFixCiExtension(options: {
               );
             }
 
+            const ownership = await adoptStackOwnership(
+              cwd,
+              branches,
+              replacementBase,
+              originalBranch,
+              signal,
+            );
+            if (!ownership.success) {
+              return respond(
+                "The local GitHub stack exists, but workspace ownership adoption failed. The stack and its branch refs were preserved for inspection; fix the workspace ownership issue and try again.",
+                {
+                  stackExtensionFailed: true,
+                  stackCreationFailed: true,
+                  workspaceRestored: true,
+                  replacementVerified: true,
+                  replacementBranchesMatch: true,
+                  replacementBaseMatch: true,
+                  replacementStackProbe: replacementProbe.output,
+                  previousBranches,
+                  previousBase,
+                  requestedBranches: branches,
+                  branches,
+                  base: replacementBase,
+                  ...ownership.details,
+                  ...(branchPointsSupplied
+                    ? {
+                        branchPoints: providedBranchPoints,
+                        materializedBranches,
+                        resolvedCommits: materializedCommits,
+                      }
+                    : {}),
+                },
+              );
+            }
             return respond(
               `GitHub stack extended from ${previousBranches.map((branch) => `\`${branch}\``).join(", ")} to ${branches.map((branch) => `\`${branch}\``).join(", ")}${replacementBase ? ` on base \`${replacementBase}\`` : ""}.` +
                 (branchPointsSupplied
@@ -658,6 +899,7 @@ export function createFixCiExtension(options: {
                 requestedBranches: branches,
                 branches,
                 base: replacementBase,
+                ...ownership.details,
                 ...(branchPointsSupplied
                   ? {
                       branchPoints: providedBranchPoints,
@@ -709,18 +951,86 @@ export function createFixCiExtension(options: {
           );
         }
 
+        let adoptionBase = base ?? null;
+        let adoptionProbeOutput: string | undefined;
+        if (options.workspaceController && !adoptionBase) {
+          // `gh stack init` can succeed while the older view format omits the
+          // base. Do not persist an ownership record until a fresh exact view
+          // supplies both the requested members and a base.
+          const adoptionProbe = await probeGhStack(cwd, undefined, stackRunner);
+          adoptionProbeOutput = adoptionProbe.output;
+          const exact =
+            adoptionProbe.status === "stacked" &&
+            adoptionProbe.branches.length === branches.length &&
+            adoptionProbe.branches.every((branch, index) => branch === branches[index]) &&
+            adoptionProbe.branches.includes(originalBranch) &&
+            (!adoptionProbe.view ||
+              (adoptionProbe.view.currentBranch === originalBranch &&
+                adoptionProbe.view.branches.filter((branch) => branch.isCurrent).length === 1 &&
+                adoptionProbe.view.branches.some(
+                  (branch) => branch.isCurrent && branch.name === originalBranch,
+                ))) &&
+            Boolean(adoptionProbe.baseBranch?.trim());
+          if (!exact) {
+            return respond(
+              "The local GitHub stack exists, but its base could not be verified for workspace ownership adoption. The stack and its branch refs were preserved for inspection.",
+              {
+                stackCreationFailed: true,
+                workspaceRestored: true,
+                workspaceOwnershipFailed: true,
+                workspaceOwnership: "unavailable",
+                workspaceOwnershipFailure: {
+                  stage: "probe",
+                  reason: "exact-stack-metadata-required",
+                  probeOutput: adoptionProbe.output,
+                  branches: adoptionProbe.branches,
+                  baseBranch: adoptionProbe.baseBranch,
+                },
+                branches,
+                base: null,
+                adoptionProbeOutput,
+              },
+            );
+          }
+          adoptionBase = adoptionProbe.baseBranch!.trim();
+        }
+        const ownership = await adoptStackOwnership(
+          cwd,
+          branches,
+          adoptionBase,
+          originalBranch,
+          signal,
+        );
+        if (!ownership.success) {
+          return respond(
+            "The local GitHub stack exists, but workspace ownership adoption failed. The stack and its branch refs were preserved for inspection; fix the workspace ownership issue and try again.",
+            {
+              stackCreationFailed: true,
+              workspaceRestored: true,
+              branches,
+              base: adoptionBase,
+              adoptionProbeOutput,
+              ...ownership.details,
+              ...(branchPointsSupplied
+                ? { branchPoints: providedBranchPoints, materializedBranches }
+                : {}),
+            },
+          );
+        }
         const materialized = branchPointsSupplied
           ? ` Prepared ${providedBranchPoints.length} branch point${providedBranchPoints.length === 1 ? "" : "s"} without switching checkout.`
           : "";
         return respond(
-          `GitHub stack created for ${branches.map((branch) => `\`${branch}\``).join(", ")}${base ? ` on base \`${base}\`` : ""}.` +
+          `GitHub stack created for ${branches.map((branch) => `\`${branch}\``).join(", ")}${adoptionBase ? ` on base \`${adoptionBase}\`` : ""}.` +
             materialized +
             " The workspace was restored. Call `push_and_check_ci` to submit and check CI.",
           {
             stackCreated: true,
             workspaceRestored: true,
             branches,
-            base: base ?? null,
+            base: adoptionBase,
+            adoptionProbeOutput,
+            ...ownership.details,
             ...(branchPointsSupplied
               ? { branchPoints: providedBranchPoints, materializedBranches }
               : {}),
@@ -1085,6 +1395,42 @@ export function createFixCiExtension(options: {
             );
           }
 
+          const initialStackBase = stackProbe.baseBranch?.trim() || null;
+          if (options.workspaceController && !initialStackBase) {
+            cycleCount = 0;
+            return respond(
+              "The GitHub stack base could not be determined from the initial probe. No branches were published and stack synchronization was not started.",
+              {
+                stackSyncFailed: true,
+                stackBaseUnknown: true,
+                stackProbeOutput: stackProbe.output,
+                stackBranches: stackProbe.branches,
+                workspaceOwnership: "unavailable",
+              },
+            );
+          }
+
+          const initialOwnership = await adoptStackOwnership(
+            cwd,
+            stackProbe.branches,
+            initialStackBase,
+            branchName,
+            signal,
+          );
+          const stackOwnershipDetails = initialOwnership.details;
+          if (!initialOwnership.success) {
+            cycleCount = 0;
+            return respond(
+              "The local GitHub stack exists, but workspace ownership adoption failed. No branches were published and stack synchronization was not started.",
+              {
+                stackSyncFailed: true,
+                stackProbeOutput: stackProbe.output,
+                stackBranches: stackProbe.branches,
+                ...stackOwnershipDetails,
+              },
+            );
+          }
+
           const missingStackBranches: string[] = [];
           for (const stackBranch of stackProbe.branches) {
             const branchOnOrigin = await branchExistsOnOrigin(cwd, stackBranch, signal);
@@ -1093,7 +1439,12 @@ export function createFixCiExtension(options: {
               return respond(
                 `Could not determine whether stack branch \`${stackBranch}\` exists on origin. ` +
                   "No branches were published and stack synchronization was not started; fix remote access and try again.",
-                { stackBootstrapFailed: true, branch: stackBranch, remoteLookupFailed: true },
+                {
+                  stackBootstrapFailed: true,
+                  branch: stackBranch,
+                  remoteLookupFailed: true,
+                  ...stackOwnershipDetails,
+                },
               );
             }
             if (!branchOnOrigin) missingStackBranches.push(stackBranch);
@@ -1116,6 +1467,7 @@ export function createFixCiExtension(options: {
                   stackBootstrapFailed: true,
                   branch: stackBranch,
                   errorOutput: bootstrap.output,
+                  ...stackOwnershipDetails,
                 },
               );
             }
@@ -1148,6 +1500,7 @@ export function createFixCiExtension(options: {
                   conflictPaths,
                   syncOutput: syncResult.output,
                   instructions: 'Call the "merge_conflicts" agent to resolve the preserved rebase.',
+                  ...stackOwnershipDetails,
                 },
               );
             }
@@ -1169,6 +1522,7 @@ export function createFixCiExtension(options: {
                 instructions: restoration.restored
                   ? "Fix the gh stack sync error, then call push_and_check_ci again."
                   : "Stop and inspect the workspace manually.",
+                ...stackOwnershipDetails,
               },
             );
           }
@@ -1186,6 +1540,7 @@ export function createFixCiExtension(options: {
                 originalBranch: branchName,
                 currentBranch: restoration.currentBranch,
                 restoreOutput: restoration.restoreOutput,
+                ...stackOwnershipDetails,
               },
             );
           }
@@ -1210,6 +1565,7 @@ export function createFixCiExtension(options: {
                   currentBranch: submitRestoration.currentBranch,
                   errorOutput: submitRestoration.restoreOutput,
                   restoreOutput: submitRestoration.restoreOutput,
+                  ...stackOwnershipDetails,
                 },
               );
             }
@@ -1227,6 +1583,7 @@ export function createFixCiExtension(options: {
                 currentBranch: submitRestoration.currentBranch,
                 errorOutput: submitResult.output,
                 restoreOutput: submitRestoration.restoreOutput,
+                ...stackOwnershipDetails,
               },
             );
           }
@@ -1247,6 +1604,7 @@ export function createFixCiExtension(options: {
                 errorOutput: submitResult.output,
                 restoreOutput: submitRestoration.restoreOutput,
                 instructions: "Fix the gh stack submit error, then call push_and_check_ci again.",
+                ...stackOwnershipDetails,
               },
             );
           }
@@ -1272,7 +1630,8 @@ export function createFixCiExtension(options: {
 
           if (
             postSubmitStackProbe.status !== "stacked" ||
-            postSubmitStackProbe.branches.length === 0
+            postSubmitStackProbe.branches.length === 0 ||
+            !postSubmitStackProbe.branches.includes(branchName)
           ) {
             cycleCount = 0;
             return respond(
@@ -1289,6 +1648,14 @@ export function createFixCiExtension(options: {
                 postSubmitStackProbeFailed: true,
                 workspaceRestored: true,
                 currentBranch: branchName,
+                workspaceOwnership: "unavailable",
+                workspaceOwnershipFailed: true,
+                workspaceOwnershipFailure: {
+                  stage: "probe",
+                  reason: "active-branch-not-in-refreshed-stack",
+                  activeBranch: branchName,
+                  branches: postSubmitStackProbe.branches,
+                },
                 ...postSubmitStackProbeInfo,
               },
             );
@@ -1308,10 +1675,43 @@ export function createFixCiExtension(options: {
                 stackBaseUnknown: true,
                 workspaceRestored: true,
                 currentBranch: branchName,
+                workspaceOwnership: "unavailable",
+                workspaceOwnershipFailed: true,
+                workspaceOwnershipFailure: {
+                  stage: "probe",
+                  reason: "base-branch-unknown",
+                  branches: postSubmitStackProbe.branches,
+                },
                 ...postSubmitStackProbeInfo,
               },
             );
           }
+
+          const refreshedOwnership = await adoptStackOwnership(
+            cwd,
+            postSubmitStackProbe.branches,
+            stackBase,
+            branchName,
+            signal,
+          );
+          if (!refreshedOwnership.success) {
+            cycleCount = 0;
+            return respond(
+              "The stack was submitted, but refreshed workspace ownership adoption failed. Remote linking and readiness checking were skipped; fix the workspace ownership issue and try again.",
+              {
+                stackSubmitSucceeded: true,
+                stackLinkFailed: true,
+                remoteStackLinkFailed: true,
+                stackLinkAttempted: false,
+                remoteStackLinked: false,
+                workspaceRestored: true,
+                currentBranch: branchName,
+                ...refreshedOwnership.details,
+                ...postSubmitStackProbeInfo,
+              },
+            );
+          }
+          const stackOwnershipAfterSubmit = refreshedOwnership.details;
 
           notify("Stack submitted — linking the remote stack…");
           let stackLinkResult = await runGhStackLink(
@@ -1391,6 +1791,7 @@ export function createFixCiExtension(options: {
               currentBranch: localInitRestoration.currentBranch,
               ...remoteStackRebuildOutputs,
               ...postSubmitStackProbeInfo,
+              ...stackOwnershipAfterSubmit,
             };
 
             if (!remoteUnstack.success || !remoteUnstackRestoration.restored) {
@@ -1519,6 +1920,7 @@ export function createFixCiExtension(options: {
                 remoteStackRebuildAttempted: false,
                 remoteStackRebuilt: false,
                 ...postSubmitStackProbeInfo,
+                ...stackOwnershipAfterSubmit,
                 instructions: linkRestoration.restored
                   ? "Fix the remote stack link error, then call push_and_check_ci again."
                   : "Stop and inspect the workspace manually.",
@@ -1544,6 +1946,7 @@ export function createFixCiExtension(options: {
                 errorOutput: linkRestoration.restoreOutput,
                 restoreOutput: linkRestoration.restoreOutput,
                 ...postSubmitStackProbeInfo,
+                ...stackOwnershipAfterSubmit,
               },
             );
           }
@@ -1582,6 +1985,7 @@ export function createFixCiExtension(options: {
               : {}),
             workspaceRestored: true,
             ...postSubmitStackProbeInfo,
+            ...stackOwnershipAfterSubmit,
           });
         } else {
           // ── 2. Check if base branch is ahead — merge if so ─────────────

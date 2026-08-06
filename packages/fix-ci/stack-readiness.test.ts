@@ -128,6 +128,200 @@ suite("stack readiness orchestration", () => {
     assert.match(result.branches[1]?.reason ?? "", /missing local SHA/);
   });
 
+  test("turns branch-resolution failures into a blocked report", async () => {
+    const readyCalls: string[] = [];
+    const dependencies: StackReadinessDependencies = {
+      resolveBranch: async (_cwd, branch) => {
+        if (branch === "unavailable") throw new Error("GitHub API unavailable");
+        return {
+          sha: "sha-ok",
+          pr: { number: 1, state: "OPEN", isDraft: true, headRefOid: "sha-ok" },
+        };
+      },
+      pollChecks: async () => ({
+        checks: [passingCheck],
+        timedOut: false,
+        polls: 1,
+        mode: "commit",
+      }),
+      fetchFailureLogs: async () => [],
+      markPrReady: async (_cwd, _signal, branch) => {
+        readyCalls.push(branch);
+        return true;
+      },
+    };
+
+    const result = await checkAndReadyStack(
+      "/workspace",
+      ["unavailable", "available"],
+      undefined,
+      () => {},
+      dependencies,
+    );
+
+    assert.equal(result.allChecksPassed, false);
+    assert.deepEqual(readyCalls, []);
+    assert.match(result.branches[0]?.reason ?? "", /GitHub API unavailable/);
+  });
+
+  test("turns check polling failures into a blocked report", async () => {
+    const readyCalls: string[] = [];
+    const dependencies: StackReadinessDependencies = {
+      resolveBranch: async (_cwd, branch) => ({
+        sha: `sha-${branch}`,
+        pr: { number: 1, state: "OPEN", isDraft: true, headRefOid: `sha-${branch}` },
+      }),
+      pollChecks: async () => {
+        throw new Error("checks API unavailable");
+      },
+      fetchFailureLogs: async () => [],
+      markPrReady: async (_cwd, _signal, branch) => {
+        readyCalls.push(branch);
+        return true;
+      },
+    };
+
+    const result = await checkAndReadyStack(
+      "/workspace",
+      ["tip"],
+      undefined,
+      () => {},
+      dependencies,
+    );
+
+    assert.equal(result.allChecksPassed, false);
+    assert.deepEqual(readyCalls, []);
+    assert.match(result.branches[0]?.reason ?? "", /checks API unavailable/);
+  });
+
+  test("reports failure-log lookup failures", async () => {
+    const dependencies: StackReadinessDependencies = {
+      resolveBranch: async () => ({
+        sha: "sha-tip",
+        pr: { number: 1, state: "OPEN", isDraft: true, headRefOid: "sha-tip" },
+      }),
+      pollChecks: async () => ({
+        checks: [{ name: "test", state: "FAILURE", bucket: "fail", link: "https://run" }],
+        timedOut: false,
+        polls: 1,
+        mode: "commit",
+      }),
+      fetchFailureLogs: async () => {
+        throw new Error("logs API unavailable");
+      },
+      markPrReady: async () => true,
+    };
+
+    const result = await checkAndReadyStack(
+      "/workspace",
+      ["tip"],
+      undefined,
+      () => {},
+      dependencies,
+    );
+
+    assert.equal(result.allChecksPassed, false);
+    assert.match(result.branches[0]?.reason ?? "", /logs API unavailable/);
+  });
+
+  test("blocks readiness when post-poll branch resolution fails", async () => {
+    let resolveCount = 0;
+    const readyCalls: string[] = [];
+    const dependencies: StackReadinessDependencies = {
+      resolveBranch: async () => {
+        resolveCount++;
+        if (resolveCount > 1) throw new Error("refresh unavailable");
+        return {
+          sha: "sha-tip",
+          pr: { number: 1, state: "OPEN", isDraft: true, headRefOid: "sha-tip" },
+        };
+      },
+      pollChecks: async () => ({
+        checks: [passingCheck],
+        timedOut: false,
+        polls: 1,
+        mode: "commit",
+      }),
+      fetchFailureLogs: async () => [],
+      markPrReady: async (_cwd, _signal, branch) => {
+        readyCalls.push(branch);
+        return true;
+      },
+    };
+
+    const result = await checkAndReadyStack(
+      "/workspace",
+      ["tip"],
+      undefined,
+      () => {},
+      dependencies,
+    );
+
+    assert.equal(result.allChecksPassed, false);
+    assert.deepEqual(readyCalls, []);
+    assert.match(result.branches[0]?.reason ?? "", /refresh unavailable/);
+  });
+
+  test("reports thrown ready-command failures", async () => {
+    const dependencies: StackReadinessDependencies = {
+      resolveBranch: async () => ({
+        sha: "sha-tip",
+        pr: { number: 1, state: "OPEN", isDraft: true, headRefOid: "sha-tip" },
+      }),
+      pollChecks: async () => ({
+        checks: [passingCheck],
+        timedOut: false,
+        polls: 1,
+        mode: "commit",
+      }),
+      fetchFailureLogs: async () => [],
+      markPrReady: async () => {
+        throw new Error("ready API unavailable");
+      },
+    };
+
+    const result = await checkAndReadyStack(
+      "/workspace",
+      ["tip"],
+      undefined,
+      () => {},
+      dependencies,
+    );
+
+    assert.equal(result.allChecksPassed, true);
+    assert.equal(result.allReady, false);
+    assert.match(result.branches[0]?.reason ?? "", /ready API unavailable/);
+  });
+
+  test("propagates cancellation instead of mutating later PRs", async () => {
+    const controller = new AbortController();
+    const readyCalls: string[] = [];
+    const dependencies: StackReadinessDependencies = {
+      resolveBranch: async (_cwd, branch) => ({
+        sha: `sha-${branch}`,
+        pr: { number: 1, state: "OPEN", isDraft: true, headRefOid: `sha-${branch}` },
+      }),
+      pollChecks: async () => ({
+        checks: [passingCheck],
+        timedOut: false,
+        polls: 1,
+        mode: "commit",
+      }),
+      fetchFailureLogs: async () => [],
+      markPrReady: async (_cwd, _signal, branch) => {
+        readyCalls.push(branch);
+        controller.abort();
+        throw new Error("cancelled");
+      },
+    };
+
+    await assert.rejects(
+      checkAndReadyStack("/workspace", ["base", "tip"], controller.signal, () => {}, dependencies),
+      /cancelled/,
+    );
+    assert.deepEqual(readyCalls, ["base"]);
+  });
+
   test("reports partial ready-command failure after all checks pass", async () => {
     const { result, readyCalls } = await run(["base", "tip"], {
       readyFailures: new Set(["tip"]),

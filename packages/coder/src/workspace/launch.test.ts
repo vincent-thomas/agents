@@ -193,6 +193,28 @@ test("interactive selection resumes the chosen active workspace", async () => {
   assert.equal(selected.created, false);
 });
 
+test("goto with a non-active stack member resumes its active workspace", async () => {
+  const existing = {
+    ...workspace("existing", "2026-01-02T00:00:00.000Z"),
+    branch: "feature/tip",
+    stack: { baseBranch: "main", branches: ["feature/base", "feature/tip"] },
+  };
+  const selected = await selectWorkspace({
+    store: {} as WorkspaceStore,
+    cwd: "/repo",
+    branch: "feature/base",
+    dependencies: {
+      resolveRepository: async () => ({ repository: "/repo/.git", sourceRoot: "/repo", head: "x" }),
+      listWorkspaces: async () => [existing],
+      createWorkspace: async () => {
+        throw new Error("must not create");
+      },
+    },
+  });
+  assert.equal(selected.workspace.id, existing.id);
+  assert.equal(selected.created, false);
+});
+
 test("goto with a branch resumes its active workspace", async () => {
   const existing = {
     ...workspace("existing", "2026-01-02T00:00:00.000Z"),

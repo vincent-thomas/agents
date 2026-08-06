@@ -4,6 +4,7 @@ import {
   createWorkspace,
   listWorkspaces,
   resolveRepository,
+  workspaceOwnsBranch,
   type AgentWorkspace,
   type WorkspaceStore,
   type WorkspaceTransitionMetadata,
@@ -31,7 +32,7 @@ export async function createGotoWorkspace(options: {
   const dependencies = options.dependencies ?? defaultDependencies;
   const repository = await dependencies.resolveRepository(options.cwd);
   const existing = (await dependencies.listWorkspaces(options.store, repository.repository)).find(
-    (workspace) => workspace.branch === options.branch,
+    (workspace) => workspaceOwnsBranch(workspace, options.branch),
   );
   if (existing) {
     throw new Error(`A workspace already exists for branch ${options.branch}.`);

@@ -15,17 +15,24 @@ export interface WorkspaceTransitionMetadata {
   error?: string;
 }
 
+export interface WorkspaceStackMetadata {
+  baseBranch: string;
+  branches: string[];
+}
+
 export interface AgentWorkspace {
   version: 1;
   id: string;
   repository: string;
   sourceRoot: string;
   worktree: string;
+  /** The active checkout; stack members are recorded separately in `stack`. */
   branch: string;
   baseSha: string;
   createdAt: string;
   updatedAt: string;
   status: "active" | "completed";
+  stack?: WorkspaceStackMetadata;
   branchSetup?: "created" | "reused-local" | "fetched-origin";
   completionHeadSha?: string;
   completionPrNumber?: number;
@@ -89,6 +96,21 @@ function recordPath(store: WorkspaceStore, id: string): string {
   return join(recordsDir(store), `${id}.json`);
 }
 
+function isWorkspaceStack(value: unknown): value is WorkspaceStackMetadata {
+  if (!value || typeof value !== "object") return false;
+  const stack = value as Partial<WorkspaceStackMetadata>;
+  return (
+    typeof stack.baseBranch === "string" &&
+    stack.baseBranch.trim().length > 0 &&
+    Array.isArray(stack.branches) &&
+    stack.branches.length > 0 &&
+    stack.branches.every(
+      (branch): branch is string => typeof branch === "string" && branch.trim().length > 0,
+    ) &&
+    new Set(stack.branches).size === stack.branches.length
+  );
+}
+
 function isWorkspaceTransition(value: unknown): value is WorkspaceTransitionMetadata {
   if (!value || typeof value !== "object") return false;
   const transition = value as Partial<WorkspaceTransitionMetadata>;
@@ -118,6 +140,8 @@ function parseWorkspace(value: unknown, path: string): AgentWorkspace {
     typeof record.createdAt !== "string" ||
     typeof record.updatedAt !== "string" ||
     (record.status !== "active" && record.status !== "completed") ||
+    (record.stack !== undefined && !isWorkspaceStack(record.stack)) ||
+    (record.stack !== undefined && !record.stack.branches.includes(record.branch)) ||
     (record.completionHeadSha !== undefined && typeof record.completionHeadSha !== "string") ||
     (record.completionPrNumber !== undefined && typeof record.completionPrNumber !== "number") ||
     (record.transition !== undefined && !isWorkspaceTransition(record.transition)) ||
@@ -129,6 +153,18 @@ function parseWorkspace(value: unknown, path: string): AgentWorkspace {
     throw new Error(`Invalid workspace record: ${path}`);
   }
   return record as AgentWorkspace;
+}
+
+export function workspaceBranches(workspace: AgentWorkspace): string[] {
+  return workspace.stack?.branches ?? [workspace.branch];
+}
+
+export function workspaceOwnsBranch(workspace: AgentWorkspace, branch: string): boolean {
+  return workspaceBranches(workspace).includes(branch);
+}
+
+function validateWorkspace(workspace: AgentWorkspace, path: string): void {
+  parseWorkspace(workspace, path);
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -168,6 +204,7 @@ export async function saveWorkspace(
   workspace: AgentWorkspace,
 ): Promise<void> {
   const path = recordPath(store, workspace.id);
+  validateWorkspace(workspace, path);
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(workspace, null, 2)}\n`, "utf8");
@@ -316,6 +353,8 @@ export async function updateWorkspace(
   workspace: AgentWorkspace,
   patch: Pick<
     Partial<AgentWorkspace>,
+    | "branch"
+    | "stack"
     | "completionHeadSha"
     | "completionPrNumber"
     | "sessionFile"
@@ -331,6 +370,38 @@ export async function updateWorkspace(
   };
   await saveWorkspace(store, updated);
   return updated;
+}
+
+/**
+ * Claim a set of stack branches for an active workspace. The latest record is
+ * loaded before checking overlap so callers cannot accidentally update a
+ * stale transition/session record.
+ */
+export async function claimWorkspaceStack(
+  store: WorkspaceStore,
+  workspace: AgentWorkspace,
+  stack: WorkspaceStackMetadata,
+  activeBranch = workspace.branch,
+): Promise<AgentWorkspace> {
+  if (!isWorkspaceStack(stack)) {
+    throw new Error("Invalid workspace stack metadata.");
+  }
+  const current = await loadWorkspace(store, workspace.id);
+  if (current.status !== "active") {
+    throw new Error(`Agent workspace ${current.id} is completed and read-only.`);
+  }
+  const candidate = { ...current, branch: activeBranch, stack };
+  validateWorkspace(candidate, recordPath(store, current.id));
+
+  const overlap = (await listWorkspaces(store, current.repository))
+    .filter((other) => other.id !== current.id)
+    .flatMap((other) => workspaceBranches(other))
+    .find((branch) => stack.branches.includes(branch));
+  if (overlap !== undefined) {
+    throw new Error(`Branch ${overlap} is already owned by another workspace.`);
+  }
+
+  return updateWorkspace(store, current, { branch: activeBranch, stack });
 }
 
 export async function inspectWorkspaceForRemoval(
@@ -427,7 +498,7 @@ export async function assertOwnedWorkspace(
   const currentBranch = (
     await git(actualCwd, ["symbolic-ref", "--quiet", "--short", "HEAD"])
   ).stdout.trim();
-  if (currentBranch !== workspace.branch) {
+  if (currentBranch !== workspace.branch || !workspaceOwnsBranch(workspace, currentBranch)) {
     throw new Error(
       `Agent workspace branch mismatch: expected ${workspace.branch}, found ${currentBranch}.`,
     );

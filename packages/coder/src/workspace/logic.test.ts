@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   assertOwnedWorkspace,
   assertWorkspacePath,
+  claimWorkspaceStack,
   createWorkspace,
   deleteWorkspace,
   listWorkspaces,
@@ -15,6 +16,8 @@ import {
   resolveRegularCheckout,
   resolveRepository,
   updateWorkspace,
+  workspaceBranches,
+  workspaceOwnsBranch,
   type WorkspaceStore,
 } from "./logic.ts";
 
@@ -39,6 +42,64 @@ function fixture(): {
   git(repo, "commit", "-m", "Initial commit");
   return { root, repo, store, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+test("legacy workspaces expose their active branch as their only owned branch", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/legacy");
+    assert.deepEqual(workspaceBranches(workspace), [workspace.branch]);
+    assert.equal(workspaceOwnsBranch(workspace, workspace.branch), true);
+    assert.equal(workspaceOwnsBranch(workspace, "feature/other"), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("claims valid stack metadata and rejects overlap with another workspace", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const first = await createWorkspace(store, repo, "feature/stack-tip");
+    const second = await createWorkspace(store, repo, "feature/other");
+    const stacked = await claimWorkspaceStack(store, first, {
+      baseBranch: "main",
+      branches: ["feature/base", first.branch],
+    });
+    assert.deepEqual(stacked.stack, {
+      baseBranch: "main",
+      branches: ["feature/base", first.branch],
+    });
+    assert.equal(workspaceOwnsBranch(stacked, "feature/base"), true);
+    git(repo, "branch", "feature/base");
+    git(first.worktree, "switch", "feature/base");
+    const moved = await claimWorkspaceStack(store, stacked, stacked.stack!, "feature/base");
+    assert.equal(moved.branch, "feature/base");
+    await assertOwnedWorkspace(moved);
+    await assert.rejects(
+      claimWorkspaceStack(store, second, {
+        baseBranch: "main",
+        branches: [second.branch, first.branch],
+      }),
+      /already owned by another workspace/,
+    );
+    await assert.rejects(
+      claimWorkspaceStack(store, second, { baseBranch: "", branches: [second.branch] }),
+      /Invalid workspace stack metadata/,
+    );
+    await assert.rejects(
+      claimWorkspaceStack(store, second, {
+        baseBranch: "main",
+        branches: [second.branch, second.branch],
+      }),
+      /Invalid workspace stack metadata/,
+    );
+    await assert.rejects(
+      claimWorkspaceStack(store, second, { baseBranch: "main", branches: ["feature/not-active"] }),
+      /Invalid workspace record/,
+    );
+  } finally {
+    cleanup();
+  }
+});
 
 test("creates an isolated branch and worktree without moving dirty source changes", async () => {
   const { repo, store, cleanup } = fixture();

@@ -1736,19 +1736,13 @@ export function createFixCiExtension(options: {
             );
           }
           const stackOwnershipAfterSubmit = refreshedOwnership.details;
-
-          notify("Stack submitted — linking the remote stack…");
-          let stackLinkResult = await runGhStackLink(
-            cwd,
-            postSubmitStackProbe.branches,
-            stackBase,
-            signal,
-            stackRunner,
-          );
-          // Linking can traverse branches too. Restore again even though the
-          // submit boundary was already restored, so readiness starts from the
-          // owned checkout and a failed link cannot leak another branch.
-          const linkRestoration = await restoreOwnedBranch(cwd, branchName);
+          const stackLinkRequired = postSubmitStackProbe.branches.length > 1;
+          let stackLinkResult = { success: true, output: "" };
+          let linkRestoration = {
+            restored: true,
+            currentBranch: branchName,
+            restoreOutput: "",
+          };
           let remoteStackRebuilt = false;
           let remoteStackRebuildOutputs:
             | {
@@ -1763,10 +1757,26 @@ export function createFixCiExtension(options: {
               }
             | undefined;
 
+          if (stackLinkRequired) {
+            notify("Stack submitted — linking the remote stack…");
+            stackLinkResult = await runGhStackLink(
+              cwd,
+              postSubmitStackProbe.branches,
+              stackBase,
+              signal,
+              stackRunner,
+            );
+            // Linking can traverse branches too. Restore again even though the
+            // submit boundary was already restored, so readiness starts from the
+            // owned checkout and a failed link cannot leak another branch.
+            linkRestoration = await restoreOwnedBranch(cwd, branchName);
+          }
+
           // GitHub rejects adding a new middle PR to an already-submitted
           // stack. Rebuild only for that exact rejection: a generic link
           // failure must never destructively unstack the remote stack.
           if (
+            stackLinkRequired &&
             !stackLinkResult.success &&
             linkRestoration.restored &&
             isMiddleInsertionRejectionOutput(stackLinkResult.output)
@@ -1918,7 +1928,7 @@ export function createFixCiExtension(options: {
             }
           }
 
-          if (!stackLinkResult.success) {
+          if (stackLinkRequired && !stackLinkResult.success) {
             cycleCount = 0;
             const restorationMessage = linkRestoration.restored
               ? "The owned workspace branch was restored."
@@ -1951,7 +1961,7 @@ export function createFixCiExtension(options: {
               },
             );
           }
-          if (!linkRestoration.restored) {
+          if (stackLinkRequired && !linkRestoration.restored) {
             cycleCount = 0;
             return respond(
               "Remote GitHub stack linking succeeded, but the owned workspace branch could not be restored before readiness checking. Stop and inspect the workspace manually.",
@@ -1976,7 +1986,11 @@ export function createFixCiExtension(options: {
           }
 
           pushedSha = (await getHeadSha(cwd, signal)) ?? undefined;
-          notify("Stack submitted and linked. Resolving and checking every stack branch…");
+          notify(
+            stackLinkRequired
+              ? "Stack submitted and linked. Resolving and checking every stack branch…"
+              : "Stack submitted. Remote linking is not required for this single-branch stack; resolving and checking its branch…",
+          );
 
           const stackReadiness = await stackReadinessRunner(
             cwd,
@@ -1991,26 +2005,35 @@ export function createFixCiExtension(options: {
             },
           );
           cycleCount = 0;
-          return respond(formatStackReadiness(stackReadiness), {
-            stackReadiness: true,
-            allChecksPassed: stackReadiness.allChecksPassed,
-            allReady: stackReadiness.allReady,
-            success: stackReadiness.allReady,
-            branches: stackReadiness.branches,
-            stackSubmitSucceeded: true,
-            stackLinkAttempted: true,
-            stackLinkSucceeded: true,
-            stackLinkOutput: stackLinkResult.output,
-            remoteStackLinked: true,
-            remoteStackRebuildAttempted: remoteStackRebuildOutputs !== undefined,
-            remoteStackRebuilt,
-            ...(remoteStackRebuildOutputs
-              ? { remoteStackState: "linked", ...remoteStackRebuildOutputs }
-              : {}),
-            workspaceRestored: true,
-            ...postSubmitStackProbeInfo,
-            ...stackOwnershipAfterSubmit,
-          });
+          const readinessMessage = formatStackReadiness(stackReadiness);
+          return respond(
+            stackLinkRequired
+              ? readinessMessage
+              : "Remote stack linking was not attempted because this single-branch stack does not require it.\n\n" +
+                  readinessMessage,
+            {
+              stackReadiness: true,
+              allChecksPassed: stackReadiness.allChecksPassed,
+              allReady: stackReadiness.allReady,
+              success: stackReadiness.allReady,
+              branches: stackReadiness.branches,
+              stackSubmitSucceeded: true,
+              stackLinkAttempted: stackLinkRequired,
+              stackLinkRequired,
+              ...(stackLinkRequired
+                ? { stackLinkSucceeded: true, stackLinkOutput: stackLinkResult.output }
+                : { stackLinkSkipped: true, stackLinkSkipReason: "single-branch-stack" }),
+              remoteStackLinked: stackLinkRequired,
+              remoteStackRebuildAttempted: remoteStackRebuildOutputs !== undefined,
+              remoteStackRebuilt,
+              ...(remoteStackRebuildOutputs
+                ? { remoteStackState: "linked", ...remoteStackRebuildOutputs }
+                : {}),
+              workspaceRestored: true,
+              ...postSubmitStackProbeInfo,
+              ...stackOwnershipAfterSubmit,
+            },
+          );
         } else {
           // ── 2. Check if base branch is ahead — merge if so ─────────────
           // Keep the PR branch up to date with the base branch before pushing

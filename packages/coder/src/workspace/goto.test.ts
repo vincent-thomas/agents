@@ -167,13 +167,17 @@ test("goto rejects an unsaved session before creating a transition", async () =>
   assert.equal(created, false);
 });
 
-test("goto rejects an already existing workspace", async () => {
-  const existing = { ...workspace("feature/parser"), status: "completed" as const };
+test("goto rejects an already existing workspace for a non-active stack member", async () => {
+  const existing = {
+    ...workspace("feature/tip"),
+    status: "completed" as const,
+    stack: { baseBranch: "main", branches: ["feature/parser", "feature/tip"] },
+  };
   await assert.rejects(
     createGotoWorkspace({
       store: {} as WorkspaceStore,
       cwd: "/repo",
-      branch: existing.branch,
+      branch: "feature/parser",
       dependencies: {
         resolveRepository: repository,
         listWorkspaces: async () => [existing],

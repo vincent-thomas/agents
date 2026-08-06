@@ -9,6 +9,7 @@ import {
   removeWorkspaceWorktree,
   resolveRepository,
   updateWorkspace,
+  workspaceBranches,
   type AgentWorkspace,
   type WorkspaceStore,
 } from "./logic.ts";
@@ -104,6 +105,21 @@ async function localHead(worktree: string, signal?: AbortSignal): Promise<string
   return stdout.trim();
 }
 
+async function localBranchHead(cwd: string, branch: string, signal?: AbortSignal): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "git",
+    ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`],
+    {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      timeout: 10_000,
+      signal,
+    },
+  );
+  return stdout.trim();
+}
+
 function retained(
   workspace: AgentWorkspace,
   reason: string,
@@ -160,6 +176,8 @@ async function reconcileWorkspace(
     }
   }
 
+  const multiMemberStack = workspace.stack !== undefined && workspaceBranches(workspace).length > 1;
+
   try {
     await stat(workspace.worktree);
   } catch (error: unknown) {
@@ -167,14 +185,18 @@ async function reconcileWorkspace(
       const message = error instanceof Error ? error.message : String(error);
       return { retained: retained(workspace, `workspace is unavailable: ${message}`, true) };
     }
-    try {
-      return { removed: await finishCleanup(options, workspace) };
-    } catch (cleanupError: unknown) {
-      const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-      return {
-        retained: retained(workspace, `stale workspace cleanup failed: ${message}`, true),
-      };
+    // Legacy and one-member records retain their historical stale-worktree cleanup behavior.
+    if (!multiMemberStack) {
+      try {
+        return { removed: await finishCleanup(options, workspace) };
+      } catch (cleanupError: unknown) {
+        const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        return {
+          retained: retained(workspace, `stale workspace cleanup failed: ${message}`, true),
+        };
+      }
     }
+    return { retained: retained(workspace, "workspace is unavailable", true) };
   }
 
   let headSha: string;
@@ -185,26 +207,82 @@ async function reconcileWorkspace(
   }
 
   let pullRequest: MergedPullRequest | null;
-  try {
-    pullRequest = await (options.findMergedPullRequest ?? findMergedPullRequest)(
-      options.cwd,
-      workspace.branch,
-      headSha,
-      options.signal,
-    );
-  } catch {
-    return { retained: retained(workspace, "pull request status is unavailable") };
+  if (!multiMemberStack) {
+    try {
+      pullRequest = await (options.findMergedPullRequest ?? findMergedPullRequest)(
+        options.cwd,
+        workspace.branch,
+        headSha,
+        options.signal,
+      );
+    } catch {
+      return { retained: retained(workspace, "pull request status is unavailable") };
+    }
+    if (!pullRequest) return { retained: retained(workspace, "no merged pull request") };
+    if (pullRequest.headSha !== headSha) {
+      return {
+        retained: retained(
+          workspace,
+          "local HEAD differs from the merged pull request",
+          false,
+          pullRequest.number,
+        ),
+      };
+    }
+  } else {
+    const activeBranch = workspace.branch;
+    let activePullRequest: MergedPullRequest | null = null;
+    for (const branch of workspaceBranches(workspace)) {
+      let memberHead: string;
+      try {
+        memberHead =
+          branch === activeBranch
+            ? headSha
+            : await localBranchHead(options.cwd, branch, options.signal);
+      } catch {
+        return {
+          retained: retained(workspace, `stack member ${branch} is unavailable`),
+        };
+      }
+
+      let memberPullRequest: MergedPullRequest | null;
+      try {
+        memberPullRequest = await (options.findMergedPullRequest ?? findMergedPullRequest)(
+          options.cwd,
+          branch,
+          memberHead,
+          options.signal,
+        );
+      } catch {
+        return {
+          retained: retained(
+            workspace,
+            `pull request status is unavailable for stack member ${branch}`,
+          ),
+        };
+      }
+      if (!memberPullRequest) {
+        return {
+          retained: retained(workspace, `no merged pull request for stack member ${branch}`),
+        };
+      }
+      if (memberPullRequest.headSha !== memberHead) {
+        return {
+          retained: retained(
+            workspace,
+            `local HEAD differs from the merged pull request for stack member ${branch}`,
+            false,
+            branch === activeBranch ? memberPullRequest.number : undefined,
+          ),
+        };
+      }
+      if (branch === activeBranch) activePullRequest = memberPullRequest;
+    }
+    // Validation guarantees that the active branch is a member.
+    pullRequest = activePullRequest;
   }
-  if (!pullRequest) return { retained: retained(workspace, "no merged pull request") };
-  if (pullRequest.headSha !== headSha) {
-    return {
-      retained: retained(
-        workspace,
-        "local HEAD differs from the merged pull request",
-        false,
-        pullRequest.number,
-      ),
-    };
+  if (!pullRequest) {
+    return { retained: retained(workspace, "active workspace branch has no merged pull request") };
   }
 
   let completed: AgentWorkspace;
@@ -243,8 +321,8 @@ export async function removeWorkspaceByBranch(
   branch: string,
 ): Promise<WorkspaceReconciliationEntry | undefined> {
   const repository = await resolveRepository(options.cwd);
-  const workspace = (await listWorkspaces(options.store, repository.repository)).find(
-    (candidate) => candidate.branch === branch,
+  const workspace = (await listWorkspaces(options.store, repository.repository)).find((candidate) =>
+    workspaceBranches(candidate).includes(branch),
   );
   return workspace ? finishCleanup(options, workspace) : undefined;
 }

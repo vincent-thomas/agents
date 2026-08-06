@@ -45,21 +45,54 @@ test("loads definitions from an explicit list of Markdown paths", () => {
   const gitAdd = mergeConflicts.commandPolicy.find((entry) => entry.name === "git add")!;
   assert.ok("allowedFlags" in gitAdd);
   assert.deepEqual(gitAdd.allowedFlags, []);
+  assert.match(
+    mergeConflicts.systemPrompt,
+    /compact final response under exactly these headings: `Resolved`,\s+`Verification`, and `Blockers`/,
+  );
+  assert.match(mergeConflicts.systemPrompt, /semantic choice made for each conflict/);
 
   const review = definitions.find((definition) => definition.name === "review")!;
   assert.equal(review.thinking, "high");
   assert.match(review.description, /correctness, regressions, and missing tests/);
   assert.deepEqual(review.tools, ["read", "grep", "find", "ls", "bash"]);
-  assert.match(review.systemPrompt, /Return findings first, ordered by severity/);
+  assert.match(
+    review.systemPrompt,
+    /compact final response under exactly these headings:\s+`Findings` and\s+`Residual risk`/,
+  );
+  assert.match(review.systemPrompt, /severity, path and line/);
+  assert.match(review.systemPrompt, /concise actionable direction/);
 
   const rightHand = definitions.find((definition) => definition.name === "right_hand")!;
   assert.equal(rightHand.model, "openai-codex/gpt-5.6-luna");
   assert.equal(rightHand.thinking, "high");
-  assert.match(rightHand.description, /bounded implementation work that changes the workspace/);
+  assert.match(rightHand.description, /coherent bounded implementation outcomes/);
+  assert.match(
+    rightHand.description,
+    /scoped implementation analysis and local reversible decisions/,
+  );
+  assert.match(rightHand.description, /all global decisions, irreversible or high-risk decisions/);
   assert.doesNotMatch(rightHand.description, /general-purpose/i);
   assert.match(rightHand.description, /cannot commit or push/);
-  assert.match(rightHand.systemPrompt, /role is execution, not advisory\s+analysis/);
+  assert.match(
+    rightHand.systemPrompt,
+    /role is execution plus scoped\s+implementation analysis, not advisory-only work/,
+  );
   assert.match(rightHand.systemPrompt, /concrete workspace-changing\s+outcome/);
+  assert.match(
+    rightHand.systemPrompt,
+    /parent agent owns all global decisions, any irreversible or high-risk\s+decision/,
+  );
+  assert.match(
+    rightHand.systemPrompt,
+    /you own implementation\s+analysis and ordinary local, reversible decisions/,
+  );
+  assert.match(
+    rightHand.systemPrompt,
+    /Resolve ordinary local\s+ambiguity from repository evidence; do not bounce it to the parent/,
+  );
+  assert.match(rightHand.systemPrompt, /Use `scout` for broad codebase discovery/);
+  assert.match(rightHand.systemPrompt, /routine narrow work, inspect the relevant files directly/);
+  assert.match(rightHand.systemPrompt, /without duplicating discovery already delegated/);
   assert.match(
     rightHand.systemPrompt,
     /If asked only to inspect, propose, recommend, or otherwise advise without\s+making workspace changes/,
@@ -68,7 +101,11 @@ test("loads definitions from an explicit list of Markdown paths", () => {
     rightHand.systemPrompt,
     /concise blocker asking the parent to decide\s+and delegate an implementation task/,
   );
-  assert.match(rightHand.systemPrompt, /parent agent owns analysis, design, and decisions/);
+  assert.match(
+    rightHand.systemPrompt,
+    /compact final response under exactly these headings: `Behavior`,\s+`Files`, `Validation`, and `Blockers`/,
+  );
+  assert.match(rightHand.systemPrompt, /Do not narrate the process or include\s+raw Scout output/);
   assert.equal(rightHand.inheritTools, false);
   assert.equal(rightHand.availableToRoot, true);
   assert.deepEqual(rightHand.availableToSubagents, []);

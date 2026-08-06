@@ -17,13 +17,15 @@ test("normalizeRepositories trims and deduplicates configured URLs", () => {
   assert.deepEqual(
     normalizeRepositories([
       " git@example.com:a.git ",
+      "\n",
       "https://example.com/b",
+      " \t",
       "git@example.com:a.git",
     ]),
     ["git@example.com:a.git", "https://example.com/b"],
   );
   assert.throws(() => normalizeRepositories([]), /Configure createStandupExtension/);
-  assert.throws(() => normalizeRepositories([""]), /non-empty list/);
+  assert.throws(() => normalizeRepositories(["", " \n\t"]), /non-empty list/);
 });
 
 test("parseBranchLog parses the delimiter-safe git format", () => {

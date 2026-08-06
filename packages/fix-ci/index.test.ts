@@ -284,6 +284,44 @@ test("create_github_stack extends an existing stack with a materialized middle b
   }
 });
 
+test("create_github_stack rejects a stack probe that omits the owned branch", async () => {
+  const cwd = createRepository();
+  try {
+    writeFileSync(join(cwd, "file.txt"), "feature\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "feature"]);
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[1] === "init") throw new Error("current branch is already part of a stack");
+      assert.equal(args[1], "view");
+      return {
+        stdout: '{"trunk":"main","branches":[{"branch":"other"}]}',
+        stderr: "",
+      };
+    };
+    const tool = requireTool(registeredTools({ stackRunner }), "create_github_stack");
+    const result = await tool.execute(
+      "reject-mismatched-stack",
+      { branches: ["middle", "feature"], branch_points: ["main", "HEAD"] },
+      undefined,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.stackExtensionFailed, true, JSON.stringify(result.details));
+    assert.equal(result.details.stackProbeMismatch, true);
+    assert.equal(result.details.workspaceRestored, true);
+    assert.deepEqual(calls, ["stack init -- middle feature", "stack view --json"]);
+    assert.equal(
+      spawnSync("git", ["show-ref", "--verify", "--quiet", "refs/heads/middle"], { cwd }).status,
+      1,
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("create_github_stack recovers when local unstack removes state before failing", async () => {
   const cwd = createRepository();
   try {

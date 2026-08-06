@@ -278,6 +278,31 @@ export function createFixCiExtension(options: {
           const probe = await probeGhStack(cwd, signal, stackRunner);
           if (probe.status === "stacked") {
             const previousBranches = probe.branches;
+            const rollbackAndRestoreMismatch = async () => {
+              const rollbackOutput = await rollback();
+              const restoration = await restoreOwnedBranch(cwd, originalBranch);
+              return { rollbackOutput, restoration };
+            };
+            if (!previousBranches.includes(originalBranch)) {
+              const { rollbackOutput, restoration } = await rollbackAndRestoreMismatch();
+              return respond(
+                `GitHub stack inspection did not include the owned branch \`${originalBranch}\`, so the existing stack was left untouched.`,
+                {
+                  stackExtensionFailed: true,
+                  stackCreationFailed: true,
+                  stackProbeMismatch: true,
+                  previousStackRestored: true,
+                  workspaceRestored: restoration.restored,
+                  rollbackOutput,
+                  operationOutputs: { initialInit: init.output, stackProbe: probe.output },
+                  previousBranches,
+                  previousBase: probe.baseBranch,
+                  requestedBranches: branches,
+                  currentBranch: restoration.currentBranch,
+                  restoreOutput: restoration.restoreOutput,
+                },
+              );
+            }
             let requestedIndex = 0;
             const previousBranchesFit = previousBranches.every((branch) => {
               while (requestedIndex < branches.length && branches[requestedIndex] !== branch) {

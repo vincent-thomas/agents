@@ -252,7 +252,9 @@ test(
     const cwd = mkdtempSync(join(tmpdir(), "merge-conflicts-ordinary-test-"));
     const origin = mkdtempSync(join(tmpdir(), "merge-conflicts-ordinary-origin-"));
     const fakeBin = mkdtempSync(join(tmpdir(), "merge-conflicts-ordinary-gh-"));
+    const gitTrace = join(fakeBin, "git-trace.log");
     const originalPath = process.env.PATH;
+    const originalGitTrace = process.env.GIT_TRACE;
 
     try {
       git(cwd, ["init", "--initial-branch", "main"]);
@@ -412,6 +414,7 @@ exit 1
         );
       }
 
+      process.env.GIT_TRACE = gitTrace;
       const secondPush = await pushAndCheck.execute(
         "ordinary-second-push",
         authoredPullRequests,
@@ -422,10 +425,18 @@ exit 1
       const localHead = git(cwd, ["rev-parse", "HEAD"]).trim();
       assert.equal(git(origin, ["rev-parse", "refs/heads/feature"]).trim(), localHead);
       assert.equal(git(cwd, ["rev-list", "--merges", "--count", "HEAD"]).trim(), "0");
+      assert.equal(readFileSync(join(cwd, "conflict.txt"), "utf8"), "resolved feature and base\n");
+      assert.equal(
+        git(cwd, ["log", "-1", "--format=%s", "origin/main..HEAD"]).trim(),
+        "feature change",
+      );
+      assert.match(readFileSync(gitTrace, "utf8"), /git push --force-with-lease(?:\s|$)/);
       assert.equal(secondPush.details.allPassed, true, JSON.stringify(secondPush.details));
     } finally {
       if (originalPath === undefined) delete process.env.PATH;
       else process.env.PATH = originalPath;
+      if (originalGitTrace === undefined) delete process.env.GIT_TRACE;
+      else process.env.GIT_TRACE = originalGitTrace;
       rmSync(cwd, { recursive: true, force: true });
       rmSync(origin, { recursive: true, force: true });
       rmSync(fakeBin, { recursive: true, force: true });

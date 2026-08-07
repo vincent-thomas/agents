@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -236,6 +244,194 @@ test("keeps the merge-conflicts integration definition available", () => {
 test("keeps the merge-conflicts prompt available to integration tests", () => {
   assert.equal(typeof createMergeConflictsPrompt, "function");
 });
+
+test(
+  "resolves an ordinary PR base rebase conflict through push_and_check_ci",
+  { timeout: 20_000 },
+  async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "merge-conflicts-ordinary-test-"));
+    const origin = mkdtempSync(join(tmpdir(), "merge-conflicts-ordinary-origin-"));
+    const fakeBin = mkdtempSync(join(tmpdir(), "merge-conflicts-ordinary-gh-"));
+    const originalPath = process.env.PATH;
+
+    try {
+      git(cwd, ["init", "--initial-branch", "main"]);
+      git(cwd, ["config", "user.email", "test@example.com"]);
+      git(cwd, ["config", "user.name", "Test User"]);
+      writeFileSync(join(cwd, "conflict.txt"), "base\n");
+      git(cwd, ["add", "conflict.txt"]);
+      git(cwd, ["commit", "-m", "base"]);
+      git(cwd, ["switch", "-c", "feature"]);
+      writeFileSync(join(cwd, "conflict.txt"), "feature\n");
+      git(cwd, ["add", "conflict.txt"]);
+      git(cwd, ["commit", "-m", "feature change"]);
+      const featureTipBefore = git(cwd, ["rev-parse", "HEAD"]).trim();
+
+      git(origin, ["init", "--bare"]);
+      git(cwd, ["remote", "add", "origin", origin]);
+      git(cwd, ["push", "origin", "main", "feature"]);
+      git(cwd, ["switch", "main"]);
+      writeFileSync(join(cwd, "conflict.txt"), "updated base\n");
+      git(cwd, ["add", "conflict.txt"]);
+      git(cwd, ["commit", "-m", "advance base"]);
+      git(cwd, ["push", "origin", "main"]);
+      const advancedBaseSha = git(cwd, ["rev-parse", "HEAD"]).trim();
+      git(cwd, ["switch", "feature"]);
+
+      const fakeGh = join(fakeBin, "gh");
+      writeFileSync(
+        fakeGh,
+        `#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s\\n' main
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  case "$*" in
+    *"number,state"*) printf '%s\\n' 42 ;;
+    *"--json state"*) printf '%s\\n' OPEN ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "ready" ]; then exit 0; fi
+if [ "$1" = "api" ]; then
+  endpoint="$2"
+  if [ "$2" = "--paginate" ]; then endpoint="$3"; fi
+  case "$endpoint" in
+    *"git/ref/heads/main"*) printf '%s\\n' ${advancedBaseSha} ;;
+    *"check-runs"*) printf 'ci\\tcompleted\\tsuccess\\thttps://example.test/check\\n' ;;
+    *) : ;;
+  esac
+  exit 0
+fi
+exit 1
+`,
+      );
+      chmodSync(fakeGh, 0o755);
+      process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+
+      type PushAndCheckTool = {
+        execute(
+          toolCallId: string,
+          params: Record<string, unknown>,
+          signal: AbortSignal | undefined,
+          onUpdate: undefined,
+          context: { cwd: string },
+        ): Promise<{ details: Record<string, unknown> }>;
+      };
+      let pushAndCheck: PushAndCheckTool | undefined;
+      createFixCiExtension({
+        assertWorkspace: async (workspace) => {
+          assert.equal(git(workspace, ["branch", "--show-current"]).trim(), "feature");
+          assert.equal(git(workspace, ["status", "--porcelain"]).trim(), "");
+        },
+        stackRunner: async () => {
+          throw Object.assign(new Error('current branch "feature" is not part of a stack'), {
+            stdout: 'current branch "feature" is not part of a stack\n',
+            stderr: "",
+          });
+        },
+        stackBodyRunner: async (args) => {
+          if (args[1] === "view") {
+            return {
+              stdout: JSON.stringify({ number: 42, title: "Feature", body: "" }),
+              stderr: "",
+            };
+          }
+          if (args[1] === "edit") return { stdout: "", stderr: "" };
+          throw new Error(`unexpected PR body command: ${args.join(" ")}`);
+        },
+      })({
+        registerTool(tool: PushAndCheckTool) {
+          if (tool.name === "push_and_check_ci") pushAndCheck = tool;
+        },
+      } as never);
+      assert.ok(pushAndCheck, "push_and_check_ci was not registered");
+
+      const authoredPullRequests = {
+        pull_requests: [
+          {
+            branch: "feature",
+            title: "Resolve the feature conflict",
+            body: "## Context\n\nExercise ordinary base rebase recovery.\n\n## Verification\n\nCovered by this integration test.",
+          },
+        ],
+      };
+      const firstPush = await pushAndCheck.execute(
+        "ordinary-first-push",
+        authoredPullRequests,
+        undefined,
+        undefined,
+        { cwd },
+      );
+      assert.equal(firstPush.details.rebaseConflict, true, JSON.stringify(firstPush.details));
+      assert.deepEqual(firstPush.details.conflictPaths, ["conflict.txt"]);
+      assert.notEqual(git(cwd, ["ls-files", "-u"]).trim(), "");
+      assert.equal(
+        spawnSync("git", ["rev-parse", "--verify", "-q", "REBASE_HEAD"], { cwd }).status,
+        0,
+      );
+      assert.equal(git(origin, ["rev-parse", "refs/heads/feature"]).trim(), featureTipBefore);
+
+      const prompt = await createMergeConflictsPrompt()({ cwd, definition });
+      assert.match(prompt, /ordinary rebase|Conflicts were already present/i);
+      const workflow = createMergeConflictsWorkflow({
+        assertWorkspace: async (workspace) => {
+          assert.equal(git(workspace, ["branch", "--show-current"]).trim(), "feature");
+          assert.equal(git(workspace, ["status", "--porcelain"]).trim(), "");
+        },
+      });
+      const workflowResult = await workflow({
+        cwd,
+        definition,
+        prompt,
+        subagent: {
+          definition,
+          session: {
+            async prompt(currentPrompt: string) {
+              assert.match(currentPrompt, /conflict\.txt/);
+              writeFileSync(join(cwd, "conflict.txt"), "resolved feature and base\n");
+              git(cwd, ["add", "conflict.txt"]);
+            },
+            getLastAssistantText() {
+              return "Resolved the ordinary PR base conflict.";
+            },
+          } as never,
+          dispose() {},
+        },
+        onProgress() {},
+      });
+      assert.match(workflowResult, /Resolved the ordinary PR base conflict/);
+      assert.equal(git(cwd, ["ls-files", "-u"]).trim(), "");
+      for (const rebaseState of ["rebase-merge", "rebase-apply"]) {
+        assert.equal(
+          existsSync(join(cwd, git(cwd, ["rev-parse", "--git-path", rebaseState]).trim())),
+          false,
+          `${rebaseState} state should be gone after the workflow`,
+        );
+      }
+
+      const secondPush = await pushAndCheck.execute(
+        "ordinary-second-push",
+        authoredPullRequests,
+        undefined,
+        undefined,
+        { cwd },
+      );
+      const localHead = git(cwd, ["rev-parse", "HEAD"]).trim();
+      assert.equal(git(origin, ["rev-parse", "refs/heads/feature"]).trim(), localHead);
+      assert.equal(git(cwd, ["rev-list", "--merges", "--count", "HEAD"]).trim(), "0");
+      assert.equal(secondPush.details.allPassed, true, JSON.stringify(secondPush.details));
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(origin, { recursive: true, force: true });
+      rmSync(fakeBin, { recursive: true, force: true });
+    }
+  },
+);
 
 test("resolves cascading real GitHub stack rebase conflicts through push_and_check_ci", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "merge-conflicts-stack-test-"));

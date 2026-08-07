@@ -18,15 +18,22 @@ export const MAX_DIFF_CHUNK_CHARS = 120_000;
 export function normalizeRepositories(repositories: readonly string[]): string[] {
   if (
     !Array.isArray(repositories) ||
-    repositories.length === 0 ||
-    repositories.some((repository) => typeof repository !== "string" || repository.trim() === "")
+    repositories.some((repository) => typeof repository !== "string")
   ) {
     throw new Error(
       "Configure createStandupExtension with a non-empty list of repository URL strings",
     );
   }
 
-  return [...new Set(repositories.map((repository) => repository.trim()))];
+  const normalized = [
+    ...new Set(repositories.map((repository) => repository.trim()).filter(Boolean)),
+  ];
+  if (normalized.length === 0) {
+    throw new Error(
+      "Configure createStandupExtension with a non-empty list of repository URL strings",
+    );
+  }
+  return normalized;
 }
 
 export function parseBranchLog(output: string, branch: string): StandupCommit[] {

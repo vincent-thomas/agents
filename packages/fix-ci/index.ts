@@ -15,7 +15,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Array as TArray, Object as TObject, Optional, String as TString } from "typebox";
 import { currentBranch, isWorktreeDirty } from "./git-utils.ts";
-import { prepareBranchPoints } from "./branch-points.ts";
+import { cleanupBranchPoints, prepareBranchPoints } from "./branch-points.ts";
 import {
   gitPush,
   gitPushToOrigin,
@@ -33,8 +33,6 @@ import {
   pullRemoteChanges,
   isBaseBranchAhead,
   detectPrNumber,
-  generatePrBody,
-  generatePrTitle,
   createDraftPr,
   getPrState,
   markPrReady,
@@ -46,10 +44,16 @@ import {
 } from "./logic.ts";
 import {
   probeGhStack,
+  resolveGhStackTarget,
+  runGhStackCheckout,
   runGhStackInit,
+  runGhStackUnstack,
+  runGhStackUnstackLocal,
   runGhStackSubmit,
+  runGhStackLink,
   runGhStackSync,
   runGhStackCommand,
+  isMiddleInsertionRejectionOutput,
   restoreWorkspaceBranch,
   type GhStackCommandRunner,
   type WorkspaceBranchRestorer,
@@ -59,9 +63,40 @@ import {
   type StackReadinessResult,
   type StackReadinessRunner,
 } from "./stack-readiness.ts";
+import { inspectStackReport, inspectUnstackedStack } from "./stack-inspection.ts";
+import {
+  cleanupCheckout,
+  restoreBranchSignalFree,
+  verifyRefreshedStack,
+} from "./stack-checkout.ts";
 import { shellQuote } from "./shell-quote.ts";
+import {
+  createDescribedStackPullRequests,
+  ensureManagedPullRequestDescriptions,
+  getBranchSha,
+  newPullRequestBody,
+  type PullRequestDescription,
+} from "./pr-descriptions.ts";
+import type {
+  WorkspaceController,
+  WorkspaceControllerClaim,
+  WorkspaceControllerSnapshot,
+} from "./stack-workspace.ts";
+export type {
+  WorkspaceController,
+  WorkspaceControllerClaim,
+  WorkspaceControllerSnapshot,
+} from "./stack-workspace.ts";
 
 const MAX_CYCLES = 5;
+
+function isAlreadyStackedOutput(output: string): boolean {
+  return (
+    /current branch .*already (?:part of|in) (?:a )?stack/i.test(output) ||
+    /already (?:part of|in) (?:a )?stack/i.test(output) ||
+    /already belongs to (?:a )?stack/i.test(output)
+  );
+}
 
 /** Shapes a tool result: single text block plus the machine-readable `details`
  * every branch below returns alongside it. */
@@ -69,10 +104,17 @@ function respond(text: string, details: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text }], details };
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function createFixCiExtension(options: {
   assertWorkspace: (cwd: string) => Promise<void>;
   stackRunner?: GhStackCommandRunner;
+  /** Runner for read/update PR body commands; separate from stack mutations for tests. */
+  stackBodyRunner?: GhStackCommandRunner;
   restoreBranch?: WorkspaceBranchRestorer;
+  workspaceController?: WorkspaceController;
   stackReadinessRunner?: StackReadinessRunner;
 }) {
   return function (pi: ExtensionAPI) {
@@ -82,6 +124,7 @@ export function createFixCiExtension(options: {
     // remote tip back into the completed rebase.
     let rebasedBranchAfterBaseUpdate: string | undefined;
     const stackRunner = options.stackRunner ?? runGhStackCommand;
+    const stackBodyRunner = options.stackBodyRunner ?? runGhStackCommand;
     const restoreBranch = options.restoreBranch ?? restoreWorkspaceBranch;
     const stackReadinessRunner = options.stackReadinessRunner ?? checkAndReadyStack;
 
@@ -104,12 +147,128 @@ export function createFixCiExtension(options: {
       return { restored, currentBranch: current, workingTreeClean: clean, restoreOutput };
     };
 
+    /** Adopt a verified local stack into the host registry without changing the checkout. */
+    const adoptStackOwnership = async (
+      cwd: string,
+      branches: readonly string[],
+      baseBranch: string | null | undefined,
+      activeBranch: string | null | undefined,
+      signal: AbortSignal | undefined,
+    ): Promise<{ success: boolean; details: Record<string, unknown> }> => {
+      if (!options.workspaceController) {
+        return { success: true, details: { workspaceOwnership: "unavailable" } };
+      }
+
+      const normalizedBranches = [...branches];
+      const claim: WorkspaceControllerClaim = {
+        branches: normalizedBranches,
+        baseBranch: baseBranch?.trim() ?? "",
+        activeBranch: activeBranch?.trim() ?? "",
+      };
+      const failure = (stage: string, error?: unknown, extra: Record<string, unknown> = {}) => ({
+        success: false,
+        details: {
+          workspaceOwnership: "unavailable",
+          workspaceOwnershipFailed: true,
+          workspaceOwnershipFailure: {
+            stage,
+            ...(error === undefined ? {} : { error: errorMessage(error) }),
+            claim,
+            ...extra,
+          },
+        },
+      });
+
+      if (
+        claim.branches.length === 0 ||
+        !claim.baseBranch ||
+        !claim.activeBranch ||
+        !claim.branches.includes(claim.activeBranch)
+      ) {
+        return failure("invalid-claim", undefined, { reason: "exact-stack-metadata-required" });
+      }
+
+      let prior: WorkspaceControllerSnapshot;
+      try {
+        const snapshot = await options.workspaceController.snapshot(cwd);
+        prior = { ...snapshot, branches: [...snapshot.branches] };
+      } catch (error: unknown) {
+        return failure("snapshot", error);
+      }
+
+      const unchanged =
+        prior.activeBranch === claim.activeBranch &&
+        prior.baseBranch === claim.baseBranch &&
+        JSON.stringify(prior.branches) === JSON.stringify(claim.branches);
+
+      try {
+        await options.workspaceController.validate(cwd, claim);
+      } catch (error: unknown) {
+        return failure("validate", error, { priorSnapshot: prior });
+      }
+
+      if (signal?.aborted) {
+        return failure("cancelled", undefined, { priorSnapshot: prior, cancelled: true });
+      }
+
+      const rollback = async (stage: string, error: unknown) => {
+        try {
+          await options.workspaceController!.restore(cwd, prior);
+          const restored = await options.workspaceController!.snapshot(cwd);
+          const verified =
+            restored.activeBranch === prior.activeBranch &&
+            restored.baseBranch === prior.baseBranch &&
+            JSON.stringify(restored.branches) === JSON.stringify(prior.branches);
+          return failure(stage, error, {
+            priorSnapshot: prior,
+            cancelled: signal?.aborted === true,
+            rollback: {
+              attempted: true,
+              verified,
+              snapshot: restored,
+              ...(verified ? {} : { expected: prior }),
+            },
+          });
+        } catch (rollbackError: unknown) {
+          return failure(stage, error, {
+            priorSnapshot: prior,
+            cancelled: signal?.aborted === true,
+            rollback: {
+              attempted: true,
+              verified: false,
+              error: errorMessage(rollbackError),
+            },
+          });
+        }
+      };
+
+      try {
+        await options.workspaceController.claim(cwd, claim);
+      } catch (error: unknown) {
+        return rollback("claim", error);
+      }
+
+      try {
+        await options.assertWorkspace(cwd);
+      } catch (error: unknown) {
+        return rollback("assertWorkspace", error);
+      }
+
+      return {
+        success: true,
+        details: {
+          workspaceOwnership: unchanged ? "unchanged" : "adopted",
+          workspaceOwnershipClaim: claim,
+        },
+      };
+    };
+
     // ── Tool: create_github_stack ────────────────────────────────────────────
     pi.registerTool({
       name: "create_github_stack",
-      label: "Create GitHub Stack",
+      label: "Create or Extend GitHub Stack",
       description:
-        "Initialize a GitHub CLI stack for the supplied branches. The working tree " +
+        "Create or extend a GitHub CLI stack for the supplied branches. The working tree " +
         "must be clean and the workspace is restored to its original branch before " +
         "returning. Optionally provide `branch_points`, one commit-ish per branch " +
         "ordered base-to-tip; these materialize missing local branch refs without " +
@@ -177,6 +336,7 @@ export function createFixCiExtension(options: {
         }
         const providedBranchPoints = branchPointsSupplied ? (branchPoints ?? []) : [];
         let materializedBranches: string[] = [];
+        let materializedCommits: string[] = [];
 
         if (await isWorktreeDirty(cwd, signal)) {
           return respond(
@@ -215,6 +375,7 @@ export function createFixCiExtension(options: {
             signal,
           );
           materializedBranches = preparation.createdBranches;
+          materializedCommits = preparation.commits ?? [];
           if (!preparation.success) {
             return respond(
               "GitHub stack preparation failed, so stack initialization was not run:\n\n" +
@@ -243,12 +404,539 @@ export function createFixCiExtension(options: {
 
         onUpdate?.({ content: [{ type: "text", text: "Initializing GitHub stack…" }] });
         const init = await runGhStackInit(cwd, branches, base, signal, stackRunner);
+        const rollback = async () => {
+          if (!branchPointsSupplied || materializedBranches.length === 0) return "";
+
+          // Git cannot cleanly delete the ref currently checked out. A stack
+          // command can leave the checkout on a newly materialized branch, so
+          // move back without asserting the workspace before deleting refs.
+          const current = await currentBranch(cwd, undefined);
+          let checkoutOutput = "";
+          if (current && materializedBranches.includes(current) && current !== originalBranch) {
+            const checkout = await restoreBranch(cwd, originalBranch, undefined);
+            if (!checkout.success) checkoutOutput = checkout.output;
+          }
+          const rollbackOutput = await cleanupBranchPoints(
+            cwd,
+            branches,
+            materializedCommits,
+            materializedBranches,
+          );
+          return [checkoutOutput, rollbackOutput].filter(Boolean).join("\n");
+        };
+
+        // `gh stack init` refuses to operate on a branch already in a stack.
+        // Only an explicit membership error followed by a successful probe is
+        // treated as an extension; all other failures use the ordinary path.
+        if (!init.success && isAlreadyStackedOutput(init.output)) {
+          const probe = await probeGhStack(cwd, signal, stackRunner);
+          if (probe.status === "stacked") {
+            const previousBranches = probe.branches;
+            const rollbackAndRestoreMismatch = async () => {
+              const rollbackOutput = await rollback();
+              const restoration = await restoreOwnedBranch(cwd, originalBranch);
+              return { rollbackOutput, restoration };
+            };
+            if (!previousBranches.includes(originalBranch)) {
+              const { rollbackOutput, restoration } = await rollbackAndRestoreMismatch();
+              return respond(
+                `GitHub stack inspection did not include the owned branch \`${originalBranch}\`, so the existing stack was left untouched.`,
+                {
+                  stackExtensionFailed: true,
+                  stackCreationFailed: true,
+                  stackProbeMismatch: true,
+                  previousStackRestored: true,
+                  workspaceRestored: restoration.restored,
+                  rollbackOutput,
+                  operationOutputs: { initialInit: init.output, stackProbe: probe.output },
+                  previousBranches,
+                  previousBase: probe.baseBranch,
+                  requestedBranches: branches,
+                  currentBranch: restoration.currentBranch,
+                  restoreOutput: restoration.restoreOutput,
+                },
+              );
+            }
+            let requestedIndex = 0;
+            const previousBranchesFit = previousBranches.every((branch) => {
+              while (requestedIndex < branches.length && branches[requestedIndex] !== branch) {
+                requestedIndex++;
+              }
+              if (requestedIndex === branches.length) return false;
+              requestedIndex++;
+              return true;
+            });
+            const restoreAndRollback = async () => {
+              // Remove refs created by this invocation before asserting the
+              // workspace. Ref cleanup must happen even when restoration or
+              // the workspace assertion fails.
+              const rollbackOutput = await rollback();
+              const restoration = await restoreOwnedBranch(cwd, originalBranch);
+              return { restoration, rollbackOutput };
+            };
+            const previousBase = probe.baseBranch;
+            const replacementBase = previousBase ?? undefined;
+            const recoverPreviousStack = async () => {
+              // Recovery deliberately ignores the caller's signal. A failed
+              // unstack may already have removed local state, so always run
+              // cleanup, re-init, restore the owned checkout, and then run an
+              // independent verification probe.
+              const cleanupUnstack = await runGhStackUnstackLocal(cwd, undefined, stackRunner);
+              const previousInit = await runGhStackInit(
+                cwd,
+                previousBranches,
+                replacementBase,
+                undefined,
+                stackRunner,
+              );
+              const checkoutRestoration = await restoreBranch(cwd, originalBranch, undefined);
+              const verification = await probeGhStack(cwd, undefined, stackRunner);
+              const branchesMatch =
+                verification.status === "stacked" &&
+                verification.branches.length === previousBranches.length &&
+                verification.branches.every((branch, index) => branch === previousBranches[index]);
+              const baseMatches = previousBase !== null && verification.baseBranch === previousBase;
+              return {
+                previousStackRestored:
+                  previousInit.success &&
+                  checkoutRestoration.success &&
+                  branchesMatch &&
+                  baseMatches,
+                previousInitSuccess: previousInit.success,
+                checkoutRestored: checkoutRestoration.success,
+                checkoutRestoreOutput: checkoutRestoration.output,
+                cleanupOutput: cleanupUnstack.output,
+                previousInitOutput: previousInit.output,
+                verificationOutput: verification.output,
+                verificationStatus: verification.status,
+                verificationBranches: verification.branches,
+                verificationBase: verification.baseBranch,
+                branchesMatch,
+                baseMatches,
+              };
+            };
+            const operationOutputs = { initialInit: init.output, stackProbe: probe.output };
+
+            const requestedBaseDiffers =
+              base !== undefined && previousBase !== null && base !== previousBase;
+            if (requestedBaseDiffers) {
+              const { restoration, rollbackOutput } = await restoreAndRollback();
+              return respond(
+                `The existing GitHub stack has base \`${previousBase}\`, but the requested base is \`${base}\`. The existing stack was left in place.`,
+                {
+                  stackExtensionFailed: true,
+                  stackCreationFailed: true,
+                  previousStackRestored: true,
+                  workspaceRestored: restoration.restored,
+                  rollbackOutput,
+                  operationOutputs,
+                  previousBranches,
+                  previousBase,
+                  requestedBranches: branches,
+                  requestedBase: base,
+                  currentBranch: restoration.currentBranch,
+                  restoreOutput: restoration.restoreOutput,
+                },
+              );
+            }
+
+            if (!previousBranchesFit) {
+              const { restoration, rollbackOutput } = await restoreAndRollback();
+              return respond(
+                `Cannot extend the existing GitHub stack without changing its order. Existing branches are ${previousBranches.map((branch) => `\`${branch}\``).join(", ")}; requested branches must contain them in the same order. The existing stack was left in place.`,
+                {
+                  stackExtensionFailed: true,
+                  stackCreationFailed: true,
+                  previousStackRestored: true,
+                  workspaceRestored: restoration.restored,
+                  rollbackOutput,
+                  operationOutputs,
+                  previousBranches,
+                  previousBase,
+                  requestedBranches: branches,
+                  currentBranch: restoration.currentBranch,
+                  restoreOutput: restoration.restoreOutput,
+                },
+              );
+            }
+
+            const sameBranches =
+              previousBranches.length === branches.length &&
+              previousBranches.every((branch, index) => branch === branches[index]);
+            if (previousBase === null && (!sameBranches || base !== undefined)) {
+              const { restoration, rollbackOutput } = await restoreAndRollback();
+              return respond(
+                "The existing GitHub stack did not identify its base branch, so it cannot be extended safely. An explicit base cannot substitute for the unknown existing base; the existing stack was left in place.",
+                {
+                  stackExtensionFailed: true,
+                  stackCreationFailed: true,
+                  previousStackRestored: true,
+                  existingBaseUnknown: true,
+                  workspaceRestored: restoration.restored,
+                  rollbackOutput,
+                  operationOutputs,
+                  previousBranches,
+                  previousBase,
+                  requestedBranches: branches,
+                  ...(base !== undefined ? { requestedBase: base } : {}),
+                  currentBranch: restoration.currentBranch,
+                  restoreOutput: restoration.restoreOutput,
+                },
+              );
+            }
+            if (sameBranches) {
+              const restoration = await restoreOwnedBranch(cwd, originalBranch);
+              if (!restoration.restored) {
+                const rollbackOutput = await rollback();
+                return respond(
+                  "The existing GitHub stack was found, but the owned workspace branch could not be restored safely. Stop and inspect the workspace manually.",
+                  {
+                    stackExtensionFailed: true,
+                    stackCreationFailed: true,
+                    previousStackRestored: true,
+                    workspaceRestored: false,
+                    rollbackOutput,
+                    operationOutputs,
+                    previousBranches,
+                    previousBase,
+                    requestedBranches: branches,
+                    currentBranch: restoration.currentBranch,
+                    restoreOutput: restoration.restoreOutput,
+                  },
+                );
+              }
+              let adoptionBase = replacementBase ?? null;
+              let adoptionProbeOutput: string | undefined;
+              if (options.workspaceController && !adoptionBase) {
+                // The first view may be an older CLI shape without a base. A
+                // signal-free refresh is required before persisting ownership.
+                const adoptionProbe = await probeGhStack(cwd, undefined, stackRunner);
+                adoptionProbeOutput = adoptionProbe.output;
+                const exact =
+                  adoptionProbe.status === "stacked" &&
+                  adoptionProbe.branches.length === branches.length &&
+                  adoptionProbe.branches.every((branch, index) => branch === branches[index]) &&
+                  adoptionProbe.branches.includes(originalBranch) &&
+                  (!adoptionProbe.view ||
+                    (adoptionProbe.view.currentBranch === originalBranch &&
+                      adoptionProbe.view.branches.filter((branch) => branch.isCurrent).length ===
+                        1 &&
+                      adoptionProbe.view.branches.some(
+                        (branch) => branch.isCurrent && branch.name === originalBranch,
+                      ))) &&
+                  Boolean(adoptionProbe.baseBranch?.trim());
+                if (!exact) {
+                  const rollbackOutput = await rollback();
+                  return respond(
+                    "The local GitHub stack exists, but its base could not be verified for workspace ownership adoption. The existing stack was left in place.",
+                    {
+                      stackExtensionFailed: true,
+                      stackCreationFailed: true,
+                      workspaceOwnershipFailed: true,
+                      workspaceOwnership: "unavailable",
+                      workspaceOwnershipFailure: {
+                        stage: "probe",
+                        reason: "exact-stack-metadata-required",
+                        probeOutput: adoptionProbe.output,
+                        branches: adoptionProbe.branches,
+                        baseBranch: adoptionProbe.baseBranch,
+                      },
+                      previousStackRestored: true,
+                      workspaceRestored: true,
+                      rollbackOutput,
+                      previousBranches,
+                      previousBase,
+                      requestedBranches: branches,
+                      currentBranch: originalBranch,
+                      ...(branchPointsSupplied
+                        ? { branchPoints: providedBranchPoints, materializedBranches }
+                        : {}),
+                    },
+                  );
+                }
+                adoptionBase = adoptionProbe.baseBranch!.trim();
+              }
+              const ownership = await adoptStackOwnership(
+                cwd,
+                branches,
+                adoptionBase,
+                originalBranch,
+                signal,
+              );
+              if (!ownership.success) {
+                const rollbackOutput = await rollback();
+                return respond(
+                  "The local GitHub stack exists, but workspace ownership adoption failed. The stack was not reported as created; fix the workspace ownership issue and try again.",
+                  {
+                    stackExtensionFailed: true,
+                    stackCreationFailed: true,
+                    previousStackRestored: true,
+                    workspaceRestored: true,
+                    rollbackOutput,
+                    previousBranches,
+                    previousBase,
+                    requestedBranches: branches,
+                    branches,
+                    base: adoptionBase,
+                    adoptionProbeOutput,
+                    ...ownership.details,
+                    ...(branchPointsSupplied
+                      ? {
+                          branchPoints: providedBranchPoints,
+                          materializedBranches,
+                          resolvedCommits: materializedCommits,
+                        }
+                      : {}),
+                  },
+                );
+              }
+              return respond(
+                `GitHub stack already exists for ${branches.map((branch) => `\`${branch}\``).join(", ")}. The workspace was restored. Call \`push_and_check_ci\` to submit and check CI.`,
+                {
+                  stackCreated: true,
+                  stackExtended: true,
+                  previousStackRestored: true,
+                  workspaceRestored: true,
+                  previousBranches,
+                  previousBase,
+                  requestedBranches: branches,
+                  branches,
+                  base: adoptionBase,
+                  adoptionProbeOutput,
+                  ...ownership.details,
+                  ...(branchPointsSupplied
+                    ? {
+                        branchPoints: providedBranchPoints,
+                        materializedBranches,
+                        resolvedCommits: materializedCommits,
+                      }
+                    : {}),
+                },
+              );
+            }
+
+            onUpdate?.({
+              content: [{ type: "text", text: "Replacing the existing GitHub stack…" }],
+            });
+            const unstack = await runGhStackUnstackLocal(cwd, signal, stackRunner);
+            if (!unstack.success) {
+              const recovery = await recoverPreviousStack();
+              const { restoration, rollbackOutput } = await restoreAndRollback();
+              return respond(
+                `The existing GitHub stack could not be unstacked locally. ${recovery.previousStackRestored ? "The previous stack was verified and restored." : "The previous stack could not be verified as restored; stop and inspect the workspace manually."} The workspace was restored as far as safely possible.\n\nUnstack output:\n\`\`\`\n${unstack.output.trim()}\n\`\`\``,
+                {
+                  stackExtensionFailed: true,
+                  stackCreationFailed: true,
+                  previousStackRestored: recovery.previousStackRestored,
+                  previousStackCheckoutRestored: recovery.checkoutRestored,
+                  previousStackBranchesMatch: recovery.branchesMatch,
+                  previousStackBaseMatch: recovery.baseMatches,
+                  previousStackInitSuccess: recovery.previousInitSuccess,
+                  previousInitSuccess: recovery.previousInitSuccess,
+                  workspaceRestored: restoration.restored,
+                  rollbackOutput,
+                  operationOutputs: {
+                    ...operationOutputs,
+                    unstack: unstack.output,
+                    cleanupUnstack: recovery.cleanupOutput,
+                    previousStackInit: recovery.previousInitOutput,
+                    previousStackInitSuccess: recovery.previousInitSuccess,
+                    previousInitSuccess: recovery.previousInitSuccess,
+                    previousStackRestore: recovery.checkoutRestoreOutput,
+                    previousStackRestoreSuccess: recovery.checkoutRestored,
+                    previousStackProbe: recovery.verificationOutput,
+                  },
+                  previousBranches,
+                  previousBase,
+                  requestedBranches: branches,
+                  currentBranch: restoration.currentBranch,
+                  restoreOutput: restoration.restoreOutput,
+                },
+              );
+            }
+
+            const replacement = await runGhStackInit(
+              cwd,
+              branches,
+              replacementBase,
+              signal,
+              stackRunner,
+            );
+            if (!replacement.success) {
+              const recovery = await recoverPreviousStack();
+              const { restoration, rollbackOutput } = await restoreAndRollback();
+              return respond(
+                `GitHub stack extension failed. ${recovery.previousStackRestored ? "The previous stack was restored." : "The previous stack could not be restored; stop and inspect the workspace manually."} ${restoration.restored ? "The workspace was restored." : "The workspace could not be restored; stop and inspect it manually."}`,
+                {
+                  stackExtensionFailed: true,
+                  stackCreationFailed: true,
+                  previousStackRestored: recovery.previousStackRestored,
+                  previousStackCheckoutRestored: recovery.checkoutRestored,
+                  previousStackBranchesMatch: recovery.branchesMatch,
+                  previousStackBaseMatch: recovery.baseMatches,
+                  previousStackInitSuccess: recovery.previousInitSuccess,
+                  previousInitSuccess: recovery.previousInitSuccess,
+                  workspaceRestored: restoration.restored,
+                  rollbackOutput,
+                  operationOutputs: {
+                    ...operationOutputs,
+                    unstack: unstack.output,
+                    replacementInit: replacement.output,
+                    cleanupUnstack: recovery.cleanupOutput,
+                    previousStackInit: recovery.previousInitOutput,
+                    previousStackInitSuccess: recovery.previousInitSuccess,
+                    previousInitSuccess: recovery.previousInitSuccess,
+                    previousStackRestore: recovery.checkoutRestoreOutput,
+                    previousStackRestoreSuccess: recovery.checkoutRestored,
+                    previousStackProbe: recovery.verificationOutput,
+                  },
+                  previousBranches,
+                  previousBase,
+                  requestedBranches: branches,
+                  currentBranch: restoration.currentBranch,
+                  restoreOutput: restoration.restoreOutput,
+                },
+              );
+            }
+
+            const replacementRestoration = await restoreOwnedBranch(cwd, originalBranch);
+            const replacementProbe = await probeGhStack(cwd, undefined, stackRunner);
+            const replacementBranchesMatch =
+              replacementProbe.status === "stacked" &&
+              replacementProbe.branches.length === branches.length &&
+              replacementProbe.branches.every((branch, index) => branch === branches[index]);
+            const replacementBaseMatch =
+              replacementBase !== undefined && replacementProbe.baseBranch === replacementBase;
+            const replacementVerified = replacementBranchesMatch && replacementBaseMatch;
+            const replacementOutputs = {
+              ...operationOutputs,
+              unstack: unstack.output,
+              replacementInit: replacement.output,
+              replacementCheckout: replacementRestoration.restoreOutput,
+              replacementStackProbe: replacementProbe.output,
+            };
+
+            if (!replacementRestoration.restored || !replacementVerified) {
+              const recovery = await recoverPreviousStack();
+              const { restoration, rollbackOutput } = await restoreAndRollback();
+              return respond(
+                `GitHub stack extension could not be verified after replacement initialization. ${recovery.previousStackRestored ? "The previous stack was restored." : "The previous stack could not be restored; stop and inspect the workspace manually."} ${restoration.restored ? "The workspace was restored." : "The workspace could not be restored; stop and inspect it manually."}`,
+                {
+                  stackExtensionFailed: true,
+                  stackCreationFailed: true,
+                  previousStackRestored: recovery.previousStackRestored,
+                  previousStackCheckoutRestored: recovery.checkoutRestored,
+                  previousStackBranchesMatch: recovery.branchesMatch,
+                  previousStackBaseMatch: recovery.baseMatches,
+                  previousStackInitSuccess: recovery.previousInitSuccess,
+                  previousInitSuccess: recovery.previousInitSuccess,
+                  workspaceRestored: restoration.restored,
+                  rollbackOutput,
+                  operationOutputs: {
+                    ...replacementOutputs,
+                    cleanupUnstack: recovery.cleanupOutput,
+                    previousStackInit: recovery.previousInitOutput,
+                    previousStackInitSuccess: recovery.previousInitSuccess,
+                    previousInitSuccess: recovery.previousInitSuccess,
+                    previousStackRestore: recovery.checkoutRestoreOutput,
+                    previousStackRestoreSuccess: recovery.checkoutRestored,
+                    previousStackProbe: recovery.verificationOutput,
+                  },
+                  replacementVerified,
+                  replacementCheckoutRestored: replacementRestoration.restored,
+                  replacementBranchesMatch,
+                  replacementBaseMatch,
+                  replacementProbeStatus: replacementProbe.status,
+                  replacementBranches: replacementProbe.branches,
+                  replacementBase: replacementProbe.baseBranch,
+                  previousBranches,
+                  previousBase,
+                  requestedBranches: branches,
+                  currentBranch: restoration.currentBranch,
+                  restoreOutput: restoration.restoreOutput,
+                },
+              );
+            }
+
+            const ownership = await adoptStackOwnership(
+              cwd,
+              branches,
+              replacementBase,
+              originalBranch,
+              signal,
+            );
+            if (!ownership.success) {
+              return respond(
+                "The local GitHub stack exists, but workspace ownership adoption failed. The stack and its branch refs were preserved for inspection; fix the workspace ownership issue and try again.",
+                {
+                  stackExtensionFailed: true,
+                  stackCreationFailed: true,
+                  workspaceRestored: true,
+                  replacementVerified: true,
+                  replacementBranchesMatch: true,
+                  replacementBaseMatch: true,
+                  replacementStackProbe: replacementProbe.output,
+                  previousBranches,
+                  previousBase,
+                  requestedBranches: branches,
+                  branches,
+                  base: replacementBase,
+                  ...ownership.details,
+                  ...(branchPointsSupplied
+                    ? {
+                        branchPoints: providedBranchPoints,
+                        materializedBranches,
+                        resolvedCommits: materializedCommits,
+                      }
+                    : {}),
+                },
+              );
+            }
+            return respond(
+              `GitHub stack extended from ${previousBranches.map((branch) => `\`${branch}\``).join(", ")} to ${branches.map((branch) => `\`${branch}\``).join(", ")}${replacementBase ? ` on base \`${replacementBase}\`` : ""}.` +
+                (branchPointsSupplied
+                  ? ` Prepared ${providedBranchPoints.length} branch point${providedBranchPoints.length === 1 ? "" : "s"} without switching checkout.`
+                  : "") +
+                " The workspace was restored. Call `push_and_check_ci` to submit and check CI.",
+              {
+                stackCreated: true,
+                stackExtended: true,
+                workspaceRestored: true,
+                replacementVerified: true,
+                replacementBranchesMatch: true,
+                replacementBaseMatch: true,
+                replacementStackProbe: replacementProbe.output,
+                previousBranches,
+                previousBase,
+                requestedBranches: branches,
+                branches,
+                base: replacementBase,
+                ...ownership.details,
+                ...(branchPointsSupplied
+                  ? {
+                      branchPoints: providedBranchPoints,
+                      materializedBranches,
+                      resolvedCommits: materializedCommits,
+                    }
+                  : {}),
+              },
+            );
+          }
+        }
+
+        // A failed ordinary init may still have materialized branch refs before
+        // returning (including after a cancellation). Remove them before any
+        // restoration or workspace assertion.
+        const rollbackOutput = init.success ? "" : await rollback();
         const restoration = await restoreOwnedBranch(cwd, originalBranch);
 
         if (!restoration.restored) {
           return respond(
             `GitHub stack initialization completed${init.success ? "" : " with an error"}, but the workspace was not restored to its original state. ` +
               `It started on \`${originalBranch}\` and is now on \`${restoration.currentBranch ?? "no branch"}\`${restoration.workingTreeClean ? "" : " with uncommitted changes"}. ` +
+              (!init.success
+                ? `Any local branch refs created during this invocation were rolled back.${rollbackOutput ? ` Rollback output:\n\`\`\`\n${rollbackOutput.trim()}\n\`\`\`` : ""} `
+                : "") +
               "Stop and inspect the workspace manually.",
             {
               stackCreationFailed: !init.success,
@@ -257,6 +945,7 @@ export function createFixCiExtension(options: {
               currentBranch: restoration.currentBranch,
               workingTreeClean: restoration.workingTreeClean,
               output: init.output,
+              rollbackOutput,
               restoreOutput: restoration.restoreOutput,
             },
           );
@@ -264,26 +953,402 @@ export function createFixCiExtension(options: {
 
         if (!init.success) {
           return respond(
-            `GitHub stack initialization failed:\n\n\`\`\`\n${init.output.trim()}\n\`\`\`\n\nFix the error and try again.`,
-            { stackCreationFailed: true, workspaceRestored: true, output: init.output },
+            `GitHub stack initialization failed:\n\n\`\`\`\n${init.output.trim()}\n\`\`\`\n\nAny local branch refs created during this invocation were rolled back.${rollbackOutput ? `\n\nRollback output:\n\`\`\`\n${rollbackOutput.trim()}\n\`\`\`` : ""}\n\nFix the error and try again.`,
+            {
+              stackCreationFailed: true,
+              workspaceRestored: true,
+              output: init.output,
+              rollbackOutput,
+            },
           );
         }
 
+        let adoptionBase = base ?? null;
+        let adoptionProbeOutput: string | undefined;
+        if (options.workspaceController && !adoptionBase) {
+          // `gh stack init` can succeed while the older view format omits the
+          // base. Do not persist an ownership record until a fresh exact view
+          // supplies both the requested members and a base.
+          const adoptionProbe = await probeGhStack(cwd, undefined, stackRunner);
+          adoptionProbeOutput = adoptionProbe.output;
+          const exact =
+            adoptionProbe.status === "stacked" &&
+            adoptionProbe.branches.length === branches.length &&
+            adoptionProbe.branches.every((branch, index) => branch === branches[index]) &&
+            adoptionProbe.branches.includes(originalBranch) &&
+            (!adoptionProbe.view ||
+              (adoptionProbe.view.currentBranch === originalBranch &&
+                adoptionProbe.view.branches.filter((branch) => branch.isCurrent).length === 1 &&
+                adoptionProbe.view.branches.some(
+                  (branch) => branch.isCurrent && branch.name === originalBranch,
+                ))) &&
+            Boolean(adoptionProbe.baseBranch?.trim());
+          if (!exact) {
+            return respond(
+              "The local GitHub stack exists, but its base could not be verified for workspace ownership adoption. The stack and its branch refs were preserved for inspection.",
+              {
+                stackCreationFailed: true,
+                workspaceRestored: true,
+                workspaceOwnershipFailed: true,
+                workspaceOwnership: "unavailable",
+                workspaceOwnershipFailure: {
+                  stage: "probe",
+                  reason: "exact-stack-metadata-required",
+                  probeOutput: adoptionProbe.output,
+                  branches: adoptionProbe.branches,
+                  baseBranch: adoptionProbe.baseBranch,
+                },
+                branches,
+                base: null,
+                adoptionProbeOutput,
+              },
+            );
+          }
+          adoptionBase = adoptionProbe.baseBranch!.trim();
+        }
+        const ownership = await adoptStackOwnership(
+          cwd,
+          branches,
+          adoptionBase,
+          originalBranch,
+          signal,
+        );
+        if (!ownership.success) {
+          return respond(
+            "The local GitHub stack exists, but workspace ownership adoption failed. The stack and its branch refs were preserved for inspection; fix the workspace ownership issue and try again.",
+            {
+              stackCreationFailed: true,
+              workspaceRestored: true,
+              branches,
+              base: adoptionBase,
+              adoptionProbeOutput,
+              ...ownership.details,
+              ...(branchPointsSupplied
+                ? { branchPoints: providedBranchPoints, materializedBranches }
+                : {}),
+            },
+          );
+        }
         const materialized = branchPointsSupplied
           ? ` Prepared ${providedBranchPoints.length} branch point${providedBranchPoints.length === 1 ? "" : "s"} without switching checkout.`
           : "";
         return respond(
-          `GitHub stack created for ${branches.map((branch) => `\`${branch}\``).join(", ")}${base ? ` on base \`${base}\`` : ""}.` +
+          `GitHub stack created for ${branches.map((branch) => `\`${branch}\``).join(", ")}${adoptionBase ? ` on base \`${adoptionBase}\`` : ""}.` +
             materialized +
             " The workspace was restored. Call `push_and_check_ci` to submit and check CI.",
           {
             stackCreated: true,
             workspaceRestored: true,
             branches,
-            base: base ?? null,
+            base: adoptionBase,
+            adoptionProbeOutput,
+            ...ownership.details,
             ...(branchPointsSupplied
               ? { branchPoints: providedBranchPoints, materializedBranches }
               : {}),
+          },
+        );
+      },
+    });
+
+    // ── Tool: inspect_stack ─────────────────────────────────────────────────
+    pi.registerTool({
+      name: "inspect_stack",
+      label: "Inspect GitHub Stack",
+      description:
+        "Semantic read-only inspection of the local GitHub stack, authoritative remote stack membership, " +
+        "and host workspace ownership. It does not switch branches, push, or mutate remote membership. " +
+        "Reports which descendants a commit on the active branch will restack.",
+      parameters: TObject({}),
+
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const cwd = ctx.cwd;
+        await options.assertWorkspace(cwd);
+        const probe = await probeGhStack(cwd, signal, stackRunner);
+        if (probe.status === "unstacked") {
+          const remoteFallback = await inspectUnstackedStack(
+            cwd,
+            signal,
+            stackRunner,
+            options.workspaceController,
+          );
+          if (remoteFallback.status === "found") {
+            return respond(remoteFallback.report.text, remoteFallback.report.details);
+          }
+          if (remoteFallback.status === "unavailable") {
+            return respond(
+              "The local GitHub stack metadata says unstacked, and authoritative remote stack membership could not be determined. Inspection did not switch branches, push, or mutate remote membership.",
+              {
+                status: "partial",
+                local: { status: "unstacked", output: probe.output },
+                remote: { status: "unavailable", output: remoteFallback.output },
+              },
+            );
+          }
+          return respond(
+            "The current branch is not part of a GitHub stack. Inspection did not switch branches, push, or mutate remote membership.",
+            {
+              status: "unstacked",
+              local: { status: "unstacked", output: probe.output },
+              remote: { status: "absent", output: remoteFallback.output },
+            },
+          );
+        }
+        if (probe.status !== "stacked" || !probe.view) {
+          return respond(
+            "The GitHub stack view was malformed or incomplete. Inspection did not switch branches, push, or mutate remote membership.",
+            {
+              status: "malformed",
+              local: { status: "malformed", output: probe.output, branches: probe.branches },
+              remote: { status: "unavailable" },
+            },
+          );
+        }
+
+        const report = await inspectStackReport(
+          cwd,
+          probe.view,
+          signal,
+          stackRunner,
+          options.workspaceController,
+        );
+        return respond(report.text, report.details);
+      },
+    });
+
+    // ── Tool: checkout_stack_branch ─────────────────────────────────────────
+    pi.registerTool({
+      name: "checkout_stack_branch",
+      label: "Checkout GitHub Stack Branch",
+      description:
+        "Switch to another member of the current local GitHub stack, adopting the complete stack " +
+        "only after the checkout is verified. The working tree must be clean.",
+      parameters: TObject({
+        target: TString({ description: "Stack branch name, PR number, #PR, or PR URL." }),
+      }),
+
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const cwd = ctx.cwd;
+        await options.assertWorkspace(cwd);
+        if (!options.workspaceController) {
+          return respond(
+            "Stack branch checkout is unavailable because no workspace controller was injected.",
+            { unavailable: true, reason: "workspace-controller-missing" },
+          );
+        }
+        const target = typeof params.target === "string" ? params.target : "";
+        if (await isWorktreeDirty(cwd, signal)) {
+          return respond(
+            "The working tree must be clean before checking out a stack branch. No state was changed.",
+            { dirtyWorkingTree: true, rollback: "not-needed" },
+          );
+        }
+        const originalBranch = await currentBranch(cwd, signal);
+        if (!originalBranch) {
+          return respond("Could not determine the current branch; no checkout was attempted.", {
+            unavailable: true,
+            reason: "current-branch-unknown",
+          });
+        }
+        const probe = await probeGhStack(cwd, signal, stackRunner);
+        if (probe.status !== "stacked" || !probe.view) {
+          return respond(
+            probe.status === "unstacked"
+              ? "The current branch is not part of a complete local GitHub stack; no checkout was attempted."
+              : "The local GitHub stack view was malformed or unavailable; no checkout was attempted.",
+            { checkoutFailed: true, localStatus: probe.status, output: probe.output },
+          );
+        }
+        const resolution = resolveGhStackTarget(probe.view, target);
+        if (resolution.status !== "resolved") {
+          return respond(`Cannot checkout stack target: ${resolution.reason}.`, {
+            invalidTarget: true,
+            target,
+            resolution,
+            branches: probe.view.branches.map((branch) => branch.name),
+          });
+        }
+        const baseBranch = probe.view.trunk ?? probe.view.base;
+        if (!baseBranch) {
+          return respond(
+            "The local GitHub stack view does not identify a base branch; no checkout or workspace ownership validation was attempted.",
+            {
+              checkoutFailed: true,
+              invalidStackMetadata: true,
+              baseBranch: null,
+              validationAttempted: false,
+            },
+          );
+        }
+        const claim = {
+          baseBranch,
+          branches: probe.view.branches.map((branch) => branch.name),
+          activeBranch: resolution.branch,
+        } satisfies WorkspaceControllerClaim;
+        let originalSnapshot: WorkspaceControllerSnapshot;
+        try {
+          // Capture ownership before validation so every post-claim failure can
+          // restore the exact durable state that preceded this checkout.
+          const snapshot = await options.workspaceController.snapshot(cwd);
+          // Keep an immutable caller-owned copy in case the host reuses its
+          // returned arrays while applying a claim.
+          originalSnapshot = { ...snapshot, branches: [...snapshot.branches] };
+        } catch (error: unknown) {
+          return respond(
+            "Could not snapshot workspace ownership; no checkout or validation was attempted.",
+            {
+              unavailable: true,
+              reason: "workspace-snapshot-failed",
+              error: errorMessage(error),
+              claim,
+            },
+          );
+        }
+
+        try {
+          await options.workspaceController.validate(cwd, claim);
+        } catch (error: unknown) {
+          if (signal?.aborted) {
+            const rollback = await cleanupCheckout(
+              cwd,
+              originalBranch,
+              originalSnapshot,
+              restoreBranch,
+              options.workspaceController,
+            );
+            return respond(`Checkout cancelled during workspace validation. ${rollback.text}`, {
+              cancelled: true,
+              validationFailed: true,
+              claim,
+              ...rollback.details,
+            });
+          }
+          return respond(
+            `Workspace ownership validation rejected stack branch \`${resolution.branch}\`; no checkout was attempted.`,
+            { ownership: "mismatch", validationFailed: true, error: errorMessage(error), claim },
+          );
+        }
+
+        let checkoutOutput = "";
+        let checkoutAttempted = false;
+        if (originalBranch !== resolution.branch) {
+          checkoutAttempted = true;
+          const checkout = await runGhStackCheckout(cwd, resolution.branch, signal, stackRunner);
+          checkoutOutput = checkout.output;
+          if (!checkout.success || signal?.aborted) {
+            const rollback = await restoreBranchSignalFree(cwd, originalBranch, restoreBranch);
+            return respond(`GitHub stack checkout failed. ${rollback.text}`, {
+              checkoutFailed: true,
+              checkoutAttempted,
+              cancelled: signal?.aborted === true,
+              output: checkout.output,
+              ...rollback.details,
+            });
+          }
+        }
+
+        const actualBranch = await currentBranch(cwd);
+        const refreshed = await probeGhStack(cwd, undefined, stackRunner);
+        const verified = await verifyRefreshedStack(
+          actualBranch,
+          refreshed,
+          claim,
+          async () => !(await isWorktreeDirty(cwd)),
+        );
+        if (!verified) {
+          const rollback = await restoreBranchSignalFree(cwd, originalBranch, restoreBranch);
+          return respond(
+            `The checkout could not be verified; no workspace ownership was claimed. ${rollback.text}`,
+            {
+              checkoutFailed: true,
+              verificationFailed: true,
+              checkoutAttempted,
+              checkoutOutput,
+              actualBranch,
+              refreshedStatus: refreshed.status,
+              ...rollback.details,
+            },
+          );
+        }
+
+        if (signal?.aborted) {
+          const rollback = await cleanupCheckout(
+            cwd,
+            originalBranch,
+            originalSnapshot,
+            restoreBranch,
+            options.workspaceController,
+          );
+          return respond(
+            `Checkout cancelled before workspace ownership was claimed. ${rollback.text}`,
+            {
+              cancelled: true,
+              checkoutAttempted,
+              checkoutOutput,
+              ...rollback.details,
+            },
+          );
+        }
+
+        try {
+          await options.workspaceController.claim(cwd, claim);
+        } catch (error: unknown) {
+          const rollback = await cleanupCheckout(
+            cwd,
+            originalBranch,
+            originalSnapshot,
+            restoreBranch,
+            options.workspaceController,
+          );
+          return respond(
+            `Workspace ownership claim failed after checkout. ${rollback.text} The registry was restored only if verification succeeded.`,
+            {
+              checkoutFailed: true,
+              claimFailed: true,
+              checkoutAttempted,
+              checkoutOutput,
+              error: errorMessage(error),
+              ...rollback.details,
+            },
+          );
+        }
+        try {
+          await options.assertWorkspace(cwd);
+        } catch (error: unknown) {
+          const rollback = await cleanupCheckout(
+            cwd,
+            originalBranch,
+            originalSnapshot,
+            restoreBranch,
+            options.workspaceController,
+          );
+          return respond(
+            `Workspace verification failed after the ownership claim. ${rollback.text}`,
+            {
+              checkoutFailed: true,
+              assertWorkspaceFailed: true,
+              claimSucceeded: true,
+              checkoutAttempted,
+              checkoutOutput,
+              error: errorMessage(error),
+              ...rollback.details,
+            },
+          );
+        }
+        const descendants = claim.branches.slice(claim.branches.indexOf(claim.activeBranch) + 1);
+        return respond(
+          checkoutAttempted
+            ? `Checked out \`${claim.activeBranch}\` in the GitHub stack. A future commit/push on this branch will restack descendants: ${descendants.length > 0 ? descendants.map((branch) => `\`${branch}\``).join(", ") : "none"}.`
+            : `Already on \`${claim.activeBranch}\`; workspace ownership was adopted for the GitHub stack. A future commit/push will restack descendants: ${descendants.length > 0 ? descendants.map((branch) => `\`${branch}\``).join(", ") : "none"}.`,
+          {
+            checkoutSucceeded: true,
+            checkoutAttempted,
+            activeBranch: claim.activeBranch,
+            branches: claim.branches,
+            baseBranch: claim.baseBranch,
+            descendants,
+            checkoutOutput,
+            ownership: "synchronized",
           },
         );
       },
@@ -302,11 +1367,55 @@ export function createFixCiExtension(options: {
         "Returns the status of every check. For failures, includes " +
         "the last 200 lines of log output. " +
         "You MUST use this tool instead of running `git push` in bash. " +
-        "After fixing failures (local or CI), call this tool again.",
-      parameters: TObject({}),
+        "After fixing failures (local or CI), call this tool again. Provide pull_requests with an agent-authored branch, title, and reviewer-oriented body for every new or changed branch. Bodies must explain context, approach, reviewer focus, and verification; commit-message summaries are not sufficient. Existing descriptions may be omitted only for CI retries when their managed section already matches the current branch SHA.",
+      parameters: TObject({
+        pull_requests: Optional(
+          TArray(
+            TObject({
+              branch: TString({ description: "Branch described by this PR entry." }),
+              title: TString({ description: "Authored pull request title." }),
+              body: TString({ description: "Authored pull request description." }),
+            }),
+            { description: "Authored descriptions for stack or ordinary pull requests." },
+          ),
+        ),
+      }),
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         const cwd = ctx.cwd;
+        const rawDescriptions = params.pull_requests;
+        let descriptions: PullRequestDescription[] | undefined;
+        if (rawDescriptions !== undefined) {
+          if (
+            !Array.isArray(rawDescriptions) ||
+            rawDescriptions.some(
+              (entry: unknown) =>
+                !entry ||
+                typeof entry !== "object" ||
+                typeof (entry as Record<string, unknown>).branch !== "string" ||
+                typeof (entry as Record<string, unknown>).title !== "string" ||
+                typeof (entry as Record<string, unknown>).body !== "string" ||
+                !(entry as Record<string, unknown>).branch ||
+                !(entry as Record<string, unknown>).title ||
+                !(entry as Record<string, unknown>).body ||
+                !(entry as Record<string, unknown>).branch.trim() ||
+                !(entry as Record<string, unknown>).title.trim() ||
+                !(entry as Record<string, unknown>).body.trim(),
+            )
+          ) {
+            return respond(
+              "Invalid pull_requests input. Each entry requires non-empty branch, title, and body strings.",
+              { pullRequestDescriptionsInvalid: true },
+            );
+          }
+          descriptions = rawDescriptions as PullRequestDescription[];
+          const branches = descriptions.map((entry) => entry.branch);
+          if (new Set(branches).size !== branches.length) {
+            return respond("Invalid pull_requests input. Each branch may appear only once.", {
+              pullRequestDescriptionsInvalid: true,
+            });
+          }
+        }
         await options.assertWorkspace(cwd);
         const notify = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
 
@@ -371,6 +1480,73 @@ export function createFixCiExtension(options: {
             );
           }
 
+          // Older gh-stack JSON cannot identify which branches already have
+          // PRs. Treat every branch as potentially new so submission never
+          // creates an undescribed PR; enriched views retain no-input retries
+          // for branches whose PRs already exist.
+          const confirmedNewStackBranches = stackProbe.view
+            ? stackProbe.view.branches.filter((branch) => !branch.pr).map((branch) => branch.name)
+            : [];
+          const branchesRequiringDescriptions = stackProbe.view
+            ? confirmedNewStackBranches
+            : stackProbe.branches;
+          const describedBranches = new Set(
+            descriptions?.map((description) => description.branch) ?? [],
+          );
+          const undescribedNewBranches = branchesRequiringDescriptions.filter(
+            (branch) => !describedBranches.has(branch),
+          );
+          if (undescribedNewBranches.length > 0) {
+            cycleCount = 0;
+            return respond(
+              "New stacked PRs require agent-authored titles and descriptions before submission. " +
+                "Provide a pull_requests entry for every listed branch; no branch was published or submitted.\n\n" +
+                undescribedNewBranches.map((branch) => `- \`${branch}\``).join("\n"),
+              {
+                pullRequestDescriptionsRequired: true,
+                newPullRequestBranches: branchesRequiringDescriptions,
+                missingPullRequestDescriptions: undescribedNewBranches,
+                stackSubmissionStarted: false,
+              },
+            );
+          }
+
+          const initialStackBase = stackProbe.baseBranch?.trim() || null;
+          if (options.workspaceController && !initialStackBase) {
+            cycleCount = 0;
+            return respond(
+              "The GitHub stack base could not be determined from the initial probe. No branches were published and stack synchronization was not started.",
+              {
+                stackSyncFailed: true,
+                stackBaseUnknown: true,
+                stackProbeOutput: stackProbe.output,
+                stackBranches: stackProbe.branches,
+                workspaceOwnership: "unavailable",
+              },
+            );
+          }
+
+          const initialOwnership = await adoptStackOwnership(
+            cwd,
+            stackProbe.branches,
+            initialStackBase,
+            branchName,
+            signal,
+          );
+          const stackOwnershipDetails = initialOwnership.details;
+          if (!initialOwnership.success) {
+            cycleCount = 0;
+            return respond(
+              "The local GitHub stack exists, but workspace ownership adoption failed. No branches were published and stack synchronization was not started.",
+              {
+                stackSyncFailed: true,
+                stackProbeOutput: stackProbe.output,
+                stackBranches: stackProbe.branches,
+                ...stackOwnershipDetails,
+              },
+            );
+          }
+
           const missingStackBranches: string[] = [];
           for (const stackBranch of stackProbe.branches) {
             const branchOnOrigin = await branchExistsOnOrigin(cwd, stackBranch, signal);
@@ -379,7 +1555,12 @@ export function createFixCiExtension(options: {
               return respond(
                 `Could not determine whether stack branch \`${stackBranch}\` exists on origin. ` +
                   "No branches were published and stack synchronization was not started; fix remote access and try again.",
-                { stackBootstrapFailed: true, branch: stackBranch, remoteLookupFailed: true },
+                {
+                  stackBootstrapFailed: true,
+                  branch: stackBranch,
+                  remoteLookupFailed: true,
+                  ...stackOwnershipDetails,
+                },
               );
             }
             if (!branchOnOrigin) missingStackBranches.push(stackBranch);
@@ -402,6 +1583,7 @@ export function createFixCiExtension(options: {
                   stackBootstrapFailed: true,
                   branch: stackBranch,
                   errorOutput: bootstrap.output,
+                  ...stackOwnershipDetails,
                 },
               );
             }
@@ -434,6 +1616,7 @@ export function createFixCiExtension(options: {
                   conflictPaths,
                   syncOutput: syncResult.output,
                   instructions: 'Call the "merge_conflicts" agent to resolve the preserved rebase.',
+                  ...stackOwnershipDetails,
                 },
               );
             }
@@ -455,6 +1638,7 @@ export function createFixCiExtension(options: {
                 instructions: restoration.restored
                   ? "Fix the gh stack sync error, then call push_and_check_ci again."
                   : "Stop and inspect the workspace manually.",
+                ...stackOwnershipDetails,
               },
             );
           }
@@ -472,8 +1656,49 @@ export function createFixCiExtension(options: {
                 originalBranch: branchName,
                 currentBranch: restoration.currentBranch,
                 restoreOutput: restoration.restoreOutput,
+                ...stackOwnershipDetails,
               },
             );
+          }
+
+          let createdStackPrBranches: string[] = [];
+          if (confirmedNewStackBranches.length > 0) {
+            if (!initialStackBase) {
+              cycleCount = 0;
+              return respond(
+                "The stack base is unknown, so described pull requests could not be created safely. Stack submission was not started.",
+                {
+                  stackBaseUnknown: true,
+                  prCreationFailed: true,
+                  stackSubmissionStarted: false,
+                  branches: confirmedNewStackBranches,
+                },
+              );
+            }
+            notify("Creating described draft PRs for new stack branches…");
+            const creation = await createDescribedStackPullRequests(
+              cwd,
+              confirmedNewStackBranches,
+              initialStackBase,
+              descriptions ?? [],
+              signal,
+              stackBodyRunner,
+            );
+            createdStackPrBranches = creation.updated;
+            if (!creation.success) {
+              cycleCount = 0;
+              return respond(
+                "## ⚠️ Described Stack PR Creation Failed\n\n" +
+                  "Stack submission was not started because every new PR must be created with its authored description.\n\n" +
+                  formatDescriptionIssues(creation.issues),
+                {
+                  prCreationFailed: true,
+                  stackSubmissionStarted: false,
+                  createdPullRequestBranches: creation.updated,
+                  pullRequestDescriptionIssues: creation.issues,
+                },
+              );
+            }
           }
 
           notify("Stack sync succeeded — submitting the stack…");
@@ -481,17 +1706,40 @@ export function createFixCiExtension(options: {
           const submitRestoration = await restoreOwnedBranch(cwd, branchName);
           if (!submitRestoration.restored) {
             cycleCount = 0;
+            if (submitResult.success) {
+              return respond(
+                `GitHub stack submission completed, but the owned workspace branch could not be restored before remote linking. ` +
+                  `It started on \`${branchName}\` and is now on \`${submitRestoration.currentBranch ?? "no branch"}\`. ` +
+                  "Remote linking and readiness checking were skipped; stop and inspect the workspace manually.",
+                {
+                  stackSubmitSucceeded: true,
+                  stackSubmitRestorationFailed: true,
+                  stackLinkAttempted: false,
+                  remoteStackLinked: false,
+                  workspaceRestored: false,
+                  originalBranch: branchName,
+                  currentBranch: submitRestoration.currentBranch,
+                  errorOutput: submitRestoration.restoreOutput,
+                  restoreOutput: submitRestoration.restoreOutput,
+                  ...stackOwnershipDetails,
+                },
+              );
+            }
             return respond(
-              `GitHub stack submission ${submitResult.success ? "completed" : "failed"}, but the owned workspace branch was not restored. ` +
+              `GitHub stack submission failed, and the owned workspace branch was not restored. ` +
                 `It started on \`${branchName}\` and is now on \`${submitRestoration.currentBranch ?? "no branch"}\`. ` +
                 "Stop and inspect the workspace manually.",
               {
-                stackSubmitFailed: !submitResult.success,
+                stackSubmitFailed: true,
+                stackSubmitSucceeded: false,
+                stackLinkAttempted: false,
+                remoteStackLinked: false,
                 workspaceRestored: false,
                 originalBranch: branchName,
                 currentBranch: submitRestoration.currentBranch,
                 errorOutput: submitResult.output,
                 restoreOutput: submitRestoration.restoreOutput,
+                ...stackOwnershipDetails,
               },
             );
           }
@@ -499,25 +1747,455 @@ export function createFixCiExtension(options: {
             cycleCount = 0;
             return respond(
               `## ⚠️ GitHub Stack Submit Failed\n\n` +
-                `The stack synced successfully, but \`gh stack submit --auto\` failed.\n\n` +
+                `The stack synced successfully, but \`gh stack submit --auto --no-comments\` failed.\n\n` +
                 `### Error output:\n\`\`\`\n${submitResult.output.trim()}\n\`\`\`\n\n` +
                 `The owned workspace branch was restored. Fix the submission error and call \`push_and_check_ci\` again.`,
               {
                 stackSubmitFailed: true,
+                stackSubmitSucceeded: false,
+                stackLinkAttempted: false,
+                remoteStackLinked: false,
                 workspaceRestored: true,
                 currentBranch: branchName,
                 errorOutput: submitResult.output,
                 restoreOutput: submitRestoration.restoreOutput,
-                instructions: "Fix the gh stack submit error, then call push_and_check_ci again.",
+                instructions:
+                  "Fix the gh stack submit --auto --no-comments error, then call push_and_check_ci again.",
+                ...stackOwnershipDetails,
               },
             );
           }
+
+          notify("Stack submitted — refreshing stack metadata before linking…");
+          const postSubmitStackProbe = await probeGhStack(cwd, signal, stackRunner);
+          const postSubmitStackProbeDetails = {
+            status: postSubmitStackProbe.status,
+            output: postSubmitStackProbe.output,
+            branches: postSubmitStackProbe.branches,
+            baseBranch: postSubmitStackProbe.baseBranch,
+          };
+          const postSubmitStackProbeInfo = {
+            postSubmitStackProbe: postSubmitStackProbeDetails,
+            postSubmitStackProbeDetails,
+            postSubmitStackProbeOutput: postSubmitStackProbe.output,
+            postSubmitStackProbeStatus: postSubmitStackProbe.status,
+            postSubmitStackProbeBranches: postSubmitStackProbe.branches,
+            postSubmitStackProbeBaseBranch: postSubmitStackProbe.baseBranch,
+            postSubmitStackBranches: postSubmitStackProbe.branches,
+            postSubmitStackBase: postSubmitStackProbe.baseBranch,
+          };
+
+          if (
+            postSubmitStackProbe.status !== "stacked" ||
+            postSubmitStackProbe.branches.length === 0 ||
+            !postSubmitStackProbe.branches.includes(branchName)
+          ) {
+            cycleCount = 0;
+            return respond(
+              "GitHub stack submission completed and the owned workspace branch was restored, but a fresh stack probe did not report a complete stack. Remote linking and readiness checking were skipped; inspect the stack metadata and call push_and_check_ci again.\n\n" +
+                "### Post-submit gh stack view output:\n```\n" +
+                postSubmitStackProbe.output.trim() +
+                "\n```",
+              {
+                stackSubmitSucceeded: true,
+                stackLinkFailed: true,
+                remoteStackLinkFailed: true,
+                stackLinkAttempted: false,
+                remoteStackLinked: false,
+                postSubmitStackProbeFailed: true,
+                workspaceRestored: true,
+                currentBranch: branchName,
+                workspaceOwnership: "unavailable",
+                workspaceOwnershipFailed: true,
+                workspaceOwnershipFailure: {
+                  stage: "probe",
+                  reason: "active-branch-not-in-refreshed-stack",
+                  activeBranch: branchName,
+                  branches: postSubmitStackProbe.branches,
+                },
+                ...postSubmitStackProbeInfo,
+              },
+            );
+          }
+
+          const stackBase = postSubmitStackProbe.baseBranch?.trim() || null;
+          if (!stackBase) {
+            cycleCount = 0;
+            return respond(
+              "GitHub stack submission completed and the owned workspace branch was restored, but the refreshed stack base branch could not be determined. Remote linking and readiness checking were skipped; inspect the stack metadata and call push_and_check_ci again.",
+              {
+                stackSubmitSucceeded: true,
+                stackLinkFailed: true,
+                remoteStackLinkFailed: true,
+                stackLinkAttempted: false,
+                remoteStackLinked: false,
+                stackBaseUnknown: true,
+                workspaceRestored: true,
+                currentBranch: branchName,
+                workspaceOwnership: "unavailable",
+                workspaceOwnershipFailed: true,
+                workspaceOwnershipFailure: {
+                  stage: "probe",
+                  reason: "base-branch-unknown",
+                  branches: postSubmitStackProbe.branches,
+                },
+                ...postSubmitStackProbeInfo,
+              },
+            );
+          }
+
+          const refreshedOwnership = await adoptStackOwnership(
+            cwd,
+            postSubmitStackProbe.branches,
+            stackBase,
+            branchName,
+            signal,
+          );
+          if (!refreshedOwnership.success) {
+            cycleCount = 0;
+            return respond(
+              "The stack was submitted, but refreshed workspace ownership adoption failed. Remote linking and readiness checking were skipped; fix the workspace ownership issue and try again.",
+              {
+                stackSubmitSucceeded: true,
+                stackLinkFailed: true,
+                remoteStackLinkFailed: true,
+                stackLinkAttempted: false,
+                remoteStackLinked: false,
+                workspaceRestored: true,
+                currentBranch: branchName,
+                ...refreshedOwnership.details,
+                ...postSubmitStackProbeInfo,
+              },
+            );
+          }
+          const stackOwnershipAfterSubmit = refreshedOwnership.details;
+
+          // gh stack submit creates PRs before this tool can author them. In
+          // contract mode, populate the bounded description immediately at
+          // that creation boundary, before linking or readiness.
+          let stackPrDescriptionsUpdated: string[] = [...createdStackPrBranches];
+          if (descriptions !== undefined) {
+            notify("Stack submitted — authoring current PR descriptions…");
+            const initialDescriptions = await ensureManagedPullRequestDescriptions(
+              cwd,
+              postSubmitStackProbe.branches,
+              descriptions.filter(
+                (description) => !confirmedNewStackBranches.includes(description.branch),
+              ),
+              signal,
+              stackBodyRunner,
+            );
+            if (!initialDescriptions.success) {
+              cycleCount = 0;
+              return respond(
+                "## ⚠️ Stacked PR Description Preparation Failed\n\n" +
+                  "Every stack branch needs a current authored description before the stack can be linked or marked ready.\n\n" +
+                  formatDescriptionIssues(initialDescriptions.issues),
+                {
+                  stackSubmitSucceeded: true,
+                  stackPrDescriptions: false,
+                  stackPrDescriptionIssues: initialDescriptions.issues,
+                  readinessSkipped: true,
+                  workspaceRestored: true,
+                  ...postSubmitStackProbeInfo,
+                  ...stackOwnershipAfterSubmit,
+                },
+              );
+            }
+            stackPrDescriptionsUpdated.push(...initialDescriptions.updated);
+          }
+
+          const stackLinkRequired = postSubmitStackProbe.branches.length > 1;
+          let stackLinkResult = { success: true, output: "" };
+          let linkRestoration = {
+            restored: true,
+            currentBranch: branchName,
+            restoreOutput: "",
+          };
+          let remoteStackRebuilt = false;
+          let remoteStackRebuildOutputs:
+            | {
+                initialLinkOutput: string;
+                initialLinkRestorationOutput: string;
+                remoteUnstackOutput: string;
+                remoteUnstackRestorationOutput: string;
+                localInitOutput: string;
+                localInitRestorationOutput: string;
+                retryLinkOutput?: string;
+                retryLinkRestorationOutput?: string;
+              }
+            | undefined;
+
+          if (stackLinkRequired) {
+            notify("Stack submitted — linking the remote stack…");
+            stackLinkResult = await runGhStackLink(
+              cwd,
+              postSubmitStackProbe.branches,
+              stackBase,
+              signal,
+              stackRunner,
+            );
+            // Linking can traverse branches too. Restore again even though the
+            // submit boundary was already restored, so readiness starts from the
+            // owned checkout and a failed link cannot leak another branch.
+            linkRestoration = await restoreOwnedBranch(cwd, branchName);
+          }
+
+          // GitHub rejects adding a new middle PR to an already-submitted
+          // stack. Rebuild only for that exact rejection: a generic link
+          // failure must never destructively unstack the remote stack.
+          if (
+            stackLinkRequired &&
+            !stackLinkResult.success &&
+            linkRestoration.restored &&
+            isMiddleInsertionRejectionOutput(stackLinkResult.output)
+          ) {
+            notify("Remote stack link rejected a middle insertion — rebuilding the remote stack…");
+            const remoteUnstack = await runGhStackUnstack(cwd, signal, stackRunner);
+            const remoteUnstackRestoration = await restoreOwnedBranch(cwd, branchName);
+
+            // Keep remote unstack caller-signal-aware: cancellation must not
+            // be reported as a completed remote mutation. It may nevertheless
+            // partially remove gh's local tracking, so local init is mandatory
+            // recovery and intentionally ignores the caller's signal.
+            const localInit = await runGhStackInit(
+              cwd,
+              postSubmitStackProbe.branches,
+              stackBase,
+              undefined,
+              stackRunner,
+            );
+            const localInitRestoration = await restoreOwnedBranch(cwd, branchName);
+            remoteStackRebuildOutputs = {
+              initialLinkOutput: stackLinkResult.output,
+              initialLinkRestorationOutput: linkRestoration.restoreOutput,
+              remoteUnstackOutput: remoteUnstack.output,
+              remoteUnstackRestorationOutput: remoteUnstackRestoration.restoreOutput,
+              localInitOutput: localInit.output,
+              localInitRestorationOutput: localInitRestoration.restoreOutput,
+            };
+
+            const reconstructionDetails = {
+              stackSubmitSucceeded: true,
+              stackLinkFailed: true,
+              remoteStackLinkFailed: true,
+              stackLinkAttempted: true,
+              stackLinkSucceeded: false,
+              remoteStackLinked: false,
+              remoteStackRebuildAttempted: true,
+              remoteStackRebuilt: false,
+              remoteUnstackAttempted: true,
+              remoteUnstackSucceeded: remoteUnstack.success,
+              remoteStackState: remoteUnstack.success ? "unstacked" : "unknown",
+              localInitAttempted: true,
+              localInitSucceeded: localInit.success,
+              localTrackingRecovered: localInit.success && localInitRestoration.restored,
+              workspaceRestored: localInitRestoration.restored,
+              currentBranch: localInitRestoration.currentBranch,
+              ...remoteStackRebuildOutputs,
+              ...postSubmitStackProbeInfo,
+              ...stackOwnershipAfterSubmit,
+            };
+
+            if (!remoteUnstack.success || !remoteUnstackRestoration.restored) {
+              cycleCount = 0;
+              return respond(
+                "The remote stack link required rebuilding, but remote unstack or checkout restoration failed. Local tracking cleanup was attempted; readiness was skipped. Stop and inspect the workspace and remote stack manually.",
+                {
+                  ...reconstructionDetails,
+                  remoteUnstackRestorationSucceeded: remoteUnstackRestoration.restored,
+                  remoteStackRebuildFailed: true,
+                  retryLinkAttempted: false,
+                  retryLinkSucceeded: false,
+                  readinessSkipped: true,
+                  instructions: "Stop and inspect the workspace manually.",
+                },
+              );
+            }
+
+            if (!localInit.success || !localInitRestoration.restored) {
+              cycleCount = 0;
+              return respond(
+                "The remote stack was unstacked, but local stack tracking recovery failed. Readiness was skipped; stop and inspect the workspace manually.",
+                {
+                  ...reconstructionDetails,
+                  remoteUnstackRestorationSucceeded: true,
+                  localTrackingRecoveryFailed: true,
+                  remoteStackRebuildFailed: true,
+                  retryLinkAttempted: false,
+                  retryLinkSucceeded: false,
+                  readinessSkipped: true,
+                  instructions: "Stop and inspect the workspace manually.",
+                },
+              );
+            }
+
+            notify("Remote stack rebuilt — retrying the remote stack link…");
+            const retryLink = await runGhStackLink(
+              cwd,
+              postSubmitStackProbe.branches,
+              stackBase,
+              signal,
+              stackRunner,
+            );
+            const retryLinkRestoration = await restoreOwnedBranch(cwd, branchName);
+            remoteStackRebuildOutputs.retryLinkOutput = retryLink.output;
+            remoteStackRebuildOutputs.retryLinkRestorationOutput =
+              retryLinkRestoration.restoreOutput;
+            stackLinkResult = retryLink;
+            if (!retryLink.success || !retryLinkRestoration.restored) {
+              cycleCount = 0;
+              return respond(
+                retryLink.success
+                  ? "The remote stack was rebuilt and linked, but the owned workspace branch could not be restored before readiness checking. Stop and inspect the workspace manually."
+                  : "The remote stack was rebuilt, but the retry of remote stack linking failed. Readiness was skipped.",
+                {
+                  ...reconstructionDetails,
+                  remoteUnstackRestorationSucceeded: true,
+                  localTrackingRecovered: true,
+                  localInitSucceeded: true,
+                  retryLinkAttempted: true,
+                  retryLinkSucceeded: retryLink.success,
+                  remoteStackRebuilt: retryLink.success,
+                  remoteStackLinked: retryLink.success,
+                  remoteStackState: retryLink.success ? "linked" : "unstacked",
+                  remoteStackRebuildFailed: true,
+                  stackLinkSucceeded: retryLink.success,
+                  readinessSkipped: true,
+                  workspaceRestored: retryLinkRestoration.restored,
+                  currentBranch: retryLinkRestoration.currentBranch,
+                  ...remoteStackRebuildOutputs,
+                  ...(retryLinkRestoration.restored ? {} : { workspaceRestorationFailed: true }),
+                  instructions:
+                    retryLink.success && !retryLinkRestoration.restored
+                      ? "Stop and inspect the workspace manually."
+                      : "Fix the remote stack link error, then call push_and_check_ci again.",
+                },
+              );
+            }
+            remoteStackRebuilt = true;
+            if (signal?.aborted) {
+              cycleCount = 0;
+              return respond(
+                "The remote stack was rebuilt and linked, but the operation was cancelled before readiness checking. The owned workspace branch was restored.",
+                {
+                  ...reconstructionDetails,
+                  remoteUnstackRestorationSucceeded: true,
+                  localTrackingRecovered: true,
+                  retryLinkAttempted: true,
+                  retryLinkSucceeded: true,
+                  remoteStackRebuilt: true,
+                  remoteStackLinked: true,
+                  remoteStackState: "linked",
+                  stackLinkSucceeded: true,
+                  workspaceRestored: true,
+                  currentBranch: retryLinkRestoration.currentBranch,
+                  ...remoteStackRebuildOutputs,
+                  readinessSkipped: true,
+                },
+              );
+            }
+          }
+
+          if (stackLinkRequired && !stackLinkResult.success) {
+            cycleCount = 0;
+            const restorationMessage = linkRestoration.restored
+              ? "The owned workspace branch was restored."
+              : "The owned workspace branch could not be restored safely; stop and inspect the workspace manually.";
+            return respond(
+              `## ⚠️ Remote GitHub Stack Link Failed\n\n` +
+                `\`gh stack link\` failed.\n\n### Error output:\n\`\`\`\n${stackLinkResult.output.trim()}\n\`\`\`` +
+                `\n\n${restorationMessage}`,
+              {
+                stackSubmitSucceeded: true,
+                stackLinkFailed: true,
+                remoteStackLinkFailed: true,
+                stackLinkAttempted: true,
+                stackLinkSucceeded: false,
+                remoteStackLinked: false,
+                workspaceRestored: linkRestoration.restored,
+                currentBranch: linkRestoration.currentBranch,
+                stackLinkOutput: stackLinkResult.output,
+                output: stackLinkResult.output,
+                errorOutput: stackLinkResult.output,
+                restoreOutput: linkRestoration.restoreOutput,
+                ...(linkRestoration.restored ? {} : { workspaceRestorationFailed: true }),
+                remoteStackRebuildAttempted: false,
+                remoteStackRebuilt: false,
+                ...postSubmitStackProbeInfo,
+                ...stackOwnershipAfterSubmit,
+                instructions: linkRestoration.restored
+                  ? "Fix the remote stack link error, then call push_and_check_ci again."
+                  : "Stop and inspect the workspace manually.",
+              },
+            );
+          }
+          if (stackLinkRequired && !linkRestoration.restored) {
+            cycleCount = 0;
+            return respond(
+              "Remote GitHub stack linking succeeded, but the owned workspace branch could not be restored before readiness checking. Stop and inspect the workspace manually.",
+              {
+                stackSubmitSucceeded: true,
+                stackLinkAttempted: true,
+                stackLinkSucceeded: true,
+                remoteStackLinked: true,
+                stackLinkRestorationFailed: true,
+                workspaceRestorationFailed: true,
+                remoteStackRebuildAttempted: false,
+                remoteStackRebuilt: false,
+                workspaceRestored: false,
+                currentBranch: linkRestoration.currentBranch,
+                stackLinkOutput: stackLinkResult.output,
+                errorOutput: linkRestoration.restoreOutput,
+                restoreOutput: linkRestoration.restoreOutput,
+                ...postSubmitStackProbeInfo,
+                ...stackOwnershipAfterSubmit,
+              },
+            );
+          }
+
+          notify("Stack linked — checking stacked PR descriptions…");
+          const stackPrBodies = await ensureManagedPullRequestDescriptions(
+            cwd,
+            postSubmitStackProbe.branches,
+            [],
+            signal,
+            stackBodyRunner,
+          );
+          if (!stackPrBodies.success) {
+            cycleCount = 0;
+            return respond(
+              "## ⚠️ Stacked PR Description Preparation Failed\n\n" +
+                "Every stacked PR must have a current description before readiness checking. " +
+                "No PR was marked ready. Fix the reported missing, stale, lookup, or update issue and " +
+                "call `push_and_check_ci` again.\n\n" +
+                formatDescriptionIssues(stackPrBodies.issues),
+              {
+                stackSubmitSucceeded: true,
+                stackLinkAttempted: stackLinkRequired,
+                ...(stackLinkRequired ? { stackLinkSucceeded: true } : { stackLinkSkipped: true }),
+                remoteStackLinked: stackLinkRequired,
+                stackPrBodies: false,
+                stackPrBodyPreparationFailed: true,
+                stackPrBodyIssues: stackPrBodies.issues,
+                readinessSkipped: true,
+                workspaceRestored: true,
+                ...postSubmitStackProbeInfo,
+                ...stackOwnershipAfterSubmit,
+              },
+            );
+          }
+
           pushedSha = (await getHeadSha(cwd, signal)) ?? undefined;
-          notify("Stack submitted. Resolving and checking every stack branch…");
+          notify(
+            stackLinkRequired
+              ? "Stack submitted and linked. Resolving and checking every stack branch…"
+              : "Stack submitted. Remote linking is not required for this single-branch stack; resolving and checking its branch…",
+          );
 
           const stackReadiness = await stackReadinessRunner(
             cwd,
-            stackProbe.branches,
+            postSubmitStackProbe.branches,
             signal,
             notify,
             {
@@ -528,13 +2206,38 @@ export function createFixCiExtension(options: {
             },
           );
           cycleCount = 0;
-          return respond(formatStackReadiness(stackReadiness), {
-            stackReadiness: true,
-            allChecksPassed: stackReadiness.allChecksPassed,
-            allReady: stackReadiness.allReady,
-            success: stackReadiness.allReady,
-            branches: stackReadiness.branches,
-          });
+          const readinessMessage = formatStackReadiness(stackReadiness);
+          return respond(
+            stackLinkRequired
+              ? readinessMessage
+              : "Remote stack linking was not attempted because this single-branch stack does not require it.\n\n" +
+                  readinessMessage,
+            {
+              stackReadiness: true,
+              allChecksPassed: stackReadiness.allChecksPassed,
+              allReady: stackReadiness.allReady,
+              success: stackReadiness.allReady,
+              branches: stackReadiness.branches,
+              stackSubmitSucceeded: true,
+              stackLinkAttempted: stackLinkRequired,
+              stackLinkRequired,
+              ...(stackLinkRequired
+                ? { stackLinkSucceeded: true, stackLinkOutput: stackLinkResult.output }
+                : { stackLinkSkipped: true, stackLinkSkipReason: "single-branch-stack" }),
+              remoteStackLinked: stackLinkRequired,
+              remoteStackRebuildAttempted: remoteStackRebuildOutputs !== undefined,
+              remoteStackRebuilt,
+              ...(remoteStackRebuildOutputs
+                ? { remoteStackState: "linked", ...remoteStackRebuildOutputs }
+                : {}),
+              workspaceRestored: true,
+              stackPrBodies: true,
+              stackPrBodiesUpdated: stackPrDescriptionsUpdated,
+              stackPrBodiesPreserved: stackPrBodies.preserved,
+              ...postSubmitStackProbeInfo,
+              ...stackOwnershipAfterSubmit,
+            },
+          );
         } else {
           // ── 2. Check if base branch is ahead — rebase if so ────────────
           // Keep the PR branch up to date with the base branch before pushing
@@ -731,11 +2434,22 @@ export function createFixCiExtension(options: {
             });
           }
 
-          // Generate PR body from commits unique to the inferred target branch.
-          const prBody = await generatePrBody(cwd, targetBase, signal);
+          const description = descriptions?.find((entry) => entry.branch === branchName);
+          if (!branchName || !description) {
+            return respond(
+              `Cannot create a new PR for \`${branchName ?? "the current branch"}\`: pull_requests must include its authored title and body.`,
+              {
+                prCreationFailed: true,
+                pullRequestDescriptionMissing: true,
+                branch: branchName,
+                required: ["title", "body"],
+              },
+            );
+          }
 
-          // Use provided title or auto-generate from the branch name.
-          const prTitle = await generatePrTitle(cwd, signal);
+          const sha = pushedSha ?? (await getBranchSha(cwd, branchName, signal));
+          const prBody = newPullRequestBody(description, sha);
+          const prTitle = description.title;
 
           const prResult = await createDraftPr(cwd, prTitle, prBody, targetBase, signal);
 
@@ -750,6 +2464,30 @@ export function createFixCiExtension(options: {
           notify(`Draft PR created: ${prUrl}`);
         } else {
           notify(`PR #${existingPr} already exists — skipping creation.`);
+        }
+
+        // A retry may omit pull_requests only when the existing bounded
+        // section already records this exact branch SHA.
+        if (existingPr && branchName) {
+          const descriptionResult = await ensureManagedPullRequestDescriptions(
+            cwd,
+            [branchName],
+            descriptions ?? [],
+            signal,
+            stackBodyRunner,
+          );
+          if (!descriptionResult.success) {
+            return respond(
+              "## ⚠️ Pull Request Description Is Not Current\n\n" +
+                formatDescriptionIssues(descriptionResult.issues) +
+                "\n\nNo readiness transition was attempted. Provide refreshed pull_requests content and retry.",
+              {
+                pullRequestDescriptionCurrent: false,
+                pullRequestDescriptionIssues: descriptionResult.issues,
+                readinessSkipped: true,
+              },
+            );
+          }
         }
 
         const cycle = cycleCount;
@@ -899,10 +2637,29 @@ export function createFixCiExtension(options: {
 
 export default createFixCiExtension;
 
+// ── Stack helpers ────────────────────────────────────────────────────────────
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function formatConflictList(paths: string[]): string {
   return paths.map((p) => `- \`${p}\``).join("\n");
+}
+
+function formatDescriptionIssues(
+  issues: readonly { branch: string; stage: string; error: string; output?: string }[],
+): string {
+  return issues
+    .map(
+      (issue) =>
+        `- \`${issue.branch}\` (${issue.stage}): ${issue.error}${
+          issue.output ? `\n  Output: ${issue.output.trim()}` : ""
+        }`,
+    )
+    .join("\n");
 }
 
 function formatStackReadiness(result: StackReadinessResult): string {

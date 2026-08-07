@@ -71,6 +71,37 @@ function addReason(report: StackBranchReport, reason: string): void {
   report.reason = report.reason ? `${report.reason}; ${reason}` : reason;
 }
 
+function errorDescription(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  const description = String(error).trim();
+  return description || "unknown error";
+}
+
+function unavailableResolution(): StackBranchResolution {
+  return { sha: null, pr: null };
+}
+
+function rethrowIfAborted(signal: AbortSignal | undefined, error: unknown): void {
+  if (signal?.aborted) throw error;
+}
+
+async function resolveBranchSafely(
+  resolveBranch: StackReadinessDependencies["resolveBranch"],
+  cwd: string,
+  branch: string,
+  signal: AbortSignal | undefined,
+): Promise<{ resolution: StackBranchResolution; error: unknown | null }> {
+  try {
+    signal?.throwIfAborted();
+    const resolution = await resolveBranch(cwd, branch, signal);
+    signal?.throwIfAborted();
+    return { resolution, error: null };
+  } catch (error: unknown) {
+    rethrowIfAborted(signal, error);
+    return { resolution: unavailableResolution(), error };
+  }
+}
+
 function resolutionMatchesReport(
   report: StackBranchReport,
   resolution: StackBranchResolution,
@@ -118,11 +149,11 @@ export const checkAndReadyStack: StackReadinessRunner = async (
   const resolutions = await Promise.all(
     branches.map(async (branch) => ({
       branch,
-      resolution: await dependencies.resolveBranch(cwd, branch, signal),
+      ...(await resolveBranchSafely(dependencies.resolveBranch, cwd, branch, signal)),
     })),
   );
 
-  for (const { branch, resolution } of resolutions) {
+  for (const { branch, resolution, error } of resolutions) {
     const pr = resolution.pr;
     const report: StackBranchReport = {
       branch,
@@ -139,6 +170,7 @@ export const checkAndReadyStack: StackReadinessRunner = async (
       ready: null,
     };
 
+    if (error) addReason(report, `could not resolve branch: ${errorDescription(error)}`);
     if (!resolution.sha) addReason(report, "missing local SHA");
     if (!pr) {
       addReason(report, "missing open PR");
@@ -157,7 +189,16 @@ export const checkAndReadyStack: StackReadinessRunner = async (
     // Checks for an older commit cannot establish stack readiness.
     if (!report.sha || report.reason) continue;
     onStatus(`Polling CI for stack branch \`${report.branch}\` at ${report.sha.slice(0, 8)}…`);
-    const poll = await dependencies.pollChecks(cwd, signal, undefined, report.sha);
+    let poll: Awaited<ReturnType<StackReadinessDependencies["pollChecks"]>>;
+    try {
+      signal?.throwIfAborted();
+      poll = await dependencies.pollChecks(cwd, signal, undefined, report.sha);
+      signal?.throwIfAborted();
+    } catch (error: unknown) {
+      rethrowIfAborted(signal, error);
+      addReason(report, `could not poll checks: ${errorDescription(error)}`);
+      continue;
+    }
     report.checks = poll.checks;
     report.timedOut = poll.timedOut;
     report.polls = poll.polls;
@@ -168,7 +209,14 @@ export const checkAndReadyStack: StackReadinessRunner = async (
       (check) => check.bucket === "fail" || check.bucket === "cancel",
     );
     if (failures.length > 0) {
-      report.failureLogs = await dependencies.fetchFailureLogs(failures, cwd, signal);
+      try {
+        signal?.throwIfAborted();
+        report.failureLogs = await dependencies.fetchFailureLogs(failures, cwd, signal);
+        signal?.throwIfAborted();
+      } catch (error: unknown) {
+        rethrowIfAborted(signal, error);
+        addReason(report, `could not fetch failure logs: ${errorDescription(error)}`);
+      }
     }
     if (nonPassing.length > 0) {
       addReason(
@@ -202,17 +250,21 @@ export const checkAndReadyStack: StackReadinessRunner = async (
   const preflight = await Promise.all(
     branches.map(async (branch) => ({
       branch,
-      resolution: await dependencies.resolveBranch(cwd, branch, signal),
+      ...(await resolveBranchSafely(dependencies.resolveBranch, cwd, branch, signal)),
     })),
   );
   let stackChanged = false;
-  for (const { branch, resolution } of preflight) {
+  for (const { branch, resolution, error } of preflight) {
     const report = reports.find((candidate) => candidate.branch === branch);
-    if (!report || resolutionMatchesReport(report, resolution)) continue;
+    if (!report || (!error && resolutionMatchesReport(report, resolution))) continue;
     stackChanged = true;
     addReason(
       report,
-      `stack changed before ready: ${describeResolutionChange(report, resolution)}`,
+      `stack changed before ready: ${
+        error
+          ? `could not resolve branch: ${errorDescription(error)}`
+          : describeResolutionChange(report, resolution)
+      }`,
     );
   }
   if (stackChanged) return { allChecksPassed: false, allReady: false, branches: reports };
@@ -226,19 +278,26 @@ export const checkAndReadyStack: StackReadinessRunner = async (
     const immediatePreflight = await Promise.all(
       branches.map(async (branch) => ({
         branch,
-        resolution: await dependencies.resolveBranch(cwd, branch, signal),
+        ...(await resolveBranchSafely(dependencies.resolveBranch, cwd, branch, signal)),
       })),
     );
     let changedImmediately = false;
     for (const candidate of immediatePreflight) {
       const candidateReport = reports.find((item) => item.branch === candidate.branch);
-      if (!candidateReport || resolutionMatchesReport(candidateReport, candidate.resolution)) {
+      if (
+        !candidateReport ||
+        (!candidate.error && resolutionMatchesReport(candidateReport, candidate.resolution))
+      ) {
         continue;
       }
       changedImmediately = true;
       addReason(
         candidateReport,
-        `stack changed immediately before ready: ${describeResolutionChange(candidateReport, candidate.resolution)}`,
+        `stack changed immediately before ready: ${
+          candidate.error
+            ? `could not resolve branch: ${errorDescription(candidate.error)}`
+            : describeResolutionChange(candidateReport, candidate.resolution)
+        }`,
       );
     }
     if (changedImmediately) {
@@ -246,7 +305,15 @@ export const checkAndReadyStack: StackReadinessRunner = async (
     }
 
     onStatus(`Marking PR #${report.prNumber} for \`${report.branch}\` ready for review…`);
-    report.ready = await dependencies.markPrReady(cwd, signal, report.branch);
+    try {
+      signal?.throwIfAborted();
+      report.ready = await dependencies.markPrReady(cwd, signal, report.branch);
+      signal?.throwIfAborted();
+    } catch (error: unknown) {
+      rethrowIfAborted(signal, error);
+      report.ready = false;
+      addReason(report, `could not mark PR ready: ${errorDescription(error)}`);
+    }
     if (report.ready) report.isDraft = false;
   }
 

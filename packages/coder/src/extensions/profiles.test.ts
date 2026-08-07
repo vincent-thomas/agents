@@ -50,7 +50,13 @@ test("composes ordered subagent extensions with workspace enforcement", async ()
   assert.deepEqual(eventNames, ["tool_call", "tool_call"]);
   assert.deepEqual(
     tools.map((tool) => tool.name),
-    ["git_commit", "create_github_stack", "push_and_check_ci"],
+    [
+      "git_commit",
+      "create_github_stack",
+      "inspect_stack",
+      "checkout_stack_branch",
+      "push_and_check_ci",
+    ],
   );
 
   await assert.rejects(
@@ -70,7 +76,17 @@ test("composes ordered subagent extensions with workspace enforcement", async ()
     (error) => error === workspaceError,
   );
   await assert.rejects(
-    tools[2]!.execute("push-call", {}, undefined, undefined, { cwd: "/repo" }),
+    tools[2]!.execute("inspect-call", {}, undefined, undefined, { cwd: "/repo" }),
+    (error) => error === workspaceError,
+  );
+  await assert.rejects(
+    tools[3]!.execute("checkout-call", { target: "feature" }, undefined, undefined, {
+      cwd: "/repo",
+    }),
+    (error) => error === workspaceError,
+  );
+  await assert.rejects(
+    tools[4]!.execute("push-call", {}, undefined, undefined, { cwd: "/repo" }),
     (error) => error === workspaceError,
   );
 });

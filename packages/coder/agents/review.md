@@ -46,8 +46,10 @@ Do not report preferences, cosmetic style issues, or unrelated pre-existing
 problems. Do not speculate: verify each finding against the code and describe a
 concrete impact or failure mode.
 
-Return findings first, ordered by severity. For each finding, include the file
-and line, explain the problem and when it occurs, and give concise actionable
-direction. If no findings remain, say so explicitly and mention any residual
-risk or review limitation. Keep summaries brief; the parent needs review
-feedback, not a narration of your process.
+Return a compact final response under exactly these headings: `Findings` and
+`Residual risk`. Under `Findings`, list findings first and order them by
+severity. For each finding, include severity, path and line, explain the
+problem and when it occurs, and give concise actionable direction. If no
+findings remain, say so explicitly. Under `Residual risk`, mention any
+remaining risk or review limitation. Keep both sections brief; do not narrate
+the review process.

@@ -54,6 +54,16 @@ function markerExpression(): RegExp {
   );
 }
 
+export function stripGitHubStackBoilerplate(body: string): string {
+  const boilerplate =
+    /^\s*Stack created with \[GitHub Stacks CLI\]\([^)]+\)\s*[•·]\s*\[Give Feedback\]\([^)]+\)\s*(?:💬|🗨️?)?\s*$/;
+  return body
+    .split(/\r?\n/)
+    .filter((line) => !boilerplate.test(line))
+    .join("\n")
+    .trim();
+}
+
 export function managedDescriptionSha(body: string, branch: string): string | null {
   const match = markerExpression().exec(body);
   if (!match) return null;
@@ -71,9 +81,10 @@ export function refreshManagedPullRequestDescription(
 ): string {
   const section = managedPullRequestDescription(description, sha);
   const expression = markerExpression();
-  return expression.test(existingBody)
-    ? existingBody.replace(expression, section)
-    : existingBody.trimEnd() + (existingBody.trim() ? "\n\n" : "") + section + "\n";
+  const cleanedBody = stripGitHubStackBoilerplate(existingBody);
+  return expression.test(cleanedBody)
+    ? cleanedBody.replace(expression, section)
+    : cleanedBody.trimEnd() + (cleanedBody.trim() ? "\n\n" : "") + section + "\n";
 }
 
 export function newPullRequestBody(description: PullRequestDescription, sha: string): string {
@@ -103,23 +114,29 @@ async function lookup(
   branch: string,
   signal: AbortSignal | undefined,
   runner: GhStackCommandRunner,
-): Promise<{ body: string }> {
-  const result = await runner(["pr", "view", "--json", "number,body", "--", branch], {
+): Promise<{ title: string; body: string }> {
+  const result = await runner(["pr", "view", "--json", "number,title,body", "--", branch], {
     cwd,
     signal,
     timeout: 30_000,
   });
   const output = outputOf(result);
   try {
-    const parsed = JSON.parse(result.stdout) as { number?: unknown; body?: unknown };
+    const parsed = JSON.parse(result.stdout) as {
+      number?: unknown;
+      title?: unknown;
+      body?: unknown;
+    };
     if (
       !Number.isSafeInteger(parsed.number) ||
       (parsed.number as number) <= 0 ||
+      typeof parsed.title !== "string" ||
+      !parsed.title.trim() ||
       typeof parsed.body !== "string"
     ) {
       throw new Error("PR body lookup returned incomplete data");
     }
-    return { body: parsed.body };
+    return { title: parsed.title, body: parsed.body };
   } catch (error: unknown) {
     throw new Error(`${errorText(error)}${output.trim() ? `: ${output.trim()}` : ""}`);
   }
@@ -202,7 +219,7 @@ export async function ensureManagedPullRequestDescriptions(
   const issues: DescriptionIssue[] = [];
 
   for (const branch of branches) {
-    let pr: { body: string };
+    let pr: { title: string; body: string };
     let sha: string;
     try {
       signal?.throwIfAborted();
@@ -220,7 +237,18 @@ export async function ensureManagedPullRequestDescriptions(
     const existingSha = managedDescriptionSha(pr.body, branch);
     const description = supplied.get(branch);
     if (existingSha === sha && !description) {
-      preserved.push(branch);
+      const cleanedBody = stripGitHubStackBoilerplate(pr.body);
+      if (cleanedBody === pr.body.trim()) {
+        preserved.push(branch);
+        continue;
+      }
+      try {
+        await update(cwd, branch, pr.title, cleanedBody, signal, runner);
+        updated.push(branch);
+      } catch (error: unknown) {
+        if (signal?.aborted) throw error;
+        issues.push({ branch, stage: "update", error: errorText(error) });
+      }
       continue;
     }
     if (!description || !description.title.trim() || !description.body.trim()) {

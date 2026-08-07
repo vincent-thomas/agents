@@ -98,7 +98,10 @@ function registeredTools(options: {
             { branch, title: `Title for ${branch}`, body: `Description for ${branch}` },
             sha,
           );
-          return { stdout: JSON.stringify({ number: 1, body }), stderr: "" };
+          return {
+            stdout: JSON.stringify({ number: 1, title: `Title for ${branch}`, body }),
+            stderr: "",
+          };
         }
         if (args[1] === "create" || args[1] === "edit") {
           return { stdout: "", stderr: "" };
@@ -1515,7 +1518,10 @@ test("push_and_check_ci skips remote linking for a single-branch stack before re
       events.push(`body:${args[1]}`);
       bodyCalls.push(args.join(" "));
       if (args[1] === "view") {
-        return { stdout: JSON.stringify({ number: 7, body: prBody }), stderr: "" };
+        return {
+          stdout: JSON.stringify({ number: 7, title: "Explain the feature", body: prBody }),
+          stderr: "",
+        };
       }
       assert.equal(args[1], "edit");
       prBody = args[args.indexOf("--body") + 1] as string;

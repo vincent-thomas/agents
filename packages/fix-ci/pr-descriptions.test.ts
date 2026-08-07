@@ -10,6 +10,7 @@ import {
   managedDescriptionSha,
   managedPullRequestDescription,
   refreshManagedPullRequestDescription,
+  stripGitHubStackBoilerplate,
   type PullRequestDescription,
 } from "./pr-descriptions.ts";
 import type { GhStackCommandRunner } from "./github-stack.ts";
@@ -70,7 +71,9 @@ test("creates a new draft PR with the authored SHA-bound body", async () => {
 
 test("refreshes only the bounded SHA section and preserves authored surroundings", () => {
   const old = managedPullRequestDescription(description("old details"), "old-sha");
-  const existing = `human introduction\n\n${old}\n\nreview notes`;
+  const stackBoilerplate =
+    "Stack created with [GitHub Stacks CLI](https://github.com/github/gh-stack) • [Give Feedback](https://github.com/github/gh-stack/issues) 💬";
+  const existing = `${stackBoilerplate}\n\nhuman introduction\n\n${old}\n\nreview notes`;
   const refreshed = refreshManagedPullRequestDescription(
     existing,
     description("new details"),
@@ -78,6 +81,8 @@ test("refreshes only the bounded SHA section and preserves authored surroundings
   );
   assert.match(refreshed, /human introduction/);
   assert.match(refreshed, /review notes/);
+  assert.doesNotMatch(refreshed, /Stack created with/);
+  assert.equal(stripGitHubStackBoilerplate(stackBoilerplate), "");
   assert.match(refreshed, /new details/);
   assert.doesNotMatch(refreshed, /old details/);
   assert.equal(managedDescriptionSha(refreshed, "feature"), "new-sha");
@@ -90,7 +95,12 @@ test("preserves a current marker for CI-only retries and reports stale content",
     let body = managedPullRequestDescription(description("current"), sha);
     const edits: string[] = [];
     const runner: GhStackCommandRunner = async (args) => {
-      if (args[1] === "view") return { stdout: JSON.stringify({ number: 1, body }), stderr: "" };
+      if (args[1] === "view") {
+        return {
+          stdout: JSON.stringify({ number: 1, title: "Feature title", body }),
+          stderr: "",
+        };
+      }
       edits.push(args.join(" "));
       body = args[args.indexOf("--body") + 1] as string;
       return { stdout: "", stderr: "" };
@@ -106,6 +116,19 @@ test("preserves a current marker for CI-only retries and reports stale content",
     assert.equal(retry.success, true);
     assert.deepEqual(retry.preserved, ["feature"]);
     assert.equal(edits.length, 0);
+
+    body =
+      "Stack created with [GitHub Stacks CLI](https://github.com/github/gh-stack) • [Give Feedback](https://github.com/github/gh-stack/issues) 💬\n\n" +
+      body;
+    const cleaned = await ensureManagedPullRequestDescriptions(
+      cwd,
+      ["feature"],
+      [],
+      undefined,
+      runner,
+    );
+    assert.deepEqual(cleaned.updated, ["feature"]);
+    assert.doesNotMatch(body, /Stack created with/);
 
     writeFileSync(join(cwd, "file.txt"), "changed\n");
     git(cwd, ["commit", "-am", "changed"]);
@@ -134,7 +157,10 @@ test("preserves a current marker for CI-only retries and reports stale content",
 
     const updateFailure: GhStackCommandRunner = async (args) => {
       if (args[1] === "view") {
-        return { stdout: JSON.stringify({ number: 1, body }), stderr: "" };
+        return {
+          stdout: JSON.stringify({ number: 1, title: "Feature title", body }),
+          stderr: "",
+        };
       }
       throw new Error("GitHub refused the edit");
     };

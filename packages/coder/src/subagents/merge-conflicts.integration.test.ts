@@ -320,6 +320,7 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
         return {
           stdout: JSON.stringify({
             number: branch === "lower" ? 1 : 2,
+            title: branch === "lower" ? "Rebase lower" : "Rebase tip",
             body: prBodies.get(branch) ?? "",
           }),
           stderr: "",

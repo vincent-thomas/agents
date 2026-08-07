@@ -12,8 +12,8 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.80.7",
-    "@earendil-works/pi-coding-agent": "^0.80.6",
+    "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
     "@sinclair/typebox": "^0.34.52",
     "@vt-agent/command-policy": "workspace:*",
     "@vt-agent/git_push": "workspace:*",
@@ -21,8 +21,8 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "@types/node": "^22.20.1",
+    "tsx": "^4.23.10",
+    "typescript": "^5.9.3"
   }
 }

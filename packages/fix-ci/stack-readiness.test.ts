@@ -293,6 +293,32 @@ suite("stack readiness orchestration", () => {
     assert.match(result.branches[0]?.reason ?? "", /ready API unavailable/);
   });
 
+  test("propagates cancellation from a non-cooperative polling dependency", async () => {
+    const controller = new AbortController();
+    const readyCalls: string[] = [];
+    const dependencies: StackReadinessDependencies = {
+      resolveBranch: async () => ({
+        sha: "sha-tip",
+        pr: { number: 1, state: "OPEN", isDraft: true, headRefOid: "sha-tip" },
+      }),
+      pollChecks: async () => {
+        controller.abort();
+        return { checks: [passingCheck], timedOut: false, polls: 1, mode: "commit" };
+      },
+      fetchFailureLogs: async () => [],
+      markPrReady: async (_cwd, _signal, branch) => {
+        readyCalls.push(branch);
+        return true;
+      },
+    };
+
+    await assert.rejects(
+      checkAndReadyStack("/workspace", ["tip"], controller.signal, () => {}, dependencies),
+      { name: "AbortError" },
+    );
+    assert.deepEqual(readyCalls, []);
+  });
+
   test("propagates cancellation instead of mutating later PRs", async () => {
     const controller = new AbortController();
     const readyCalls: string[] = [];

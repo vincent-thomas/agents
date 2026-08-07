@@ -92,7 +92,10 @@ async function resolveBranchSafely(
   signal: AbortSignal | undefined,
 ): Promise<{ resolution: StackBranchResolution; error: unknown | null }> {
   try {
-    return { resolution: await resolveBranch(cwd, branch, signal), error: null };
+    signal?.throwIfAborted();
+    const resolution = await resolveBranch(cwd, branch, signal);
+    signal?.throwIfAborted();
+    return { resolution, error: null };
   } catch (error: unknown) {
     rethrowIfAborted(signal, error);
     return { resolution: unavailableResolution(), error };
@@ -188,7 +191,9 @@ export const checkAndReadyStack: StackReadinessRunner = async (
     onStatus(`Polling CI for stack branch \`${report.branch}\` at ${report.sha.slice(0, 8)}…`);
     let poll: Awaited<ReturnType<StackReadinessDependencies["pollChecks"]>>;
     try {
+      signal?.throwIfAborted();
       poll = await dependencies.pollChecks(cwd, signal, undefined, report.sha);
+      signal?.throwIfAborted();
     } catch (error: unknown) {
       rethrowIfAborted(signal, error);
       addReason(report, `could not poll checks: ${errorDescription(error)}`);
@@ -205,7 +210,9 @@ export const checkAndReadyStack: StackReadinessRunner = async (
     );
     if (failures.length > 0) {
       try {
+        signal?.throwIfAborted();
         report.failureLogs = await dependencies.fetchFailureLogs(failures, cwd, signal);
+        signal?.throwIfAborted();
       } catch (error: unknown) {
         rethrowIfAborted(signal, error);
         addReason(report, `could not fetch failure logs: ${errorDescription(error)}`);
@@ -299,7 +306,9 @@ export const checkAndReadyStack: StackReadinessRunner = async (
 
     onStatus(`Marking PR #${report.prNumber} for \`${report.branch}\` ready for review…`);
     try {
+      signal?.throwIfAborted();
       report.ready = await dependencies.markPrReady(cwd, signal, report.branch);
+      signal?.throwIfAborted();
     } catch (error: unknown) {
       rethrowIfAborted(signal, error);
       report.ready = false;

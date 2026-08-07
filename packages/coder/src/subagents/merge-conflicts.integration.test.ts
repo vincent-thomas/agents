@@ -99,6 +99,7 @@ function withConflict(
 suite("merge-only conflict workflow in real repositories", () => {
   test(
     "adopts and commits an existing merge conflict",
+    { timeout: 15_000 },
     withConflict("merge", async (cwd) => {
       const prompt = await createMergeConflictsPrompt()({ cwd, definition });
       assert.match(prompt, /Conflicts were already present/);

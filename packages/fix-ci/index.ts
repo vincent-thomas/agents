@@ -28,7 +28,7 @@ import {
   fetchFailureLogs,
   isFailure,
   getPrBaseBranch,
-  mergeBaseBranchIntoCurrent,
+  rebaseCurrentBranchOntoBase,
   needsPullBeforePush,
   pullRemoteChanges,
   isBaseBranchAhead,
@@ -77,6 +77,10 @@ export function createFixCiExtension(options: {
 }) {
   return function (pi: ExtensionAPI) {
     let cycleCount = 0;
+    // Preserve the intentional history rewrite across the conflict-resolver
+    // round trip: the next push_and_check_ci call must not merge the old
+    // remote tip back into the completed rebase.
+    let rebasedBranchAfterBaseUpdate: string | undefined;
     const stackRunner = options.stackRunner ?? runGhStackCommand;
     const restoreBranch = options.restoreBranch ?? restoreWorkspaceBranch;
     const stackReadinessRunner = options.stackReadinessRunner ?? checkAndReadyStack;
@@ -323,11 +327,17 @@ export function createFixCiExtension(options: {
 
         // ── 1. Detect a GitHub stack before ordinary push synchronization ──
         // `gh stack sync` owns rebasing a stack. Do not run the ordinary
-        // merge/pull path afterward: that would undo stack semantics.
+        // base-update/pull path afterward: that would undo stack semantics.
         const branchName = await currentBranch(cwd, signal);
         const stackProbe = await probeGhStack(cwd, signal, stackRunner);
         let pushedSha: string | undefined;
         let prBase: string | null = null;
+        // A successful base update intentionally rewrites the PR branch. Do
+        // not merge the old remote tip back into that rebased history.
+        if (rebasedBranchAfterBaseUpdate && rebasedBranchAfterBaseUpdate !== branchName) {
+          rebasedBranchAfterBaseUpdate = undefined;
+        }
+        let rebasedOntoBase = rebasedBranchAfterBaseUpdate === branchName;
 
         if (stackProbe.status === "error") {
           return respond(
@@ -526,7 +536,7 @@ export function createFixCiExtension(options: {
             branches: stackReadiness.branches,
           });
         } else {
-          // ── 2. Check if base branch is ahead — merge if so ─────────────
+          // ── 2. Check if base branch is ahead — rebase if so ────────────
           // Keep the PR branch up to date with the base branch before pushing
           // and running CI. This prevents CI from testing a stale branch.
           prBase = await getPrBaseBranch(cwd, signal);
@@ -534,67 +544,79 @@ export function createFixCiExtension(options: {
           if (prBase) {
             const baseAhead = await isBaseBranchAhead(cwd, prBase, signal);
             if (baseAhead) {
+              // The previous conflicted rebase may have been aborted. A base
+              // that is still ahead proves the history rewrite did not finish.
+              rebasedBranchAfterBaseUpdate = undefined;
+              rebasedOntoBase = false;
               if (!branchName) {
                 return respond(
                   `Could not determine the current branch name. ` + `Fix manually and try again.`,
                   {
-                    mergeFailed: true,
+                    rebaseFailed: true,
                     error: "Unable to determine current branch",
                   },
                 );
               }
 
-              notify(`Merging ${prBase} into ${branchName} via worktree…`);
+              notify(`Rebasing ${branchName} onto ${prBase} via worktree…`);
 
-              const mergeResult = await mergeBaseBranchIntoCurrent(cwd, prBase, branchName, signal);
+              const rebaseResult = await rebaseCurrentBranchOntoBase(
+                cwd,
+                prBase,
+                branchName,
+                signal,
+              );
 
-              if (!mergeResult.success) {
-                if (mergeResult.conflictPaths.length > 0) {
-                  const conflictList = formatConflictList(mergeResult.conflictPaths);
+              if (!rebaseResult.success) {
+                if (rebaseResult.conflictPaths.length > 0) {
+                  // Keep the marker until merge_conflicts finishes the
+                  // in-progress rebase and the caller invokes this tool again.
+                  rebasedBranchAfterBaseUpdate = branchName;
+                  const conflictList = formatConflictList(rebaseResult.conflictPaths);
 
                   return respond(
-                    `## ⚠️ Merge Conflicts Detected\n\n` +
+                    `## ⚠️ Rebase Conflicts Detected\n\n` +
                       `The PR branch \`${branchName}\` has conflicts with the base branch ` +
-                      `\`${prBase}\`. I attempted to merge the latest \`${prBase}\` into ` +
-                      `\`${branchName}\` but there are unresolved conflicts.\n\n` +
+                      `\`${prBase}\`. I attempted to rebase it onto the latest \`${prBase}\` ` +
+                      `but there are unresolved conflicts.\n\n` +
                       `### Conflicting files:\n${conflictList}\n\n` +
-                      `### Merge output:\n\`\`\`\n${mergeResult.output.trim()}\n\`\`\`\n\n` +
+                      `### Rebase output:\n\`\`\`\n${rebaseResult.output.trim()}\n\`\`\`\n\n` +
                       `### To resolve:\n` +
-                      `1. Resolve the conflicts in the listed files\n` +
-                      `2. \`git add\` the resolved files\n` +
-                      `3. Commit the merge (the merge message is pre-filled)\n` +
-                      `4. Run \`push_and_check_ci\` again`,
+                      `1. Call the \`merge_conflicts\` agent to resolve and continue the rebase\n` +
+                      `2. Run \`push_and_check_ci\` again`,
                     {
-                      mergeConflict: true,
+                      rebaseConflict: true,
                       baseBranch: prBase,
                       currentBranch: branchName,
-                      conflictPaths: mergeResult.conflictPaths,
-                      mergeOutput: mergeResult.output,
+                      conflictPaths: rebaseResult.conflictPaths,
+                      rebaseOutput: rebaseResult.output,
                     },
                   );
                 }
 
-                // Merge failed but no conflicts — likely a tooling or network error.
+                // Rebase failed but no conflicts — likely a tooling or network error.
                 return respond(
-                  `## ⚠️ Merge Failed\n\n` +
-                    `Failed to merge \`${prBase}\` into \`${branchName}\`. ` +
-                    `No merge conflicts were detected — this is likely a ` +
+                  `## ⚠️ Rebase Failed\n\n` +
+                    `Failed to rebase \`${branchName}\` onto \`${prBase}\`. ` +
+                    `No rebase conflicts were detected — this is likely a ` +
                     `transient tooling issue (e.g. network or auth).\n\n` +
-                    `### Error output:\n\`\`\`\n${mergeResult.output.trim()}\n\`\`\`\n\n` +
+                    `### Error output:\n\`\`\`\n${rebaseResult.output.trim()}\n\`\`\`\n\n` +
                     `Try running \`push_and_check_ci\` again. ` +
-                    `If the problem persists, merge \`${prBase}\` into your branch manually ` +
-                    `(\`git fetch origin ${prBase} && git merge origin/${prBase}\`).`,
+                    `If the problem persists, rebase \`${branchName}\` manually ` +
+                    `(\`git fetch origin ${prBase} && git rebase origin/${prBase}\`).`,
                   {
-                    mergeFailed: true,
+                    rebaseFailed: true,
                     baseBranch: prBase,
                     currentBranch: branchName,
-                    errorOutput: mergeResult.output,
+                    errorOutput: rebaseResult.output,
                   },
                 );
               }
 
+              rebasedBranchAfterBaseUpdate = branchName;
+              rebasedOntoBase = true;
               notify(
-                `Successfully merged \`${prBase}\` into \`${branchName}\` ` +
+                `Successfully rebased \`${branchName}\` onto \`${prBase}\` ` +
                   `without conflicts. Proceeding with push…`,
               );
             }
@@ -606,64 +628,74 @@ export function createFixCiExtension(options: {
           if (hasSomethingToPush) {
             cycleCount++;
 
-            // ── Pull remote changes if local and remote have diverged ────────
-            notify("Checking if remote has newer commits…");
+            // A base rebase deliberately makes the local branch diverge from
+            // its old remote tip. Pulling there would recreate a merge commit
+            // and undo the history rewrite, so skip the merge-pull path.
+            if (!rebasedOntoBase) {
+              // ── Pull remote changes if local and remote have diverged ────────
+              notify("Checking if remote has newer commits…");
 
-            const needsPull = await needsPullBeforePush(cwd, signal);
+              const needsPull = await needsPullBeforePush(cwd, signal);
 
-            if (needsPull) {
-              notify(
-                `Remote and local have diverged — pulling changes via merge (non-history-rewriting)…`,
-              );
+              if (needsPull) {
+                notify(
+                  `Remote and local have diverged — pulling changes via merge (non-history-rewriting)…`,
+                );
 
-              const pullResult = await pullRemoteChanges(cwd, signal);
+                const pullResult = await pullRemoteChanges(cwd, signal);
 
-              if (!pullResult.success) {
-                cycleCount = 0;
+                if (!pullResult.success) {
+                  cycleCount = 0;
 
-                if (pullResult.conflictPaths.length > 0) {
-                  const conflictList = formatConflictList(pullResult.conflictPaths);
+                  if (pullResult.conflictPaths.length > 0) {
+                    const conflictList = formatConflictList(pullResult.conflictPaths);
 
+                    return respond(
+                      `## ⚠️ Merge Conflicts During Pull\n\n` +
+                        `The remote branch has commits ahead of local. ` +
+                        `I attempted to pull them via merge but there are unresolved ` +
+                        `conflicts.\n\n` +
+                        `### Conflicting files:\n${conflictList}\n\n` +
+                        `### Pull output:\n\`\`\`\n${pullResult.output.trim()}\n\`\`\`\n\n` +
+                        `### To resolve:\n` +
+                        `1. Resolve the conflicts in the listed files\n` +
+                        `2. \`git add\` the resolved files\n` +
+                        `3. Commit the merge\n` +
+                        `4. Run \`push_and_check_ci\` again`,
+                      {
+                        mergeConflict: true,
+                        conflictPaths: pullResult.conflictPaths,
+                        pullOutput: pullResult.output,
+                      },
+                    );
+                  }
+
+                  // Pull failed but no conflicts — likely a tooling or network error.
                   return respond(
-                    `## ⚠️ Merge Conflicts During Pull\n\n` +
-                      `The remote branch has commits ahead of local. ` +
-                      `I attempted to pull them via merge but there are unresolved ` +
-                      `conflicts.\n\n` +
-                      `### Conflicting files:\n${conflictList}\n\n` +
-                      `### Pull output:\n\`\`\`\n${pullResult.output.trim()}\n\`\`\`\n\n` +
-                      `### To resolve:\n` +
-                      `1. Resolve the conflicts in the listed files\n` +
-                      `2. \`git add\` the resolved files\n` +
-                      `3. Commit the merge\n` +
-                      `4. Run \`push_and_check_ci\` again`,
-                    {
-                      mergeConflict: true,
-                      conflictPaths: pullResult.conflictPaths,
-                      pullOutput: pullResult.output,
-                    },
+                    `## ⚠️ Pull Failed\n\n` +
+                      `Failed to pull remote changes. ` +
+                      `No merge conflicts were detected — this is likely a ` +
+                      `transient tooling issue (e.g. network or auth).\n\n` +
+                      `### Error output:\n\`\`\`\n${pullResult.output.trim()}\n\`\`\`\n\n` +
+                      `Try running \`push_and_check_ci\` again. ` +
+                      `If the problem persists, pull manually.`,
+                    { pullFailed: true, errorOutput: pullResult.output },
                   );
                 }
 
-                // Pull failed but no conflicts — likely a tooling or network error.
-                return respond(
-                  `## ⚠️ Pull Failed\n\n` +
-                    `Failed to pull remote changes. ` +
-                    `No merge conflicts were detected — this is likely a ` +
-                    `transient tooling issue (e.g. network or auth).\n\n` +
-                    `### Error output:\n\`\`\`\n${pullResult.output.trim()}\n\`\`\`\n\n` +
-                    `Try running \`push_and_check_ci\` again. ` +
-                    `If the problem persists, pull manually.`,
-                  { pullFailed: true, errorOutput: pullResult.output },
-                );
+                notify("Pull succeeded. Proceeding with push…");
               }
-
-              notify("Pull succeeded. Proceeding with push…");
+            } else {
+              notify("Base rebase succeeded — proceeding with a leased force push…");
             }
 
-            // Push
+            // A rebased branch needs a safe non-fast-forward update. The lease
+            // protects commits that appeared remotely after our fetch.
             notify("Pushing to origin…");
 
-            const pushResult = await gitPush(cwd, signal);
+            const pushResult = await gitPush(cwd, signal, {
+              forceWithLease: rebasedOntoBase,
+            });
 
             if (!pushResult.success) {
               cycleCount = 0;
@@ -676,9 +708,11 @@ export function createFixCiExtension(options: {
 
             // Pin all subsequent checks to the exact commit we just pushed.
             pushedSha = (await getHeadSha(cwd, signal)) ?? undefined;
+            rebasedBranchAfterBaseUpdate = undefined;
           } else {
             notify("Nothing to push — checking CI for current HEAD…");
             pushedSha = (await getHeadSha(cwd, signal)) ?? undefined;
+            rebasedBranchAfterBaseUpdate = undefined;
           }
         }
 

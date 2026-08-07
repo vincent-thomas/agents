@@ -85,7 +85,7 @@ test("resumes until conflicts are gone and the required commit succeeds", async 
     { message: undefined, addAll: false },
   ]);
   assert.deepEqual(progress, [
-    "Conflicts remain; resuming the merge resolver…",
+    "Conflicts remain; resuming the conflict resolver…",
     "Required checks or commit failed; resuming the merge resolver…",
   ]);
   assert.equal(result, "resolver report 3\n\nMerge committed");
@@ -136,6 +136,78 @@ test("reads the original branch from gh-stack rebase state formats", () => {
   assert.equal(parseStackRebaseOriginalBranch('{"original_branch":"feature"}'), "feature");
   assert.equal(parseStackRebaseOriginalBranch("{}"), null);
   assert.equal(parseStackRebaseOriginalBranch("invalid"), null);
+});
+
+test("continues an ordinary rebase noninteractively through repeated conflicts", async () => {
+  const prompts: string[] = [];
+  const progress: string[] = [];
+  const unmergedEntries = ["", "100644 next 2\tnext.ts\n", "", ""];
+  const continuations = [
+    { success: false, output: "Conflict in the next rebased commit" },
+    { success: true, output: "Rebase completed" },
+  ];
+  let rebaseActive = true;
+  let continueCalls = 0;
+  let workspaceAssertions = 0;
+
+  const workflow = createMergeConflictsWorkflow({
+    async assertWorkspace() {
+      workspaceAssertions += 1;
+    },
+    pathExists(path) {
+      return rebaseActive && path.endsWith("rebase-merge");
+    },
+    commandOutput: async (command, args) => {
+      assert.equal(command, "git");
+      if (args[0] === "ls-files") return unmergedEntries.shift()!;
+      if (args[1] === "--verify") throw new Error("missing");
+      assert.equal(args[1], "--git-path");
+      return `.git/${args[2]}\n`;
+    },
+    async continueRebase() {
+      continueCalls += 1;
+      const result = continuations.shift()!;
+      if (result.success) rebaseActive = false;
+      return result;
+    },
+    async commit() {
+      throw new Error("ordinary rebases must not create merge commits");
+    },
+  });
+
+  const result = await workflow({
+    cwd: "/repo",
+    definition,
+    prompt: "initial rebase conflict prompt",
+    subagent: {
+      definition,
+      session: {
+        async prompt(prompt: string) {
+          prompts.push(prompt);
+        },
+        getLastAssistantText() {
+          return "Resolved ordinary rebase conflicts.";
+        },
+      } as never,
+      dispose() {},
+    },
+    onProgress(text) {
+      progress.push(text);
+    },
+  });
+
+  assert.equal(continueCalls, 2);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1]!, /another conflicted commit/);
+  assert.match(prompts[1]!, /next\.ts/);
+  assert.deepEqual(progress, [
+    "Continuing the in-progress rebase…",
+    "The rebase reached another conflict; resuming the resolver…",
+    "Continuing the in-progress rebase…",
+  ]);
+  assert.equal(workspaceAssertions, 1);
+  assert.match(result, /Resolved ordinary rebase conflicts/);
+  assert.match(result, /Rebase completed/);
 });
 
 test("continues a cascading GitHub stack rebase through every conflicted branch", async () => {

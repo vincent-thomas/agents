@@ -104,7 +104,10 @@ test("reports the active non-merge operation", async () => {
 });
 
 test("provides operation-specific block reasons", () => {
-  assert.match(mergeConflictWriteBlockReason("rebase"), /non-stack rebase conflict/);
+  assert.match(
+    mergeConflictWriteBlockReason("rebase"),
+    /ordinary rebase conflict.*merge_conflicts/,
+  );
   assert.match(
     mergeConflictWriteBlockReason("rebase", true),
     /GitHub stack rebase conflict.*merge_conflicts/,

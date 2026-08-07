@@ -92,6 +92,38 @@ test("adopts conflicts from an existing merge", async () => {
   assert.ok(!calls.some((call) => call.startsWith("git merge ")));
 });
 
+test("adopts conflicts from an ordinary rebase", async () => {
+  const calls: string[] = [];
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    calls.push(call);
+    if (call === "git ls-files -u") return "100644 abc 2\tsrc/index.ts\n";
+    if (call === "git rev-parse --verify -q MERGE_HEAD") throw new Error("missing");
+    if (call === "git rev-parse --verify -q CHERRY_PICK_HEAD") throw new Error("missing");
+    if (call === "git rev-parse --verify -q REVERT_HEAD") throw new Error("missing");
+    if (call === "git rev-parse --git-path rebase-merge") return ".git/rebase-merge\n";
+    if (call === "git rev-parse --git-path rebase-apply") return ".git/rebase-apply\n";
+    if (call === "git rev-parse --git-path gh-stack-rebase-state")
+      return ".git/gh-stack-rebase-state\n";
+    if (call === "git status --short") return "UU src/index.ts\n";
+    if (call === "git diff --no-ext-diff --cc --diff-filter=U") {
+      return "diff --cc src/index.ts\\n";
+    }
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  const prompt = await createMergeConflictsPrompt(commandOutput, (path) =>
+    path.endsWith("rebase-merge"),
+  )({
+    cwd: "/repo",
+    definition: {} as never,
+  });
+
+  assert.match(prompt, /rebasing the current branch/);
+  assert.match(prompt, /current rebase/);
+  assert.ok(!calls.some((call) => call.startsWith("gh ")));
+});
+
 test("adopts conflicts from a GitHub stack rebase", async () => {
   const calls: string[] = [];
   const commandOutput: CommandOutputFn = async (command, args) => {

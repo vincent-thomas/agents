@@ -14,6 +14,7 @@ import {
   branchExistsOnOrigin,
   findClosestBaseBranch,
   getPrBaseBranch,
+  rebaseCurrentBranchOntoBase,
   createDraftPr,
   gitPush,
   prReadyCommand,
@@ -254,6 +255,63 @@ function withGitRepos(
     }
   };
 }
+
+// ---------------------------------------------------------------------------
+// Rebase current branch onto the fetched PR base
+// ---------------------------------------------------------------------------
+
+suite("rebaseCurrentBranchOntoBase", () => {
+  test(
+    "rebases onto the verified current base SHA",
+    withGitRepos(async (local) => {
+      const baseBranch = git("git branch --show-current", local);
+      git("git checkout -b feature", local);
+      writeFileSync(join(local, "feature.txt"), "feature");
+      git("git add . && git commit -m feature", local);
+      git(`git checkout ${baseBranch}`, local);
+      writeFileSync(join(local, "base.txt"), "base");
+      git("git add . && git commit -m base-update", local);
+      git("git push origin HEAD", local);
+      const baseSha = git("git rev-parse HEAD", local);
+      git("git checkout feature", local);
+
+      const result = await withFakeGh(local, `printf '%s\\n' ${baseSha}`, () =>
+        rebaseCurrentBranchOntoBase(local, baseBranch, "feature"),
+      );
+
+      assert.equal(result.success, true, result.output);
+      assert.equal(git(`git merge-base --is-ancestor ${baseBranch} HEAD; printf $?`, local), "0");
+      assert.equal(git(`git rev-list --count ${baseBranch}..HEAD`, local), "1");
+      assert.equal(git("git show -s --format=%s HEAD", local), "feature");
+    }),
+  );
+
+  test(
+    "leaves rebase conflicts in place for resolution",
+    withGitRepos(async (local) => {
+      const baseBranch = git("git branch --show-current", local);
+      git("git checkout -b feature", local);
+      writeFileSync(join(local, "conflict.txt"), "feature");
+      git("git add . && git commit -m feature", local);
+      git("git checkout " + baseBranch, local);
+      writeFileSync(join(local, "conflict.txt"), "base");
+      git("git add . && git commit -m base-update", local);
+      git("git push origin HEAD", local);
+      const baseSha = git("git rev-parse HEAD", local);
+      git("git checkout feature", local);
+
+      const result = await withFakeGh(local, `printf '%s\\n' ${baseSha}`, () =>
+        rebaseCurrentBranchOntoBase(local, baseBranch, "feature"),
+      );
+
+      assert.equal(result.success, false);
+      assert.deepEqual(result.conflictPaths, ["conflict.txt"]);
+      assert.notEqual(git("git ls-files -u", local), "");
+      assert.equal(git("git rev-parse --verify -q REBASE_HEAD", local).length, 40);
+      git("git rebase --abort", local);
+    }),
+  );
+});
 
 // ---------------------------------------------------------------------------
 // needsPush
@@ -518,6 +576,35 @@ suite("gitPush", () => {
       const upstream = git("git rev-parse --abbrev-ref --symbolic-full-name @{u}", local);
       assert.equal(upstream, "origin/feature/new");
       assert.equal(await needsPush(local), false);
+    }),
+  );
+
+  test(
+    "updates a rebased branch with force-with-lease without creating a merge commit",
+    withGitRepos(async (local, remote) => {
+      const baseBranch = git("git branch --show-current", local);
+      git("git checkout -b feature", local);
+      writeFileSync(join(local, "feature.txt"), "feature");
+      git("git add . && git commit -m feature", local);
+      git("git push -u origin feature", local);
+
+      git(`git checkout ${baseBranch}`, local);
+      writeFileSync(join(local, "base.txt"), "base update");
+      git("git add . && git commit -m base-update", local);
+      git("git push origin HEAD", local);
+      git("git checkout feature", local);
+      const oldRemoteHead = git("git rev-parse origin/feature", local);
+      git(`git rebase ${baseBranch}`, local);
+      assert.notEqual(git("git rev-parse HEAD", local), oldRemoteHead);
+
+      const result = await gitPush(local, undefined, { forceWithLease: true });
+      assert.equal(result.success, true, result.output);
+      const remoteHead = git("git --git-dir " + remote + " rev-parse refs/heads/feature", local);
+      assert.equal(remoteHead, git("git rev-parse HEAD", local));
+      assert.equal(
+        git("git --git-dir " + remote + " rev-list --merges --count refs/heads/feature", local),
+        "0",
+      );
     }),
   );
 });

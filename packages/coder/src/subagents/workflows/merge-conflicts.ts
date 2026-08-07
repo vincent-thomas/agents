@@ -13,6 +13,8 @@ export interface StackRebaseContinuationResult {
   output: string;
 }
 
+export type RebaseContinuationResult = StackRebaseContinuationResult;
+
 export interface CreateMergeConflictsWorkflowOptions {
   assertWorkspace(cwd: string): Promise<void>;
   commandOutput?: CommandOutputFn;
@@ -21,6 +23,7 @@ export interface CreateMergeConflictsWorkflowOptions {
     cwd: string,
     signal?: AbortSignal,
   ) => Promise<StackRebaseContinuationResult>;
+  continueRebase?: (cwd: string, signal?: AbortSignal) => Promise<RebaseContinuationResult>;
   readStackRebaseOriginalBranch?: (cwd: string, signal?: AbortSignal) => Promise<string>;
   restoreBranch?: (
     cwd: string,
@@ -36,6 +39,19 @@ function remainingConflictsPrompt(unmergedEntries: string): string {
     "Resolve and stage every path below, then verify that git ls-files -u is empty before responding again.",
     "",
     "Remaining unmerged index entries:",
+    unmergedEntries,
+  ].join("\n");
+}
+
+function continuingRebasePrompt(output: string, unmergedEntries: string): string {
+  return [
+    "The rebase advanced to another conflicted commit.",
+    "Resolve and stage every path below. The host will continue the noninteractive rebase again.",
+    "",
+    "git rebase --continue output:",
+    output,
+    "",
+    "Unmerged index entries:",
     unmergedEntries,
   ].join("\n");
 }
@@ -127,6 +143,18 @@ export function createMergeConflictsWorkflow(
         return { success: false, output: commandErrorOutput(error) };
       }
     });
+  const continueRebase =
+    options.continueRebase ??
+    (async (cwd: string, signal?: AbortSignal): Promise<RebaseContinuationResult> => {
+      try {
+        // defaultCommandOutput supplies GIT_EDITOR=true for this invocation,
+        // so Git never opens an interactive editor for the rebase message.
+        const output = await commandOutput("git", ["rebase", "--continue"], cwd, signal);
+        return { success: true, output };
+      } catch (error) {
+        return { success: false, output: commandErrorOutput(error) };
+      }
+    });
 
   return async ({ cwd, prompt: initialPrompt, signal, subagent, onProgress }) => {
     let prompt = initialPrompt;
@@ -137,7 +165,7 @@ export function createMergeConflictsWorkflow(
 
       const unmergedEntries = await commandOutput("git", ["ls-files", "-u"], cwd, signal);
       if (unmergedEntries.trim() !== "") {
-        onProgress("Conflicts remain; resuming the merge resolver…");
+        onProgress("Conflicts remain; resuming the conflict resolver…");
         prompt = remainingConflictsPrompt(unmergedEntries);
         continue;
       }
@@ -152,7 +180,33 @@ export function createMergeConflictsWorkflow(
           pathExists,
         );
         if (!stackRebase) {
-          throw new Error("merge_conflicts cannot continue an in-progress non-stack rebase");
+          onProgress("Continuing the in-progress rebase…");
+          const continuation = await continueRebase(cwd, signal);
+          const pendingUnmergedEntries = await commandOutput(
+            "git",
+            ["ls-files", "-u"],
+            cwd,
+            signal,
+          );
+          if (pendingUnmergedEntries.trim() !== "") {
+            onProgress("The rebase reached another conflict; resuming the resolver…");
+            prompt = continuingRebasePrompt(continuation.output, pendingUnmergedEntries);
+            continue;
+          }
+          if (!continuation.success) {
+            throw new Error(
+              `git rebase --continue failed without producing conflicts:\n${continuation.output}`,
+            );
+          }
+          if ((await detectGitOperation(cwd, commandOutput, signal, pathExists)) !== "none") {
+            throw new Error("git rebase --continue returned before the rebase finished");
+          }
+
+          await options.assertWorkspace(cwd);
+          const report = subagent.session.getLastAssistantText()?.trim();
+          return [report, continuation.output || "Rebase conflicts resolved and rebase completed."]
+            .filter((text): text is string => Boolean(text))
+            .join("\n\n");
         }
         stackOriginalBranch ??= await readStackRebaseOriginalBranch(cwd, signal);
 

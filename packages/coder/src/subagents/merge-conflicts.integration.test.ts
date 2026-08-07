@@ -90,7 +90,7 @@ function withConflict(
   };
 }
 
-suite("merge-only conflict workflow in real repositories", () => {
+suite("merge and rebase conflict workflow in real repositories", () => {
   test(
     "adopts and commits an existing merge conflict",
     withConflict("merge", async (cwd) => {
@@ -167,8 +167,43 @@ suite("merge-only conflict workflow in real repositories", () => {
     }),
   );
 
+  test(
+    "resolves and finishes an ordinary rebase without a merge commit",
+    withConflict("rebase", async (cwd) => {
+      const headBefore = git(cwd, ["rev-parse", "HEAD"]);
+      const workflow = createMergeConflictsWorkflow({ assertWorkspace: async () => {} });
+
+      const result = await workflow({
+        cwd,
+        definition,
+        prompt: "Resolve the rebase conflict.",
+        subagent: {
+          definition,
+          session: {
+            async prompt() {
+              writeFileSync(join(cwd, "conflict.txt"), "resolved\n");
+              git(cwd, ["add", "conflict.txt"]);
+            },
+            getLastAssistantText() {
+              return "Resolved the ordinary rebase conflict.";
+            },
+          } as never,
+          dispose() {},
+        },
+        onProgress() {},
+      });
+
+      assert.match(result, /Resolved the ordinary rebase conflict/);
+      assert.notEqual(git(cwd, ["rev-parse", "HEAD"]), headBefore);
+      assert.equal(git(cwd, ["rev-list", "--merges", "--count", "HEAD"]).trim(), "0");
+      assert.equal(
+        spawnSync("git", ["rev-parse", "--verify", "-q", "MERGE_HEAD"], { cwd }).status,
+        1,
+      );
+    }),
+  );
+
   for (const [operation, message] of [
-    ["rebase", "merge_conflicts cannot continue an in-progress rebase"],
     ["cherry-pick", "merge_conflicts cannot continue an in-progress cherry-pick"],
     ["revert", "merge_conflicts cannot continue an in-progress revert"],
     ["none", "Unmerged index entries exist, but no merge is in progress"],

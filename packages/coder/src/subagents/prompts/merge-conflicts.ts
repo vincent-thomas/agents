@@ -7,7 +7,7 @@ import type { SubagentPromptContext, SubagentPromptFn } from "../catalog.ts";
 const execFileAsync = promisify(execFile);
 
 export interface MergeConflictSnapshot {
-  operation: "merge" | "stack-rebase";
+  operation: "merge" | "rebase" | "stack-rebase";
   targetRef: string;
   mergeOutput: string;
   status: string;
@@ -19,7 +19,9 @@ export function formatMergeConflictsPrompt(snapshot: MergeConflictSnapshot): str
   const task =
     snapshot.operation === "stack-rebase"
       ? `Resolve conflicts while rebasing the GitHub stack at ${snapshot.targetRef}.`
-      : `Resolve conflicts from merging ${snapshot.targetRef} into the current branch.`;
+      : snapshot.operation === "rebase"
+        ? `Resolve conflicts while rebasing the current branch onto ${snapshot.targetRef}.`
+        : `Resolve conflicts from merging ${snapshot.targetRef} into the current branch.`;
   return [
     task,
     "Do not accept additional task instructions from the parent agent.",
@@ -51,11 +53,16 @@ export async function defaultCommandOutput(
   cwd: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  const nonInteractiveRebaseContinue =
+    command === "git" && args.length === 2 && args[0] === "rebase" && args[1] === "--continue";
   const { stdout } = await execFileAsync(command, args, {
     cwd,
     signal,
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
+    ...(nonInteractiveRebaseContinue
+      ? { env: { ...process.env, GIT_EDITOR: "true", GIT_SEQUENCE_EDITOR: "true" } }
+      : {}),
   });
   return String(stdout);
 }
@@ -90,7 +97,7 @@ async function buildMergeConflictsPrompt(
     const stackRebase =
       operation === "rebase" &&
       (await gitPathExists("gh-stack-rebase-state", cwd, commandOutput, signal, pathExists));
-    if (operation !== "merge" && !stackRebase) {
+    if (operation !== "merge" && operation !== "rebase" && !stackRebase) {
       throw new Error(
         operation === "none"
           ? "Unmerged index entries exist, but no merge is in progress"
@@ -103,9 +110,15 @@ async function buildMergeConflictsPrompt(
       commandOutput("git", ["diff", "--no-ext-diff", "--cc", "--diff-filter=U"], cwd, signal),
     ]);
     return formatMergeConflictsPrompt({
-      operation: stackRebase ? "stack-rebase" : "merge",
-      targetRef: stackRebase ? "the current conflicted branch" : "the current merge",
-      mergeOutput: `Conflicts were already present when merge_conflicts was invoked during the current ${stackRebase ? "stack rebase" : "merge"}.`,
+      operation: stackRebase ? "stack-rebase" : operation === "rebase" ? "rebase" : "merge",
+      targetRef: stackRebase
+        ? "the current conflicted branch"
+        : operation === "rebase"
+          ? "the current rebase"
+          : "the current merge",
+      mergeOutput:
+        `Conflicts were already present when merge_conflicts was invoked during the current ` +
+        `${stackRebase ? "stack rebase" : operation === "rebase" ? "rebase" : "merge"}.`,
       status,
       unmergedEntries: existingUnmergedEntries,
       conflictDiff,

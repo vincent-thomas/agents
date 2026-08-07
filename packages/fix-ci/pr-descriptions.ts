@@ -56,7 +56,7 @@ function markerExpression(): RegExp {
 
 export function stripGitHubStackBoilerplate(body: string): string {
   const boilerplate =
-    /^\s*Stack created with \[GitHub Stacks CLI\]\([^)]+\)\s*[•·]\s*\[Give Feedback\]\([^)]+\)\s*(?:💬|🗨️?)?\s*$/;
+    /^\s*Stack created with \[GitHub Stacks CLI\]\([^)]+\)\s*[•·]\s*\[Give Feedback[^\]]*\]\([^)]+\).*$/;
   return body
     .split(/\r?\n/)
     .filter((line) => !boilerplate.test(line))

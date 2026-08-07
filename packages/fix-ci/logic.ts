@@ -45,6 +45,12 @@ interface PushResult {
   output: string;
 }
 
+interface RebaseResult {
+  success: boolean;
+  output: string;
+  conflictPaths: string[];
+}
+
 interface MergeResult {
   success: boolean;
   output: string;
@@ -68,10 +74,22 @@ async function runGitPush(command: string, cwd: string, signal?: AbortSignal): P
   }
 }
 
-export async function gitPush(cwd: string, signal?: AbortSignal): Promise<PushResult> {
+export interface GitPushOptions {
+  /** Allow replacing the remote tip only when its expected lease still holds. */
+  forceWithLease?: boolean;
+}
+
+export async function gitPush(
+  cwd: string,
+  signal?: AbortSignal,
+  options: GitPushOptions = {},
+): Promise<PushResult> {
   // A brand-new branch has no upstream, so a bare `git push` fails. In that
   // case push and set the upstream in one go so first pushes succeed.
-  const command = (await hasUpstream(cwd, signal)) ? "git push" : "git push -u origin HEAD";
+  const force = options.forceWithLease ? " --force-with-lease" : "";
+  const command = (await hasUpstream(cwd, signal))
+    ? `git push${force}`
+    : `git push${force} -u origin HEAD`;
   return runGitPush(command, cwd, signal);
 }
 
@@ -802,23 +820,23 @@ async function getBranchShaViaApi(
 }
 
 /**
- * Merge the latest version of the base branch into the current PR branch.
+ * Rebase the current PR branch onto the latest version of its base branch.
  *
  * 1. Creates a worktree with the base branch checked out at its latest SHA
  * 2. Verifies the worktree SHA matches what the GitHub API reports
- * 3. Merges the base branch into the current branch (creates a merge commit
- *    if no conflicts, stops with conflicts if there are any)
+ * 3. Rebases the current branch onto that SHA, stopping with conflicts when
+ *    necessary so they can be resolved by the caller.
  *
  * Returns { success, output, conflictPaths }.
  */
-export async function mergeBaseBranchIntoCurrent(
+export async function rebaseCurrentBranchOntoBase(
   cwd: string,
   baseBranch: string,
   branch: string,
   signal?: AbortSignal,
-): Promise<MergeResult> {
+): Promise<RebaseResult> {
   const safeBranch = branch.replace(/[^a-zA-Z0-9_-]/g, "-");
-  const worktreePath = `/tmp/vt-pi-merge-${safeBranch}-${Date.now()}`;
+  const worktreePath = `/tmp/vt-pi-rebase-${safeBranch}-${Date.now()}`;
 
   // Helper to clean up the worktree (best-effort).
   const removeWorktree = async () => {
@@ -867,28 +885,37 @@ export async function mergeBaseBranchIntoCurrent(
       }
     }
 
-    // Step 4: Get the SHA to merge from (use the worktree's HEAD)
+    // Step 4: Get the SHA to rebase onto (use the verified worktree HEAD)
     const { stdout: baseSha } = await execAsync("git rev-parse HEAD", {
       cwd: worktreePath,
       timeout: 5_000,
       signal,
     });
     const sha = baseSha.trim();
+    if (expectedSha && sha !== expectedSha) {
+      await removeWorktree();
+      return {
+        success: false,
+        output: `Fetched base ${baseBranch} at ${sha}, but GitHub reports ${expectedSha}.`,
+        conflictPaths: [],
+      };
+    }
 
-    // Step 5: Merge the base branch into the current PR branch
-    // `git merge` performs a merge (not a rebase), creating a merge commit
-    // on success. On conflicts it stops and lets the user resolve.
+    // Step 5: Rebase the current PR branch onto the fetched base SHA. On
+    // conflicts, git leaves the rebase state and index in place for resolution.
     try {
-      const { stdout, stderr } = await execAsync(`git merge ${sha} --no-edit 2>&1`, {
+      const { stdout, stderr } = await execAsync(`git rebase ${sha} 2>&1`, {
         cwd,
         timeout: 30_000,
         signal,
       });
       await removeWorktree();
       return { success: true, output: stdout + stderr, conflictPaths: [] };
-    } catch (mergeErr: unknown) {
-      const output = extractErrorOutput(mergeErr);
-      const conflictPaths = extractConflictPaths(output);
+    } catch (rebaseErr: unknown) {
+      const output = extractErrorOutput(rebaseErr);
+      // Read the index while leaving Git's rebase state untouched. This is
+      // authoritative even when Git changes its human-readable output.
+      const conflictPaths = await getUnmergedPaths(cwd, signal);
       await removeWorktree();
       return { success: false, output, conflictPaths };
     }
@@ -898,9 +925,7 @@ export async function mergeBaseBranchIntoCurrent(
   }
 }
 
-/**
- * Parse git merge output to extract paths of files with conflicts.
- */
+/** Parse git operation output to extract paths of files with conflicts. */
 function extractConflictPaths(output: string): string[] {
   const paths: string[] = [];
   const regex = /CONFLICT\s+\([^)]+\):\s+Merge conflict in\s+(\S+)/g;
@@ -978,8 +1003,8 @@ export async function pullRemoteChanges(cwd: string, signal?: AbortSignal): Prom
  * Fetches the latest base branch ref from origin, then counts commits on
  * the base branch that aren't reachable from HEAD.
  *
- * Returns true if the base branch has newer commits that should be merged
- * into the current branch before pushing.
+ * Returns true if the current branch should be rebased onto newer base
+ * commits before pushing.
  */
 export async function isBaseBranchAhead(
   cwd: string,

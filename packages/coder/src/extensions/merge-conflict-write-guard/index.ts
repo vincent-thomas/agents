@@ -12,7 +12,7 @@ export function mergeConflictWriteBlockReason(
     case "rebase":
       return stackRebase
         ? 'A GitHub stack rebase conflict is in progress. Call agent with actor: "merge_conflicts" before calling write.'
-        : "A non-stack rebase conflict is in progress; resolve it outside this conflict workflow before calling write.";
+        : 'An ordinary rebase conflict is in progress. Call agent with actor: "merge_conflicts" before calling write.';
     case "cherry-pick":
       return "A cherry-pick conflict is in progress; resolve it outside this merge-only workflow before calling write.";
     case "revert":

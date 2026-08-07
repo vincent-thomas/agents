@@ -55,11 +55,13 @@ function markerExpression(): RegExp {
 }
 
 export function stripGitHubStackBoilerplate(body: string): string {
-  const boilerplate =
+  const markdownBoilerplate =
     /^\s*Stack created with \[GitHub Stacks CLI\]\([^)]+\)\s*[•·]\s*\[Give Feedback[^\]]*\]\([^)]+\).*$/;
+  const htmlBoilerplate =
+    /^\s*<sub>Stack created with <a href="https:\/\/github\.com\/github\/gh-stack">GitHub Stacks CLI<\/a>\s*[•·]\s*<a href="https:\/\/gh\.io\/stacks-feedback">Give Feedback[^<]*<\/a><\/sub>\s*$/;
   return body
     .split(/\r?\n/)
-    .filter((line) => !boilerplate.test(line))
+    .filter((line) => !markdownBoilerplate.test(line) && !htmlBoilerplate.test(line))
     .join("\n")
     .trim();
 }

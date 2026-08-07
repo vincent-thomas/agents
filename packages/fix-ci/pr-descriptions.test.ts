@@ -72,7 +72,7 @@ test("creates a new draft PR with the authored SHA-bound body", async () => {
 test("refreshes only the bounded SHA section and preserves authored surroundings", () => {
   const old = managedPullRequestDescription(description("old details"), "old-sha");
   const stackBoilerplate =
-    "Stack created with [GitHub Stacks CLI](https://github.com/github/gh-stack) • [Give Feedback 💬](https://github.com/github/gh-stack/issues)";
+    '<sub>Stack created with <a href="https://github.com/github/gh-stack">GitHub Stacks CLI</a> • <a href="https://gh.io/stacks-feedback">Give Feedback 💬</a></sub>';
   const existing = `${stackBoilerplate}\n\nhuman introduction\n\n${old}\n\nreview notes`;
   const refreshed = refreshManagedPullRequestDescription(
     existing,
@@ -83,6 +83,12 @@ test("refreshes only the bounded SHA section and preserves authored surroundings
   assert.match(refreshed, /review notes/);
   assert.doesNotMatch(refreshed, /Stack created with/);
   assert.equal(stripGitHubStackBoilerplate(stackBoilerplate), "");
+  assert.equal(
+    stripGitHubStackBoilerplate(
+      "Stack created with [GitHub Stacks CLI](https://github.com/github/gh-stack) • [Give Feedback 💬](https://github.com/github/gh-stack/issues)",
+    ),
+    "",
+  );
   assert.match(refreshed, /new details/);
   assert.doesNotMatch(refreshed, /old details/);
   assert.equal(managedDescriptionSha(refreshed, "feature"), "new-sha");

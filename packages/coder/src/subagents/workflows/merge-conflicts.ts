@@ -24,6 +24,7 @@ export interface CreateMergeConflictsWorkflowOptions {
     signal?: AbortSignal,
   ) => Promise<StackRebaseContinuationResult>;
   continueRebase?: (cwd: string, signal?: AbortSignal) => Promise<RebaseContinuationResult>;
+  skipRebase?: (cwd: string, signal?: AbortSignal) => Promise<RebaseContinuationResult>;
   readStackRebaseOriginalBranch?: (cwd: string, signal?: AbortSignal) => Promise<string>;
   restoreBranch?: (
     cwd: string,
@@ -86,6 +87,16 @@ function commandErrorOutput(error: unknown): string {
     .filter((value): value is string => typeof value === "string" && value !== "")
     .join("\n");
   return output || (error instanceof Error ? error.message : String(error));
+}
+
+function isEmptyRebaseReplayOutput(output: string): boolean {
+  const normalized = output.toLowerCase();
+  const describesEmptyReplay =
+    normalized.includes("previous cherry-pick is now empty") ||
+    normalized.includes("previous commit is now empty") ||
+    normalized.includes("current patch is now empty") ||
+    normalized.includes("no changes -");
+  return describesEmptyReplay && normalized.includes("git rebase --skip");
 }
 
 export function parseStackRebaseOriginalBranch(contents: string): string | null {
@@ -155,6 +166,16 @@ export function createMergeConflictsWorkflow(
         return { success: false, output: commandErrorOutput(error) };
       }
     });
+  const skipRebase =
+    options.skipRebase ??
+    (async (cwd: string, signal?: AbortSignal): Promise<RebaseContinuationResult> => {
+      try {
+        const output = await commandOutput("git", ["rebase", "--skip"], cwd, signal);
+        return { success: true, output };
+      } catch (error) {
+        return { success: false, output: commandErrorOutput(error) };
+      }
+    });
 
   return async ({ cwd, prompt: initialPrompt, signal, subagent, onProgress }) => {
     let prompt = initialPrompt;
@@ -193,9 +214,29 @@ export function createMergeConflictsWorkflow(
             prompt = continuingRebasePrompt(continuation.output, pendingUnmergedEntries);
             continue;
           }
+          let finalContinuation = continuation;
           if (!continuation.success) {
+            if (isEmptyRebaseReplayOutput(continuation.output)) {
+              onProgress("The resolved commit is empty; skipping it noninteractively…");
+              finalContinuation = await skipRebase(cwd, signal);
+              const pendingAfterSkip = await commandOutput("git", ["ls-files", "-u"], cwd, signal);
+              if (pendingAfterSkip.trim() !== "") {
+                onProgress("The rebase reached another conflict; resuming the resolver…");
+                prompt = continuingRebasePrompt(
+                  `${continuation.output}\n\ngit rebase --skip output:\n${finalContinuation.output}`,
+                  pendingAfterSkip,
+                );
+                continue;
+              }
+            } else {
+              throw new Error(
+                `git rebase --continue failed without producing conflicts:\n${continuation.output}`,
+              );
+            }
+          }
+          if (!finalContinuation.success) {
             throw new Error(
-              `git rebase --continue failed without producing conflicts:\n${continuation.output}`,
+              `git rebase --skip failed without producing conflicts:\n${finalContinuation.output}`,
             );
           }
           if ((await detectGitOperation(cwd, commandOutput, signal, pathExists)) !== "none") {
@@ -204,7 +245,10 @@ export function createMergeConflictsWorkflow(
 
           await options.assertWorkspace(cwd);
           const report = subagent.session.getLastAssistantText()?.trim();
-          return [report, continuation.output || "Rebase conflicts resolved and rebase completed."]
+          return [
+            report,
+            finalContinuation.output || "Rebase conflicts resolved and rebase completed.",
+          ]
             .filter((text): text is string => Boolean(text))
             .join("\n\n");
         }

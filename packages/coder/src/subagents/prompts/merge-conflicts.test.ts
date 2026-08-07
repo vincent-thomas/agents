@@ -17,6 +17,7 @@ test("fetches the PR target and preserves a conflicting merge for resolution", a
       return unmergedChecks === 1 ? "" : "100644 abc 2\tsrc/index.ts\n";
     }
     if (call === "git status --porcelain") return "";
+    if (call.startsWith("git rev-parse --git-path")) return ".git/missing\n";
     if (command === "gh") return "main\n";
     if (call === "git fetch origin +main:refs/remotes/origin/main") return "";
     if (call === "git merge --no-commit --no-ff origin/main") {
@@ -49,6 +50,7 @@ test("aborts a clean no-commit merge", async () => {
     calls.push(call);
     if (call === "git ls-files -u") return "";
     if (call === "git status --porcelain") return "";
+    if (call.startsWith("git rev-parse --git-path")) return ".git/missing\n";
     if (command === "gh") return "main\n";
     if (call === "git fetch origin +main:refs/remotes/origin/main") return "";
     if (call === "git merge --no-commit --no-ff origin/main") return "clean\n";
@@ -122,6 +124,58 @@ test("adopts conflicts from an ordinary rebase", async () => {
   assert.match(prompt, /rebasing the current branch/);
   assert.match(prompt, /current rebase/);
   assert.ok(!calls.some((call) => call.startsWith("gh ")));
+});
+
+test("adopts an ordinary rebase after every conflict is staged", async () => {
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    if (call === "git ls-files -u") return "";
+    if (call.startsWith("git rev-parse --verify")) throw new Error("missing");
+    if (call === "git rev-parse --git-path rebase-merge") return ".git/rebase-merge\n";
+    if (call === "git rev-parse --git-path gh-stack-rebase-state") {
+      return ".git/gh-stack-rebase-state\n";
+    }
+    if (call === "git status --short") return "M  src/index.ts\n";
+    if (call === "git diff --no-ext-diff --cc --diff-filter=U") return "";
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  const prompt = await createMergeConflictsPrompt(commandOutput, (path) =>
+    path.endsWith("rebase-merge"),
+  )({
+    cwd: "/repo",
+    definition: {} as never,
+  });
+
+  assert.match(prompt, /rebasing the current branch/);
+  assert.match(prompt, /M  src\/index\.ts/);
+  assert.match(prompt, /Git ls-files -u:\n\n/);
+});
+
+test("adopts a stack rebase after every conflict is staged", async () => {
+  const commandOutput: CommandOutputFn = async (command, args) => {
+    const call = `${command} ${args.join(" ")}`;
+    if (call === "git ls-files -u") return "";
+    if (call.startsWith("git rev-parse --verify")) throw new Error("missing");
+    if (call === "git rev-parse --git-path rebase-merge") return ".git/rebase-merge\n";
+    if (call === "git rev-parse --git-path gh-stack-rebase-state") {
+      return ".git/gh-stack-rebase-state\n";
+    }
+    if (call === "git status --short") return "M  src/index.ts\n";
+    if (call === "git diff --no-ext-diff --cc --diff-filter=U") return "";
+    throw new Error(`Unexpected command: ${call}`);
+  };
+
+  const prompt = await createMergeConflictsPrompt(
+    commandOutput,
+    (path) => path.endsWith("rebase-merge") || path.endsWith("gh-stack-rebase-state"),
+  )({
+    cwd: "/repo",
+    definition: {} as never,
+  });
+
+  assert.match(prompt, /rebasing the GitHub stack/);
+  assert.match(prompt, /M  src\/index\.ts/);
 });
 
 test("adopts conflicts from a GitHub stack rebase", async () => {

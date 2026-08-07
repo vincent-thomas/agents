@@ -210,6 +210,104 @@ test("continues an ordinary rebase noninteractively through repeated conflicts",
   assert.match(result, /Rebase completed/);
 });
 
+test("skips an empty ordinary rebase replay only after Git requests it", async () => {
+  const commands: string[] = [];
+  let rebaseActive = true;
+  let skipCalls = 0;
+  const workflow = createMergeConflictsWorkflow({
+    async assertWorkspace() {},
+    pathExists(path) {
+      return rebaseActive && path.endsWith("rebase-merge");
+    },
+    commandOutput: async (command, args) => {
+      commands.push(`${command} ${args.join(" ")}`);
+      if (args[0] === "ls-files") return "";
+      if (args[0] === "rebase" && args[1] === "--skip") {
+        skipCalls += 1;
+        rebaseActive = false;
+        return "Skipped empty commit";
+      }
+      if (args[1] === "--verify") throw new Error("missing");
+      assert.equal(args[1], "--git-path");
+      return `.git/${args[2]}\n`;
+    },
+    async continueRebase() {
+      return {
+        success: false,
+        output:
+          "The previous cherry-pick is now empty, possibly due to conflict resolution.\n" +
+          "Otherwise, please use 'git rebase --skip'",
+      };
+    },
+  });
+
+  const result = await workflow({
+    cwd: "/repo",
+    definition,
+    prompt: "initial rebase conflict prompt",
+    subagent: {
+      definition,
+      session: {
+        async prompt() {},
+        getLastAssistantText() {
+          return "Resolved empty ordinary replay.";
+        },
+      } as never,
+      dispose() {},
+    },
+    onProgress() {},
+  });
+
+  assert.equal(skipCalls, 1);
+  assert.ok(commands.includes("git rebase --skip"));
+  assert.match(result, /Skipped empty commit/);
+});
+
+test("preserves a non-empty ordinary rebase continuation failure", async () => {
+  let skipCalls = 0;
+  const workflow = createMergeConflictsWorkflow({
+    async assertWorkspace() {},
+    pathExists(path) {
+      return path.endsWith("rebase-merge");
+    },
+    commandOutput: async (command, args) => {
+      assert.equal(command, "git");
+      if (args[0] === "ls-files") return "";
+      if (args[1] === "--verify") throw new Error("missing");
+      assert.equal(args[1], "--git-path");
+      return `.git/${args[2]}\n`;
+    },
+    async continueRebase() {
+      return { success: false, output: "fatal: could not apply the resolved commit" };
+    },
+    async skipRebase() {
+      skipCalls += 1;
+      return { success: true, output: "unexpected skip" };
+    },
+  });
+
+  await assert.rejects(
+    workflow({
+      cwd: "/repo",
+      definition,
+      prompt: "initial rebase conflict prompt",
+      subagent: {
+        definition,
+        session: {
+          async prompt() {},
+          getLastAssistantText() {
+            return "resolver report";
+          },
+        } as never,
+        dispose() {},
+      },
+      onProgress() {},
+    }),
+    /git rebase --continue failed without producing conflicts:[\s\S]*could not apply/,
+  );
+  assert.equal(skipCalls, 0);
+});
+
 test("continues a cascading GitHub stack rebase through every conflicted branch", async () => {
   const prompts: string[] = [];
   const progress: string[] = [];

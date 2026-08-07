@@ -53,14 +53,17 @@ export async function defaultCommandOutput(
   cwd: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const nonInteractiveRebaseContinue =
-    command === "git" && args.length === 2 && args[0] === "rebase" && args[1] === "--continue";
+  const nonInteractiveRebaseOperation =
+    command === "git" &&
+    args.length === 2 &&
+    args[0] === "rebase" &&
+    (args[1] === "--continue" || args[1] === "--skip");
   const { stdout } = await execFileAsync(command, args, {
     cwd,
     signal,
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
-    ...(nonInteractiveRebaseContinue
+    ...(nonInteractiveRebaseOperation
       ? { env: { ...process.env, GIT_EDITOR: "true", GIT_SEQUENCE_EDITOR: "true" } }
       : {}),
   });
@@ -92,11 +95,11 @@ async function buildMergeConflictsPrompt(
   pathExists: (path: string) => boolean,
 ): Promise<string> {
   const existingUnmergedEntries = await commandOutput("git", ["ls-files", "-u"], cwd, signal);
-  if (existingUnmergedEntries.trim() !== "") {
-    const operation = await detectGitOperation(cwd, commandOutput, signal, pathExists);
-    const stackRebase =
-      operation === "rebase" &&
-      (await gitPathExists("gh-stack-rebase-state", cwd, commandOutput, signal, pathExists));
+  const operation = await detectGitOperation(cwd, commandOutput, signal, pathExists);
+  const stackRebase =
+    operation === "rebase" &&
+    (await gitPathExists("gh-stack-rebase-state", cwd, commandOutput, signal, pathExists));
+  if (existingUnmergedEntries.trim() !== "" || operation === "rebase") {
     if (operation !== "merge" && operation !== "rebase" && !stackRebase) {
       throw new Error(
         operation === "none"

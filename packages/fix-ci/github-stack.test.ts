@@ -25,6 +25,7 @@ import {
   stackInitArgs,
   stackLinkArgs,
   stackSubmitArgs,
+  stackSubmitFallbackArgs,
   stackUnstackArgs,
   stackUnstackLocalArgs,
   stackSyncArgs,
@@ -58,6 +59,7 @@ suite("GitHub stack command builders", () => {
     assert.deepEqual(stackUnstackLocalArgs(), ["stack", "unstack", "--local"]);
     assert.deepEqual(stackSyncArgs(), ["stack", "sync"]);
     assert.deepEqual(stackSubmitArgs(), ["stack", "submit", "--auto", "--no-comments"]);
+    assert.deepEqual(stackSubmitFallbackArgs(), ["stack", "submit", "--auto"]);
     assert.deepEqual(stackLinkArgs(["first", "second"], "main"), [
       "stack",
       "link",
@@ -382,6 +384,34 @@ suite("GitHub stack runner-driven helpers", () => {
       ["stack", "submit", "--auto", "--no-comments"],
       ["stack", "link", "--base", "main", "--", "one", "two"],
     ]);
+  });
+
+  test("retries submit without no-comments only when the CLI rejects that flag", async () => {
+    const calls: string[][] = [];
+    const runner: GhStackCommandRunner = async (args) => {
+      calls.push([...args]);
+      if (args.includes("--no-comments")) {
+        throw new Error("unknown flag: --no-comments");
+      }
+      return { stdout: "submitted", stderr: "" };
+    };
+
+    assert.deepEqual(await runGhStackSubmit("/workspace", undefined, runner), {
+      success: true,
+      output: "submitted",
+    });
+    assert.deepEqual(calls, [
+      ["stack", "submit", "--auto", "--no-comments"],
+      ["stack", "submit", "--auto"],
+    ]);
+
+    calls.length = 0;
+    const otherFailure: GhStackCommandRunner = async (args) => {
+      calls.push([...args]);
+      throw new Error("authentication failed");
+    };
+    assert.equal((await runGhStackSubmit("/workspace", undefined, otherFailure)).success, false);
+    assert.deepEqual(calls, [["stack", "submit", "--auto", "--no-comments"]]);
   });
 
   test("distinguishes an ordinary branch from a stack probe failure", async () => {

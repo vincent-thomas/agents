@@ -4,6 +4,12 @@ import { test } from "node:test";
 
 const systemPrompt = readFileSync(new URL("../APPEND_SYSTEM.md", import.meta.url), "utf8");
 
+test("requires contextual PR descriptions before pushing", () => {
+  assert.match(systemPrompt, /Author reviewer-oriented PR descriptions/);
+  assert.match(systemPrompt, /context, approach, reviewer focus, and verification/);
+  assert.match(systemPrompt, /commit-message summaries are not sufficient/);
+});
+
 test("delegates bounded outcomes without surrendering global decisions", () => {
   assert.match(systemPrompt, /Delegate coherent bounded outcomes early/);
   assert.match(

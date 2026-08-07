@@ -166,6 +166,10 @@ export function stackSubmitArgs(): string[] {
   return ["stack", "submit", "--auto", "--no-comments"];
 }
 
+export function stackSubmitFallbackArgs(): string[] {
+  return ["stack", "submit", "--auto"];
+}
+
 export function stackLinkArgs(branches: readonly string[], base?: string | null): string[] {
   return [
     "stack",
@@ -229,12 +233,20 @@ export function runGhStackSync(
   return runStackOperation(stackSyncArgs(), cwd, signal, runner);
 }
 
-export function runGhStackSubmit(
+export async function runGhStackSubmit(
   cwd: string,
   signal?: AbortSignal,
   runner: GhStackCommandRunner = runGhStackCommand,
 ): Promise<GhStackOperationResult> {
-  return runStackOperation(stackSubmitArgs(), cwd, signal, runner);
+  const result = await runStackOperation(stackSubmitArgs(), cwd, signal, runner);
+  if (
+    result.success ||
+    signal?.aborted ||
+    !/unknown flag:\s*--no-comments(?:\s|$)/i.test(result.output)
+  ) {
+    return result;
+  }
+  return runStackOperation(stackSubmitFallbackArgs(), cwd, signal, runner);
 }
 
 export function runGhStackLink(

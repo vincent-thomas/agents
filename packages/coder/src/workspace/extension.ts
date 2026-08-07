@@ -3,6 +3,7 @@ import {
   assertOwnedWorkspace,
   loadWorkspace,
   updateWorkspace,
+  workspaceBranches,
   type AgentWorkspace,
   type WorkspaceStore,
 } from "./logic.ts";
@@ -34,10 +35,13 @@ export function workspaceStartupNotice(workspace: AgentWorkspace, created: boole
 }
 
 function workspaceSummary(workspace: AgentWorkspace): string {
+  const branches = workspaceBranches(workspace);
   return [
     `Task: ${workspace.sessionName ?? "unnamed"}`,
-    `Branch: ${workspace.branch}`,
-    `Base: ${workspace.baseSha}`,
+    `Stack: ${branches.join(" → ")}`,
+    workspace.stack ? `Stack base branch: ${workspace.stack.baseBranch}` : null,
+    `Active branch (cursor): ${workspace.branch}`,
+    `Base commit: ${workspace.baseSha}`,
     `Worktree: ${workspace.worktree}`,
     `Status: ${workspace.status}`,
     workspace.sessionFile ? `Session: ${workspace.sessionFile}` : null,
@@ -72,7 +76,7 @@ export function createWorkspaceExtension(options: {
         ctx.sessionManager.getSessionName() ?? undefined,
       );
       const label = workspace.sessionName ?? workspace.id.slice(0, 8);
-      ctx.ui.setStatus("agent-workspace", `${label} · ${workspace.branch}`);
+      ctx.ui.setStatus("agent-workspace", `${label} · active ${workspace.branch}`);
       if (event.reason === "startup") {
         ctx.ui.notify(workspaceStartupNotice(workspace, options.created), "info");
       }
@@ -81,18 +85,20 @@ export function createWorkspaceExtension(options: {
     pi.on("session_info_changed", async (event, ctx) => {
       await persistSession(ctx.sessionManager.getSessionFile(), event.name);
       const label = workspace.sessionName ?? workspace.id.slice(0, 8);
-      ctx.ui.setStatus("agent-workspace", `${label} · ${workspace.branch}`);
+      ctx.ui.setStatus("agent-workspace", `${label} · active ${workspace.branch}`);
     });
 
     pi.on("before_agent_start", async (event) => ({
       systemPrompt:
         event.systemPrompt +
-        `\n\nYou are working in the host-owned Git workspace ${workspace.branch}. ` +
-        `Do not directly create, switch, rename, or delete branches. Git commit, synchronization, ` +
-        `push, and conflict workflows must use their dedicated tools. For a major request with ` +
-        `separable changes, make each PR boundary an independently valid commit, then call ` +
-        `create_github_stack with branch names and matching branch_points ordered base-to-tip; ` +
-        `the owned workspace branch must be the final stack branch.`,
+        `\n\nYou are working in one host-owned Git workspace that owns an ordered branch stack. ` +
+        `The workspace record's \`branch\` is the active cursor, not a separate workspace per branch. ` +
+        `Use \`inspect_stack\` to understand stack membership and \`checkout_stack_branch\` to move ` +
+        `the active cursor. Edit and commit normally, then use \`push_and_check_ci\` to push and ` +
+        `restack descendants. Do not directly create, switch, rename, or delete branches. ` +
+        `For a major request with separable changes, make each PR boundary an independently valid ` +
+        `commit, then call \`create_github_stack\` with branch names and matching branch_points ` +
+        `ordered base-to-tip; the owned workspace branch must be the final stack branch.`,
     }));
 
     pi.registerCommand("workspace", {

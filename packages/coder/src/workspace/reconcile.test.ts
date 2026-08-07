@@ -105,6 +105,59 @@ test("removes every artifact for a clean merged workspace", async () => {
   }
 });
 
+test("removes a stack workspace only after every owned member is merged", async () => {
+  const { repo, store, pointers, cleanup } = fixture();
+  try {
+    let workspace = await createWorkspace(store, repo, "feature/stack-tip");
+    git(repo, "branch", "feature/stack-base", workspace.baseSha);
+    workspace = await updateWorkspace(store, workspace, {
+      stack: { baseBranch: "main", branches: ["feature/stack-base", workspace.branch] },
+    });
+
+    const result = await reconcileMergedWorkspaces({
+      store,
+      cwd: repo,
+      sessionPointers: pointers,
+      findMergedPullRequest: async (_cwd, branch, headSha) => ({
+        number: branch === "feature/stack-base" ? 16 : 17,
+        headSha,
+      }),
+    });
+
+    assert.deepEqual(result.removed, [
+      { workspaceId: workspace.id, branch: workspace.branch, prNumber: 17 },
+    ]);
+    assert.deepEqual(await records(store, repo), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("retains a stack workspace when any owned member is not merged", async () => {
+  const { repo, store, pointers, cleanup } = fixture();
+  try {
+    let workspace = await createWorkspace(store, repo, "feature/stack-tip");
+    git(repo, "branch", "feature/stack-base", workspace.baseSha);
+    workspace = await updateWorkspace(store, workspace, {
+      stack: { baseBranch: "main", branches: ["feature/stack-base", workspace.branch] },
+    });
+
+    const result = await reconcileMergedWorkspaces({
+      store,
+      cwd: repo,
+      sessionPointers: pointers,
+      findMergedPullRequest: async (_cwd, branch, headSha) =>
+        branch === "feature/stack-base" ? null : { number: 17, headSha },
+    });
+
+    assert.match(result.retained[0]?.reason ?? "", /stack-base/);
+    assert.equal(existsSync(workspace.worktree), true);
+    assert.equal((await records(store, repo))[0]?.id, workspace.id);
+  } finally {
+    cleanup();
+  }
+});
+
 test("removes every artifact for an explicitly deleted branch workspace", async () => {
   const { root, repo, store, pointers, cleanup } = fixture();
   try {
@@ -129,6 +182,31 @@ test("removes every artifact for an explicitly deleted branch workspace", async 
       git(repo, "show-ref", "--verify", `refs/heads/${workspace.branch}`).length > 0,
       true,
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test("deletes a stack workspace when addressed by a non-active member", async () => {
+  const { root, repo, store, pointers, cleanup } = fixture();
+  try {
+    let workspace = await attachSession(
+      store,
+      pointers,
+      await createWorkspace(store, repo, "feature/stack-tip"),
+      root,
+    );
+    workspace = await updateWorkspace(store, workspace, {
+      stack: { baseBranch: "main", branches: ["feature/stack-base", workspace.branch] },
+    });
+
+    const removed = await removeWorkspaceByBranch(
+      { store, cwd: repo, sessionPointers: pointers },
+      "feature/stack-base",
+    );
+
+    assert.deepEqual(removed, { workspaceId: workspace.id, branch: workspace.branch });
+    assert.deepEqual(await records(store, repo), []);
   } finally {
     cleanup();
   }

@@ -298,6 +298,36 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
         context: { cwd: string },
       ): Promise<{ details: Record<string, unknown> }>;
     };
+    const authoredPullRequests = {
+      pull_requests: [
+        {
+          branch: "lower",
+          title: "Rebase the lower stack branch",
+          body: "## Context\n\nExercise lower-branch conflict recovery.\n\n## Verification\n\nCovered by the cascading stack integration test.",
+        },
+        {
+          branch: "tip",
+          title: "Rebase the stack tip",
+          body: "## Context\n\nExercise tip conflict recovery after the lower branch.\n\n## Verification\n\nCovered by the cascading stack integration test.",
+        },
+      ],
+    };
+    const prBodies = new Map<string, string>();
+    const stackBodyRunner: GhStackCommandRunner = async (args) => {
+      const branch = args.at(-1) as string;
+      if (args[1] === "view") {
+        return {
+          stdout: JSON.stringify({
+            number: branch === "lower" ? 1 : 2,
+            body: prBodies.get(branch) ?? "",
+          }),
+          stderr: "",
+        };
+      }
+      assert.equal(args[1], "edit");
+      prBodies.set(branch, args[args.indexOf("--body") + 1] as string);
+      return { stdout: "", stderr: "" };
+    };
     const tools: FixCiTool[] = [];
     createFixCiExtension({
       assertWorkspace: async (workspace) => {
@@ -305,6 +335,7 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
         assert.equal(git(workspace, ["status", "--porcelain"]).trim(), "");
       },
       stackRunner,
+      stackBodyRunner,
       stackReadinessRunner: readinessRunner,
     })({
       registerTool(tool: FixCiTool) {
@@ -314,7 +345,13 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
     const pushAndCheck = tools.find((tool) => tool.name === "push_and_check_ci");
     assert.ok(pushAndCheck, "push_and_check_ci was not registered");
 
-    const firstPush = await pushAndCheck.execute("first-push", {}, undefined, undefined, { cwd });
+    const firstPush = await pushAndCheck.execute(
+      "first-push",
+      authoredPullRequests,
+      undefined,
+      undefined,
+      { cwd },
+    );
     assert.equal(firstPush.details.stackSyncConflict, undefined);
     assert.equal(firstPush.details.stackSyncFailed, true);
     assert.equal(firstPush.details.stackReadiness, undefined);
@@ -446,7 +483,13 @@ test("resolves cascading real GitHub stack rebase conflicts through push_and_che
     git(cwd, ["merge-base", "--is-ancestor", "main", "lower"]);
     git(cwd, ["merge-base", "--is-ancestor", "lower", "tip"]);
 
-    const secondPush = await pushAndCheck.execute("second-push", {}, undefined, undefined, { cwd });
+    const secondPush = await pushAndCheck.execute(
+      "second-push",
+      authoredPullRequests,
+      undefined,
+      undefined,
+      { cwd },
+    );
     assert.equal(secondPush.details.stackReadiness, true);
     assert.equal(secondPush.details.allChecksPassed, true);
     assert.equal(secondPush.details.allReady, true);

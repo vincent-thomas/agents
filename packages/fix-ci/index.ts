@@ -33,8 +33,6 @@ import {
   pullRemoteChanges,
   isBaseBranchAhead,
   detectPrNumber,
-  generatePrBody,
-  generatePrTitle,
   createDraftPr,
   getPrState,
   markPrReady,
@@ -72,6 +70,13 @@ import {
   verifyRefreshedStack,
 } from "./stack-checkout.ts";
 import { shellQuote } from "./shell-quote.ts";
+import {
+  createDescribedStackPullRequests,
+  ensureManagedPullRequestDescriptions,
+  getBranchSha,
+  newPullRequestBody,
+  type PullRequestDescription,
+} from "./pr-descriptions.ts";
 import type {
   WorkspaceController,
   WorkspaceControllerClaim,
@@ -106,6 +111,8 @@ function errorMessage(error: unknown): string {
 export function createFixCiExtension(options: {
   assertWorkspace: (cwd: string) => Promise<void>;
   stackRunner?: GhStackCommandRunner;
+  /** Runner for read/update PR body commands; separate from stack mutations for tests. */
+  stackBodyRunner?: GhStackCommandRunner;
   restoreBranch?: WorkspaceBranchRestorer;
   workspaceController?: WorkspaceController;
   stackReadinessRunner?: StackReadinessRunner;
@@ -113,6 +120,7 @@ export function createFixCiExtension(options: {
   return function (pi: ExtensionAPI) {
     let cycleCount = 0;
     const stackRunner = options.stackRunner ?? runGhStackCommand;
+    const stackBodyRunner = options.stackBodyRunner ?? runGhStackCommand;
     const restoreBranch = options.restoreBranch ?? restoreWorkspaceBranch;
     const stackReadinessRunner = options.stackReadinessRunner ?? checkAndReadyStack;
 
@@ -1355,11 +1363,55 @@ export function createFixCiExtension(options: {
         "Returns the status of every check. For failures, includes " +
         "the last 200 lines of log output. " +
         "You MUST use this tool instead of running `git push` in bash. " +
-        "After fixing failures (local or CI), call this tool again.",
-      parameters: TObject({}),
+        "After fixing failures (local or CI), call this tool again. Provide pull_requests with an agent-authored branch, title, and reviewer-oriented body for every new or changed branch. Bodies must explain context, approach, reviewer focus, and verification; commit-message summaries are not sufficient. Existing descriptions may be omitted only for CI retries when their managed section already matches the current branch SHA.",
+      parameters: TObject({
+        pull_requests: Optional(
+          TArray(
+            TObject({
+              branch: TString({ description: "Branch described by this PR entry." }),
+              title: TString({ description: "Authored pull request title." }),
+              body: TString({ description: "Authored pull request description." }),
+            }),
+            { description: "Authored descriptions for stack or ordinary pull requests." },
+          ),
+        ),
+      }),
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         const cwd = ctx.cwd;
+        const rawDescriptions = params.pull_requests;
+        let descriptions: PullRequestDescription[] | undefined;
+        if (rawDescriptions !== undefined) {
+          if (
+            !Array.isArray(rawDescriptions) ||
+            rawDescriptions.some(
+              (entry: unknown) =>
+                !entry ||
+                typeof entry !== "object" ||
+                typeof (entry as Record<string, unknown>).branch !== "string" ||
+                typeof (entry as Record<string, unknown>).title !== "string" ||
+                typeof (entry as Record<string, unknown>).body !== "string" ||
+                !(entry as Record<string, unknown>).branch ||
+                !(entry as Record<string, unknown>).title ||
+                !(entry as Record<string, unknown>).body ||
+                !(entry as Record<string, unknown>).branch.trim() ||
+                !(entry as Record<string, unknown>).title.trim() ||
+                !(entry as Record<string, unknown>).body.trim(),
+            )
+          ) {
+            return respond(
+              "Invalid pull_requests input. Each entry requires non-empty branch, title, and body strings.",
+              { pullRequestDescriptionsInvalid: true },
+            );
+          }
+          descriptions = rawDescriptions as PullRequestDescription[];
+          const branches = descriptions.map((entry) => entry.branch);
+          if (new Set(branches).size !== branches.length) {
+            return respond("Invalid pull_requests input. Each branch may appear only once.", {
+              pullRequestDescriptionsInvalid: true,
+            });
+          }
+        }
         await options.assertWorkspace(cwd);
         const notify = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
 
@@ -1414,6 +1466,37 @@ export function createFixCiExtension(options: {
                 stackProbeFailed: true,
                 stackViewOutput: stackProbe.output,
                 stackBranches: stackProbe.branches,
+              },
+            );
+          }
+
+          // Older gh-stack JSON cannot identify which branches already have
+          // PRs. Treat every branch as potentially new so submission never
+          // creates an undescribed PR; enriched views retain no-input retries
+          // for branches whose PRs already exist.
+          const confirmedNewStackBranches = stackProbe.view
+            ? stackProbe.view.branches.filter((branch) => !branch.pr).map((branch) => branch.name)
+            : [];
+          const branchesRequiringDescriptions = stackProbe.view
+            ? confirmedNewStackBranches
+            : stackProbe.branches;
+          const describedBranches = new Set(
+            descriptions?.map((description) => description.branch) ?? [],
+          );
+          const undescribedNewBranches = branchesRequiringDescriptions.filter(
+            (branch) => !describedBranches.has(branch),
+          );
+          if (undescribedNewBranches.length > 0) {
+            cycleCount = 0;
+            return respond(
+              "New stacked PRs require agent-authored titles and descriptions before submission. " +
+                "Provide a pull_requests entry for every listed branch; no branch was published or submitted.\n\n" +
+                undescribedNewBranches.map((branch) => `- \`${branch}\``).join("\n"),
+              {
+                pullRequestDescriptionsRequired: true,
+                newPullRequestBranches: branchesRequiringDescriptions,
+                missingPullRequestDescriptions: undescribedNewBranches,
+                stackSubmissionStarted: false,
               },
             );
           }
@@ -1566,6 +1649,46 @@ export function createFixCiExtension(options: {
                 ...stackOwnershipDetails,
               },
             );
+          }
+
+          let createdStackPrBranches: string[] = [];
+          if (confirmedNewStackBranches.length > 0) {
+            if (!initialStackBase) {
+              cycleCount = 0;
+              return respond(
+                "The stack base is unknown, so described pull requests could not be created safely. Stack submission was not started.",
+                {
+                  stackBaseUnknown: true,
+                  prCreationFailed: true,
+                  stackSubmissionStarted: false,
+                  branches: confirmedNewStackBranches,
+                },
+              );
+            }
+            notify("Creating described draft PRs for new stack branches…");
+            const creation = await createDescribedStackPullRequests(
+              cwd,
+              confirmedNewStackBranches,
+              initialStackBase,
+              descriptions ?? [],
+              signal,
+              stackBodyRunner,
+            );
+            createdStackPrBranches = creation.updated;
+            if (!creation.success) {
+              cycleCount = 0;
+              return respond(
+                "## ⚠️ Described Stack PR Creation Failed\n\n" +
+                  "Stack submission was not started because every new PR must be created with its authored description.\n\n" +
+                  formatDescriptionIssues(creation.issues),
+                {
+                  prCreationFailed: true,
+                  stackSubmissionStarted: false,
+                  createdPullRequestBranches: creation.updated,
+                  pullRequestDescriptionIssues: creation.issues,
+                },
+              );
+            }
           }
 
           notify("Stack sync succeeded — submitting the stack…");
@@ -1736,6 +1859,42 @@ export function createFixCiExtension(options: {
             );
           }
           const stackOwnershipAfterSubmit = refreshedOwnership.details;
+
+          // gh stack submit creates PRs before this tool can author them. In
+          // contract mode, populate the bounded description immediately at
+          // that creation boundary, before linking or readiness.
+          let stackPrDescriptionsUpdated: string[] = [...createdStackPrBranches];
+          if (descriptions !== undefined) {
+            notify("Stack submitted — authoring current PR descriptions…");
+            const initialDescriptions = await ensureManagedPullRequestDescriptions(
+              cwd,
+              postSubmitStackProbe.branches,
+              descriptions.filter(
+                (description) => !confirmedNewStackBranches.includes(description.branch),
+              ),
+              signal,
+              stackBodyRunner,
+            );
+            if (!initialDescriptions.success) {
+              cycleCount = 0;
+              return respond(
+                "## ⚠️ Stacked PR Description Preparation Failed\n\n" +
+                  "Every stack branch needs a current authored description before the stack can be linked or marked ready.\n\n" +
+                  formatDescriptionIssues(initialDescriptions.issues),
+                {
+                  stackSubmitSucceeded: true,
+                  stackPrDescriptions: false,
+                  stackPrDescriptionIssues: initialDescriptions.issues,
+                  readinessSkipped: true,
+                  workspaceRestored: true,
+                  ...postSubmitStackProbeInfo,
+                  ...stackOwnershipAfterSubmit,
+                },
+              );
+            }
+            stackPrDescriptionsUpdated.push(...initialDescriptions.updated);
+          }
+
           const stackLinkRequired = postSubmitStackProbe.branches.length > 1;
           let stackLinkResult = { success: true, output: "" };
           let linkRestoration = {
@@ -1985,6 +2144,38 @@ export function createFixCiExtension(options: {
             );
           }
 
+          notify("Stack linked — checking stacked PR descriptions…");
+          const stackPrBodies = await ensureManagedPullRequestDescriptions(
+            cwd,
+            postSubmitStackProbe.branches,
+            [],
+            signal,
+            stackBodyRunner,
+          );
+          if (!stackPrBodies.success) {
+            cycleCount = 0;
+            return respond(
+              "## ⚠️ Stacked PR Description Preparation Failed\n\n" +
+                "Every stacked PR must have a current description before readiness checking. " +
+                "No PR was marked ready. Fix the reported missing, stale, lookup, or update issue and " +
+                "call `push_and_check_ci` again.\n\n" +
+                formatDescriptionIssues(stackPrBodies.issues),
+              {
+                stackSubmitSucceeded: true,
+                stackLinkAttempted: stackLinkRequired,
+                ...(stackLinkRequired ? { stackLinkSucceeded: true } : { stackLinkSkipped: true }),
+                remoteStackLinked: stackLinkRequired,
+                stackPrBodies: false,
+                stackPrBodyPreparationFailed: true,
+                stackPrBodyIssues: stackPrBodies.issues,
+                readinessSkipped: true,
+                workspaceRestored: true,
+                ...postSubmitStackProbeInfo,
+                ...stackOwnershipAfterSubmit,
+              },
+            );
+          }
+
           pushedSha = (await getHeadSha(cwd, signal)) ?? undefined;
           notify(
             stackLinkRequired
@@ -2030,6 +2221,9 @@ export function createFixCiExtension(options: {
                 ? { remoteStackState: "linked", ...remoteStackRebuildOutputs }
                 : {}),
               workspaceRestored: true,
+              stackPrBodies: true,
+              stackPrBodiesUpdated: stackPrDescriptionsUpdated,
+              stackPrBodiesPreserved: stackPrBodies.preserved,
               ...postSubmitStackProbeInfo,
               ...stackOwnershipAfterSubmit,
             },
@@ -2206,11 +2400,22 @@ export function createFixCiExtension(options: {
             });
           }
 
-          // Generate PR body from commits unique to the inferred target branch.
-          const prBody = await generatePrBody(cwd, targetBase, signal);
+          const description = descriptions?.find((entry) => entry.branch === branchName);
+          if (!branchName || !description) {
+            return respond(
+              `Cannot create a new PR for \`${branchName ?? "the current branch"}\`: pull_requests must include its authored title and body.`,
+              {
+                prCreationFailed: true,
+                pullRequestDescriptionMissing: true,
+                branch: branchName,
+                required: ["title", "body"],
+              },
+            );
+          }
 
-          // Use provided title or auto-generate from the branch name.
-          const prTitle = await generatePrTitle(cwd, signal);
+          const sha = pushedSha ?? (await getBranchSha(cwd, branchName, signal));
+          const prBody = newPullRequestBody(description, sha);
+          const prTitle = description.title;
 
           const prResult = await createDraftPr(cwd, prTitle, prBody, targetBase, signal);
 
@@ -2225,6 +2430,30 @@ export function createFixCiExtension(options: {
           notify(`Draft PR created: ${prUrl}`);
         } else {
           notify(`PR #${existingPr} already exists — skipping creation.`);
+        }
+
+        // A retry may omit pull_requests only when the existing bounded
+        // section already records this exact branch SHA.
+        if (existingPr && branchName) {
+          const descriptionResult = await ensureManagedPullRequestDescriptions(
+            cwd,
+            [branchName],
+            descriptions ?? [],
+            signal,
+            stackBodyRunner,
+          );
+          if (!descriptionResult.success) {
+            return respond(
+              "## ⚠️ Pull Request Description Is Not Current\n\n" +
+                formatDescriptionIssues(descriptionResult.issues) +
+                "\n\nNo readiness transition was attempted. Provide refreshed pull_requests content and retry.",
+              {
+                pullRequestDescriptionCurrent: false,
+                pullRequestDescriptionIssues: descriptionResult.issues,
+                readinessSkipped: true,
+              },
+            );
+          }
         }
 
         const cycle = cycleCount;
@@ -2384,6 +2613,19 @@ function errorMessage(error: unknown): string {
 
 function formatConflictList(paths: string[]): string {
   return paths.map((p) => `- \`${p}\``).join("\n");
+}
+
+function formatDescriptionIssues(
+  issues: readonly { branch: string; stage: string; error: string; output?: string }[],
+): string {
+  return issues
+    .map(
+      (issue) =>
+        `- \`${issue.branch}\` (${issue.stage}): ${issue.error}${
+          issue.output ? `\n  Output: ${issue.output.trim()}` : ""
+        }`,
+    )
+    .join("\n");
 }
 
 function formatStackReadiness(result: StackReadinessResult): string {

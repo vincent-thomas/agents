@@ -8,6 +8,7 @@ import { createFixCiExtension } from "./index.ts";
 import type { GhStackCommandRunner, WorkspaceBranchRestorer } from "./github-stack.ts";
 import type { WorkspaceController, WorkspaceControllerClaim } from "./index.ts";
 import type { StackReadinessRunner } from "./stack-readiness.ts";
+import { managedPullRequestDescription } from "./pr-descriptions.ts";
 
 type RegisteredTool = {
   name: string;
@@ -74,22 +75,76 @@ function readyStack(branches: readonly string[]) {
 
 function registeredTools(options: {
   stackRunner: GhStackCommandRunner;
+  stackBodyRunner?: GhStackCommandRunner;
   restoreBranch?: WorkspaceBranchRestorer;
   workspaceController?: WorkspaceController;
   stackReadinessRunner?: StackReadinessRunner;
   assertWorkspace?: () => void | Promise<void>;
+  autoPullRequestDescriptions?: boolean;
 }): RegisteredTool[] {
   const tools: RegisteredTool[] = [];
   const extension = createFixCiExtension({
     assertWorkspace: options.assertWorkspace ?? (async () => {}),
     stackRunner: options.stackRunner,
+    // Existing orchestration fixtures focus on gh stack commands. Keep their
+    // PRs populated unless a body-specific runner is supplied by a body test.
+    stackBodyRunner:
+      options.stackBodyRunner ??
+      (async (args, commandOptions) => {
+        if (args[1] === "view") {
+          const branch = args.at(-1) as string;
+          const sha = git(commandOptions.cwd, ["rev-parse", branch]);
+          const body = managedPullRequestDescription(
+            { branch, title: `Title for ${branch}`, body: `Description for ${branch}` },
+            sha,
+          );
+          return { stdout: JSON.stringify({ number: 1, body }), stderr: "" };
+        }
+        if (args[1] === "create" || args[1] === "edit") {
+          return { stdout: "", stderr: "" };
+        }
+        throw new Error(`unexpected PR body command: ${args.join(" ")}`);
+      }),
     restoreBranch: options.restoreBranch,
     workspaceController: options.workspaceController,
     stackReadinessRunner: options.stackReadinessRunner,
   });
   extension({
     registerTool(tool: RegisteredTool) {
-      tools.push(tool);
+      if (tool.name !== "push_and_check_ci" || options.autoPullRequestDescriptions === false) {
+        tools.push(tool);
+        return;
+      }
+      tools.push({
+        ...tool,
+        execute(toolCallId, params, signal, onUpdate, context) {
+          const supplied = params.pull_requests;
+          if (supplied !== undefined) {
+            return tool.execute(toolCallId, params, signal, onUpdate, context);
+          }
+          const branches = git(context.cwd, [
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+          ])
+            .split("\n")
+            .filter(Boolean);
+          return tool.execute(
+            toolCallId,
+            {
+              ...params,
+              pull_requests: branches.map((branch) => ({
+                branch,
+                title: `Describe ${branch}`,
+                body: `## Context\n\nTest-authored context for ${branch}.\n\n## Verification\n\nCovered by this orchestration test.`,
+              })),
+            },
+            signal,
+            onUpdate,
+            context,
+          );
+        },
+      });
     },
   } as never);
   return tools;
@@ -1397,6 +1452,34 @@ test("push_and_check_ci publishes every missing stack branch before sync", async
   }
 });
 
+test("push_and_check_ci requires authored content before creating stack PRs", async () => {
+  const cwd = createRepository();
+  try {
+    const calls: string[] = [];
+    const stackRunner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      return {
+        stdout:
+          '{"trunk":"main","currentBranch":"feature","branches":[{"branch":"feature","current":true}]}',
+        stderr: "",
+      };
+    };
+    const tool = requireTool(
+      registeredTools({ stackRunner, autoPullRequestDescriptions: false }),
+      "push_and_check_ci",
+    );
+
+    const result = await tool.execute("push", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.pullRequestDescriptionsRequired, true);
+    assert.deepEqual(result.details.missingPullRequestDescriptions, ["feature"]);
+    assert.equal(result.details.stackSubmissionStarted, false);
+    assert.deepEqual(calls, ["stack view --json"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("push_and_check_ci skips remote linking for a single-branch stack before readiness", async () => {
   const cwd = createRepository();
   const remote = mkdtempSync(join(tmpdir(), "github-stack-origin-"));
@@ -1425,7 +1508,21 @@ test("push_and_check_ci skips remote linking for a single-branch stack before re
       assert.fail(`remote stack link must not run for one branch: ${args.join(" ")}`);
     };
     let readinessBranches: readonly string[] = [];
+    const bodyCalls: string[] = [];
+    const events: string[] = [];
+    let prBody = "   ";
+    const stackBodyRunner: GhStackCommandRunner = async (args) => {
+      events.push(`body:${args[1]}`);
+      bodyCalls.push(args.join(" "));
+      if (args[1] === "view") {
+        return { stdout: JSON.stringify({ number: 7, body: prBody }), stderr: "" };
+      }
+      assert.equal(args[1], "edit");
+      prBody = args[args.indexOf("--body") + 1] as string;
+      return { stdout: "", stderr: "" };
+    };
     const stackReadinessRunner: StackReadinessRunner = async (_cwd, branches) => {
+      events.push("readiness");
       readinessBranches = branches;
       return {
         allChecksPassed: true,
@@ -1447,13 +1544,38 @@ test("push_and_check_ci skips remote linking for a single-branch stack before re
       };
     };
     const tool = requireTool(
-      registeredTools({ stackRunner, stackReadinessRunner }),
+      registeredTools({ stackRunner, stackBodyRunner, stackReadinessRunner }),
       "push_and_check_ci",
     );
 
-    const result = await tool.execute("push", {}, undefined, undefined, { cwd });
+    const result = await tool.execute(
+      "push",
+      {
+        pull_requests: [
+          {
+            branch: "stack-base",
+            title: "Describe the former stack base",
+            body: "## Context\n\nDescribe the branch present before refreshed stack discovery.",
+          },
+          {
+            branch: "feature",
+            title: "Explain the feature",
+            body: "## Context\n\nExplain why this feature is needed and how it works.",
+          },
+        ],
+      },
+      undefined,
+      undefined,
+      { cwd },
+    );
 
     assert.deepEqual(readinessBranches, ["feature"]);
+    assert.deepEqual(events, ["body:view", "body:edit", "body:view", "readiness"]);
+    assert.deepEqual(
+      bodyCalls.map((call) => call.split(" ").slice(0, 2).join(" ")),
+      ["pr view", "pr edit", "pr view"],
+    );
+    assert.match(prBody, /Explain why this feature is needed/);
     assert.equal(result.details.allChecksPassed, true);
     assert.equal(result.details.allReady, true);
     assert.equal(result.details.stackSubmitSucceeded, true);

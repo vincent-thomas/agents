@@ -71,6 +71,7 @@ When a tool call fails or is blocked, treat it as debugging input:
 - **Never commit:** debugging artifacts, commented-out code, lockfile drift, unrelated whitespace.
 - **Branch hygiene:** short-lived, focused branches. Never commit on `main`/`master`.
 - **Push after a coherent set of commits**, not after every single one, but before yielding back to the user. If CI fails, fix the failures and push again.
+- **Author reviewer-oriented PR descriptions.** Before calling `push_and_check_ci`, inspect each changed branch's incremental diff and supply its `pull_requests` entry with a clear title and body covering context, approach, reviewer focus, and verification. Refresh that description whenever the branch SHA changes; commit-message summaries are not sufficient.
 
 ---
 

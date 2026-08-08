@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -1163,6 +1163,68 @@ test("create_github_stack restores the owned branch after init traverses branche
     assert.deepEqual(calls, ["stack init -- feature"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci force-pushes a base rebase without recreating a merge", async () => {
+  const cwd = createRepository();
+  const remote = mkdtempSync(join(tmpdir(), "ordinary-rebase-origin-"));
+  const fakeBin = mkdtempSync(join(tmpdir(), "ordinary-rebase-gh-"));
+  try {
+    git(remote, ["init", "--bare"]);
+    git(cwd, ["remote", "add", "origin", remote]);
+    git(cwd, ["push", "origin", "main", "feature"]);
+
+    writeFileSync(join(cwd, "feature.txt"), "feature\n");
+    git(cwd, ["add", "feature.txt"]);
+    git(cwd, ["commit", "-m", "feature"]);
+    git(cwd, ["push", "origin", "feature"]);
+    git(cwd, ["switch", "main"]);
+    writeFileSync(join(cwd, "base.txt"), "base update\n");
+    git(cwd, ["add", "base.txt"]);
+    git(cwd, ["commit", "-m", "base update"]);
+    git(cwd, ["push", "origin", "main"]);
+    const baseSha = git(cwd, ["rev-parse", "HEAD"]);
+    git(cwd, ["switch", "feature"]);
+
+    const fakeGh = join(fakeBin, "gh");
+    writeFileSync(
+      fakeGh,
+      `#!/bin/sh
+if [ "$1" = "stack" ] && [ "$2" = "view" ]; then exit 1; fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then printf '%s\\n' main; exit 0; fi
+if [ "$1" = "api" ]; then printf '%s\\n' ${baseSha}; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then exit 1; fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then exit 1; fi
+exit 1
+`,
+    );
+    chmodSync(fakeGh, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+    try {
+      const tool = requireTool(
+        registeredTools({
+          stackRunner: async () => {
+            throw new Error('current branch "feature" is not part of a stack');
+          },
+        }),
+        "push_and_check_ci",
+      );
+      const result = await tool.execute("push", {}, undefined, undefined, { cwd });
+      assert.equal(result.details.prCreationFailed, true, JSON.stringify(result.details));
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+
+    const remoteHead = git(remote, ["rev-parse", "refs/heads/feature"]);
+    assert.equal(remoteHead, git(cwd, ["rev-parse", "HEAD"]));
+    assert.equal(git(cwd, ["rev-list", "--merges", "--count", "HEAD"]), "0");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
   }
 });
 

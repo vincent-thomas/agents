@@ -1,9 +1,12 @@
 #!/usr/bin/env node
+import type { ThinkingLevel } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createRunState, loadContract } from "./contract.ts";
 import { Controller } from "./controller.ts";
-import { ScriptedPlanner } from "./planner.ts";
+import { ModelPlanner } from "./model-planner.ts";
+import { ScriptedPlanner, type Planner } from "./planner.ts";
 import { JsonStateStore } from "./store.ts";
 import type { PlannerDecision } from "./types.ts";
 
@@ -31,18 +34,40 @@ async function main(): Promise<void> {
   }
 
   const script = option(args, "--script");
-  if (!script) throw new Error(`${command ?? "run"} requires --script <decisions.json> in the MVP`);
-  const planner = new ScriptedPlanner(await decisions(resolve(script)));
-  const controller = new Controller(planner, store);
+  let planner: Planner;
+  if (script) {
+    planner = new ScriptedPlanner(await decisions(resolve(script)));
+  } else {
+    const provider = option(args, "--provider", "openai-codex")!;
+    const modelId = option(args, "--model", "gpt-5.4")!;
+    const runtime = await ModelRuntime.create();
+    const model = runtime.getModel(provider, modelId);
+    if (!model) throw new Error(`Unknown model: ${provider}/${modelId}`);
+    if (!(await runtime.getAuth(model))) {
+      throw new Error(`No configured authentication for ${provider}; authenticate with Pi first`);
+    }
+    const reasoning = option(args, "--reasoning", "medium")!;
+    if (!["minimal", "low", "medium", "high", "xhigh", "max"].includes(reasoning)) {
+      throw new Error("--reasoning must be minimal, low, medium, high, xhigh, or max");
+    }
+    planner = new ModelPlanner(runtime, model, {
+      reasoningEffort: reasoning as ThinkingLevel,
+    });
+  }
+  const maxSteps = Number(option(args, "--max-steps", "100"));
+  if (!Number.isSafeInteger(maxSteps) || maxSteps <= 0) {
+    throw new Error("--max-steps must be a positive integer");
+  }
+  const controller = new Controller(planner, store, undefined, { maxSteps });
   let state;
   if (command === "resume") {
     const runId = args.find((arg) => !arg.startsWith("--"));
-    if (!runId) throw new Error("Usage: coderv2 resume <run-id> --script decisions.json");
+    if (!runId) throw new Error("Usage: coderv2 resume <run-id> [model options]");
     state = await store.load(runId);
   } else if (command === "run") {
     const contractPath = option(args, "--contract");
     if (!contractPath)
-      throw new Error("Usage: coderv2 run --contract task.json --repo . --script decisions.json");
+      throw new Error("Usage: coderv2 run --contract task.json --repo . [model options]");
     state = await createRunState(
       await loadContract(resolve(contractPath)),
       option(args, "--repo", ".")!,

@@ -7,7 +7,7 @@ import type { Planner } from "./planner.ts";
 import { validatePlannerDecision } from "./planner.ts";
 import type { StateStore } from "./store.ts";
 import { transition } from "./transitions.ts";
-import type { Action, ActionAttempt, FailureKind, RunState } from "./types.ts";
+import type { Action, ActionAttempt, FailureKind, PlannerDecision, RunState } from "./types.ts";
 
 function strategyFingerprint(
   objectiveId: string,
@@ -85,8 +85,9 @@ export class Controller {
       if (terminal(state)) break;
       const objectiveId = state.activeObjectiveId;
       if (!objectiveId) throw new Error("Run has no active objective");
-      const decision = await this.planner.propose(this.compiler.compile(state, objectiveId));
+      let decision: PlannerDecision;
       try {
+        decision = await this.planner.propose(this.compiler.compile(state, objectiveId));
         validatePlannerDecision(decision);
       } catch (error) {
         state = this.recordFailure(
@@ -272,6 +273,7 @@ export class Controller {
             state.repositoryFingerprint,
           ),
           failure: kind,
+          error: error instanceof Error ? error.message : String(error),
         },
       ],
     };

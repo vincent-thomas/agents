@@ -1,4 +1,5 @@
 import type { DecisionContext, RunState } from "./types.ts";
+import { evaluateRequirement } from "./evaluator.ts";
 
 export interface ContextCompilerOptions {
   maxEvidence?: number;
@@ -10,7 +11,7 @@ export class ContextCompiler {
   private readonly options: ContextCompilerOptions;
 
   constructor(options: ContextCompilerOptions = {}) {
-    this.options = options;
+    this.options = { maxOutputCharacters: 60_000, ...options };
   }
 
   compile(state: RunState, objectiveId: string): DecisionContext {
@@ -31,11 +32,39 @@ export class ContextCompiler {
         .map((item) =>
           item.type === "command" || item.type === "test"
             ? { ...item, stdout: item.stdout.slice(-2_000), stderr: item.stderr.slice(-2_000) }
-            : item,
+            : item.type === "source"
+              ? { ...item, content: item.content.slice(0, 8_000) }
+              : item,
         ),
+      evaluations: {
+        successCriteria: Object.fromEntries(
+          objective.successCriteria.map((predicate) => [
+            predicate.id,
+            evaluateRequirement(predicate.requirement, state),
+          ]),
+        ),
+        invariants: Object.fromEntries(
+          objective.invariants.map((predicate) => [
+            predicate.id,
+            evaluateRequirement(predicate.requirement, state),
+          ]),
+        ),
+      },
       recentAttempts: state.attempts
         .filter((attempt) => attempt.objectiveId === objectiveId)
-        .slice(-(this.options.maxAttempts ?? 5)),
+        .slice(-(this.options.maxAttempts ?? 5))
+        .map((attempt) => ({
+          ...attempt,
+          observation: attempt.observation
+            ? {
+                ...attempt.observation,
+                stdout: attempt.observation.stdout?.slice(-2_000),
+                stderr: attempt.observation.stderr?.slice(-2_000),
+                filesBefore: [],
+                filesAfter: [],
+              }
+            : undefined,
+        })),
       repositoryFingerprint: state.repositoryFingerprint,
       availableActions: [
         "inspect",

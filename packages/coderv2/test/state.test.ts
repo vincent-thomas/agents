@@ -102,5 +102,6 @@ test("context is deterministic, relevant, bounded, and omits unrelated objective
   assert.deepEqual(compiler.compile(run, "root"), first);
   assert.equal(JSON.stringify(first).includes("unrelated"), false);
   assert.equal(first.objective.id, "root");
+  assert.equal(first.evaluations.successCriteria.changed.status, "unknown");
   assert.ok(JSON.stringify(first).length <= 5_000);
 });

@@ -77,3 +77,28 @@ test("decomposes generically while preserving one active leaf", async () => {
     await rm(runs, { recursive: true });
   }
 });
+
+test("records a model failure and reconstructs the next turn from state", async () => {
+  const repo = await tempRepo();
+  const runs = await mkdtemp(join(tmpdir(), "coderv2-model-failure-runs-"));
+  let calls = 0;
+  try {
+    const initial = await state(repo);
+    initial.objectives.root.successCriteria = [];
+    const planner = {
+      async propose() {
+        calls++;
+        if (calls === 1) throw new Error("invalid model output");
+        return { type: "finish" as const, objectiveId: "root", evidenceIds: [] };
+      },
+    };
+    const result = await new Controller(planner, new JsonStateStore(runs)).run(initial);
+    assert.equal(result.objectives.root.status, "satisfied");
+    assert.equal(result.attempts[0].failure, "environment_failure");
+    assert.match(result.attempts[0].error ?? "", /invalid model output/);
+    assert.equal(calls, 2);
+  } finally {
+    await rm(repo, { recursive: true });
+    await rm(runs, { recursive: true });
+  }
+});

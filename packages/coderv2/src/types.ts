@@ -155,6 +155,7 @@ export interface ActionAttempt {
   strategyFingerprint: string;
   observation?: ActionObservation;
   failure?: FailureKind;
+  error?: string;
 }
 
 export interface RunState {
@@ -184,6 +185,10 @@ export interface DecisionContext {
   contract: Pick<TaskContract, "allowedEffects" | "nonGoals">;
   claims: Claim[];
   evidence: Evidence[];
+  evaluations: {
+    successCriteria: Record<string, PredicateResult>;
+    invariants: Record<string, PredicateResult>;
+  };
   recentAttempts: ActionAttempt[];
   repositoryFingerprint: string;
   availableActions: Action["type"][];

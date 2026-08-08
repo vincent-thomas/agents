@@ -37,14 +37,20 @@ contract's allowed paths are recorded as unexpected effects and block the object
 
 ## CLI
 
-The MVP uses `ScriptedPlanner` to prove the harness independently of model-provider integration.
-Planner scripts are JSON arrays of decisions matching `PlannerDecision`.
+By default, the CLI creates a `ModelPlanner` through Pi's `ModelRuntime`. It reuses Pi's model
+catalog and authentication, and reconstructs every model turn from canonical run state. Authenticate
+with Pi first, then select any configured model:
 
 ```sh
-coderv2 run --contract ./task.json --repo . --script ./decisions.json
+coderv2 run --contract ./task.json --repo . \
+  --provider openai-codex --model gpt-5.4 --reasoning medium
 coderv2 inspect <run-id>
-coderv2 resume <run-id> --script ./remaining-decisions.json
+coderv2 resume <run-id> --provider openai-codex --model gpt-5.4
 ```
+
+Use `--max-steps` to bound model turns. `ScriptedPlanner` remains available for deterministic
+tests and demos by passing `--script ./decisions.json`; planner scripts are JSON arrays of
+`PlannerDecision` values.
 
 Example contract:
 
@@ -82,9 +88,10 @@ The repository's canonical full check remains `make`.
 
 ## Current limitations
 
-This is an architectural MVP, not a complete autonomous coding agent. It has no model-provider
-adapter, semantic retrieval, multi-agent orchestration, remote sandbox, rollback tree, benchmark
-runner, PR automation, or UI. Shell commands execute on the host and repository effect boundaries
-are enforced from observed Git state after execution; stronger pre-execution isolation is future
-work. Evidence gating improves falsifiability and completion discipline, but it is not formal proof
-of arbitrary semantic correctness.
+This is an architectural MVP, not a complete autonomous coding agent. It has no semantic retrieval,
+multi-agent orchestration, remote sandbox, rollback tree, benchmark runner, PR automation, or UI.
+The model planner currently uses JSON-only prompting plus strict local validation rather than native
+constrained decoding. Shell commands execute on the host and repository effect boundaries are
+enforced from observed Git state after execution; stronger pre-execution isolation is future work.
+Evidence gating improves falsifiability and completion discipline, but it is not formal proof of
+arbitrary semantic correctness.

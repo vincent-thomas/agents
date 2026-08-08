@@ -5,6 +5,7 @@ export * from "./evaluator.ts";
 export * from "./evidence.ts";
 export * from "./executor.ts";
 export * from "./fingerprint.ts";
+export * from "./model-planner.ts";
 export * from "./planner.ts";
 export * from "./store.ts";
 export * from "./transitions.ts";

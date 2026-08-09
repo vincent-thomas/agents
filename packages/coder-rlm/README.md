@@ -50,6 +50,15 @@ credentials saved by Pi (normally in `~/.pi/agent/auth.json`). It defaults to
 bun run --filter @vt-agent/coder-rlm example
 ```
 
+The autonomous evaluation gives the model a large, semantically varied incident corpus and asks
+only for its analytical conclusion; it does not tell the model to recurse. Its final metrics show
+whether the model chose recursive `llm()` calls, along with depth, call counts, delegated context
+sizes, elapsed time, and the expected top themes:
+
+```sh
+bun run --filter @vt-agent/coder-rlm evaluate:autonomous
+```
+
 For other integrations, pass Pi's `getApiKey(provider)` resolver in `RLMOptions`. The resolver
 is invoked for every root and recursive model request, so refreshed credentials are inherited
 without putting secrets into prompts or the JavaScript runtime.

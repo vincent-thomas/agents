@@ -14,6 +14,10 @@ const rlm = new RLM({ model, context: hugeString, getApiKey });
 const result = await rlm.run("Find the major recurring architectural problems.");
 ```
 
+Pass `onEvent` to observe each depth-aware RLM lifecycle event and the underlying Pi agent
+events while a run is in progress. Tool start/end events expose the JavaScript code and its
+captured console output; recursive calls appear as nested `run_start`/`run_end` events.
+
 Top-level `await` is supported and declarations persist between JavaScript calls. Separate
 `run()` calls receive separate runtimes. At `maxDepth` (default `3`, minimum `1`), `llm()` becomes an
 ordinary Pi model call without the JavaScript tool; only that delegated leaf context is placed

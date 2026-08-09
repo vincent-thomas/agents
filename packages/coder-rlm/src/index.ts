@@ -1,1 +1,1 @@
-export { RLM, type RLMOptions } from "./rlm.ts";
+export { RLM, type RLMEvent, type RLMOptions } from "./rlm.ts";

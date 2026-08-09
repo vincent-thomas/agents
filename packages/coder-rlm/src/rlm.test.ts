@@ -7,7 +7,7 @@ import {
   fauxToolCall,
   type Context,
 } from "@earendil-works/pi-ai";
-import { RLM } from "./rlm.ts";
+import { RLM, type RLMEvent } from "./rlm.ts";
 
 function javascript(code: string) {
   return fauxAssistantMessage(fauxToolCall("javascript", { code }), { stopReason: "toolUse" });
@@ -79,6 +79,58 @@ suite("RLM", () => {
     assert.equal(answer, "root");
     assert.deepEqual(seenApiKeys, ["saved-pi-token", "saved-pi-token", "saved-pi-token"]);
     assert.deepEqual(resolvedProviders, [faux.provider, faux.provider, faux.provider]);
+  });
+
+  test("emits depth-aware events for tools and recursive runs", async () => {
+    const events: RLMEvent[] = [];
+    const faux = createFauxCore({});
+    faux.setResponses([
+      javascript('console.log(await llm("child task", context.slice(0, 5)))'),
+      fauxAssistantMessage("child answer"),
+      fauxAssistantMessage("root answer"),
+    ]);
+
+    const answer = await new RLM(
+      {
+        model: faux.getModel(),
+        context: "child context",
+        maxDepth: 1,
+        onEvent: (event) => {
+          events.push(event);
+        },
+      },
+      { streamFn: faux.streamSimple },
+    ).run("root task");
+
+    assert.equal(answer, "root answer");
+    assert.deepEqual(
+      events.filter((event) => event.type === "run_start").map((event) => event.depth),
+      [0, 1],
+    );
+    const toolStart = events.find(
+      (event) => event.type === "agent_event" && event.event.type === "tool_execution_start",
+    );
+    assert.equal(toolStart?.depth, 0);
+    assert.match(
+      toolStart?.type === "agent_event" && toolStart.event.type === "tool_execution_start"
+        ? toolStart.event.args.code
+        : "",
+      /llm\("child task"/,
+    );
+    const toolEnd = events.find(
+      (event) => event.type === "agent_event" && event.event.type === "tool_execution_end",
+    );
+    assert.equal(toolEnd?.depth, 0);
+    assert.match(
+      toolEnd?.type === "agent_event" && toolEnd.event.type === "tool_execution_end"
+        ? JSON.stringify(toolEnd.event.result)
+        : "",
+      /child answer/,
+    );
+    assert.deepEqual(
+      events.filter((event) => event.type === "run_end").map((event) => event.depth),
+      [1, 0],
+    );
   });
 
   test("lets JavaScript inspect context and preserve state across tool turns", async () => {

@@ -1,4 +1,9 @@
-import { Agent, type AgentOptions, type StreamFn } from "@earendil-works/pi-agent-core";
+import {
+  Agent,
+  type AgentEvent,
+  type AgentOptions,
+  type StreamFn,
+} from "@earendil-works/pi-agent-core";
 import { contentText, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { createJavascriptTool } from "./javascript-tool.ts";
@@ -9,11 +14,24 @@ export interface RLMOptions {
   model: Model<any>;
   context: string;
   getApiKey?: AgentOptions["getApiKey"];
+  onEvent?: (event: RLMEvent) => Promise<void> | void;
   maxDepth?: number;
   maxModelCalls?: number;
   executionTimeoutMs?: number;
   maxOutputChars?: number;
 }
+
+export type RLMEvent =
+  | {
+      type: "run_start";
+      depth: number;
+      prompt: string;
+      contextLength: number;
+      isLeaf: boolean;
+    }
+  | { type: "agent_event"; depth: number; event: AgentEvent }
+  | { type: "run_end"; depth: number; result: string }
+  | { type: "run_error"; depth: number; error: string };
 
 export interface RLMDependencies {
   streamFn?: StreamFn;
@@ -24,6 +42,7 @@ interface ResolvedOptions {
   model: Model<any>;
   context: string;
   getApiKey: AgentOptions["getApiKey"];
+  onEvent: RLMOptions["onEvent"];
   maxDepth: number;
   maxModelCalls: number;
   executionTimeoutMs: number | undefined;
@@ -53,6 +72,7 @@ export class RLM {
       model: options.model,
       context: options.context,
       getApiKey: options.getApiKey,
+      onEvent: options.onEvent,
       maxDepth: positiveInteger(options.maxDepth ?? 3, "maxDepth"),
       maxModelCalls: positiveInteger(options.maxModelCalls ?? 32, "maxModelCalls"),
       executionTimeoutMs: optionalPositiveInteger(options.executionTimeoutMs, "executionTimeoutMs"),
@@ -82,6 +102,13 @@ export class RLM {
     }
 
     const isLeaf = depth >= this.options.maxDepth;
+    await this.emit({
+      type: "run_start",
+      depth,
+      prompt,
+      contextLength: context.length,
+      isLeaf,
+    });
     let runtime: JavaScriptRuntime | undefined;
     if (!isLeaf) {
       runtime = this.createRuntime({
@@ -112,17 +139,34 @@ export class RLM {
         return true;
       },
     });
+    const unsubscribe = agent.subscribe((event) =>
+      this.emit({ type: "agent_event", depth, event }),
+    );
 
     try {
       await agent.prompt(isLeaf ? buildLeafPrompt(prompt, context) : prompt);
       if (stoppedForBudget) {
         throw new Error(`RLM exceeded its ${budget.maximum} model-call limit before synthesis`);
       }
-      return finalResponse(agent.state.messages);
+      const result = finalResponse(agent.state.messages);
+      await this.emit({ type: "run_end", depth, result });
+      return result;
+    } catch (error) {
+      await this.emit({ type: "run_error", depth, error: errorMessage(error) });
+      throw error;
     } finally {
+      unsubscribe();
       runtime?.dispose();
     }
   }
+
+  private async emit(event: RLMEvent): Promise<void> {
+    await this.options.onEvent?.(event);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function finalResponse(messages: readonly unknown[]): string {

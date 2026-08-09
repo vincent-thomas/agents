@@ -39,6 +39,7 @@ suite("RLM", () => {
     assert.equal(result, "answer");
     assert.equal(seen.length, 1);
     assert.doesNotMatch(seen[0].systemPrompt ?? "", /SECRET_SENTINEL/);
+    assert.match(seen[0].systemPrompt ?? "", /context.*always a string/);
     assert.doesNotMatch(visibleText(seen[0]), /SECRET_SENTINEL/);
     assert.match(visibleText(seen[0]), /inspect it/);
     assert.equal(seen[0].tools?.map((tool) => tool.name).join(","), "javascript");

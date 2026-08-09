@@ -1,9 +1,10 @@
-import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { RLM } from "../src/index.ts";
 
-const provider = process.env.RLM_PROVIDER ?? "openai";
+const provider = process.env.RLM_PROVIDER ?? "openai-codex";
 const modelId = process.env.RLM_MODEL ?? "gpt-5.4-mini";
-const model = builtinModels().getModel(provider, modelId);
+const modelRuntime = await ModelRuntime.create();
+const model = modelRuntime.getModel(provider, modelId);
 if (!model) throw new Error(`Unknown Pi model: ${provider}/${modelId}`);
 
 const issueTemplates = [
@@ -17,7 +18,11 @@ const issues = Array.from(
   (_, index) => `Issue ${index + 1}: ${issueTemplates[index % issueTemplates.length]}`,
 );
 
-const rlm = new RLM({ model, context: issues.join("\n\n") });
+const rlm = new RLM({
+  model,
+  context: issues.join("\n\n"),
+  getApiKey: async (providerId) => (await modelRuntime.getAuth(providerId))?.auth.apiKey,
+});
 console.log(
   await rlm.run(
     "Identify the three most common architectural problems in this corpus and give supporting examples.",

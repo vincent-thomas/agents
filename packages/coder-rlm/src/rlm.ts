@@ -1,4 +1,4 @@
-import { Agent, type StreamFn } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentOptions, type StreamFn } from "@earendil-works/pi-agent-core";
 import { contentText, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { createJavascriptTool } from "./javascript-tool.ts";
@@ -8,6 +8,7 @@ import { JavaScriptRuntime, type JavaScriptRuntimeOptions } from "./runtime.ts";
 export interface RLMOptions {
   model: Model<any>;
   context: string;
+  getApiKey?: AgentOptions["getApiKey"];
   maxDepth?: number;
   maxModelCalls?: number;
   executionTimeoutMs?: number;
@@ -22,6 +23,7 @@ export interface RLMDependencies {
 interface ResolvedOptions {
   model: Model<any>;
   context: string;
+  getApiKey: AgentOptions["getApiKey"];
   maxDepth: number;
   maxModelCalls: number;
   executionTimeoutMs: number | undefined;
@@ -50,6 +52,7 @@ export class RLM {
     this.options = {
       model: options.model,
       context: options.context,
+      getApiKey: options.getApiKey,
       maxDepth: positiveInteger(options.maxDepth ?? 3, "maxDepth"),
       maxModelCalls: positiveInteger(options.maxModelCalls ?? 32, "maxModelCalls"),
       executionTimeoutMs: optionalPositiveInteger(options.executionTimeoutMs, "executionTimeoutMs"),
@@ -101,6 +104,7 @@ export class RLM {
         tools: runtime ? [createJavascriptTool(runtime)] : [],
       },
       streamFn: this.streamFn,
+      getApiKey: this.options.getApiKey,
       shouldStopAfterTurn: ({ toolResults }) => {
         if (toolResults.length === 0) return false;
         if (budget.acquire()) return false;

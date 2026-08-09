@@ -44,6 +44,43 @@ suite("RLM", () => {
     assert.equal(seen[0].tools?.map((tool) => tool.name).join(","), "javascript");
   });
 
+  test("resolves credentials for root and recursive model calls", async () => {
+    const seenApiKeys: Array<string | undefined> = [];
+    const faux = createFauxCore({});
+    faux.setResponses([
+      (_context, options) => {
+        seenApiKeys.push(options?.apiKey);
+        return javascript('console.log(await llm("delegate"))');
+      },
+      (_context, options) => {
+        seenApiKeys.push(options?.apiKey);
+        return fauxAssistantMessage("child");
+      },
+      (_context, options) => {
+        seenApiKeys.push(options?.apiKey);
+        return fauxAssistantMessage("root");
+      },
+    ]);
+    const resolvedProviders: string[] = [];
+
+    const answer = await new RLM(
+      {
+        model: faux.getModel(),
+        context: "delegated context",
+        maxDepth: 1,
+        getApiKey: (provider) => {
+          resolvedProviders.push(provider);
+          return "saved-pi-token";
+        },
+      },
+      { streamFn: faux.streamSimple },
+    ).run("root task");
+
+    assert.equal(answer, "root");
+    assert.deepEqual(seenApiKeys, ["saved-pi-token", "saved-pi-token", "saved-pi-token"]);
+    assert.deepEqual(resolvedProviders, [faux.provider, faux.provider, faux.provider]);
+  });
+
   test("lets JavaScript inspect context and preserve state across tool turns", async () => {
     const toolObservations: string[] = [];
     const faux = createFauxCore({});

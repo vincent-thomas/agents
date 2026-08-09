@@ -10,7 +10,7 @@ tool, `javascript({ code })`; the tool's persistent runtime contains only:
 ```ts
 import { RLM } from "@vt-agent/coder-rlm";
 
-const rlm = new RLM({ model, context: hugeString });
+const rlm = new RLM({ model, context: hugeString, getApiKey });
 const result = await rlm.run("Find the major recurring architectural problems.");
 ```
 
@@ -38,9 +38,14 @@ isolation.
 
 ## Example
 
-The runtime requires `node` on `PATH`. Set credentials supported by Pi, optionally choose
-`RLM_PROVIDER` and `RLM_MODEL`, then run:
+The runtime requires `node` on `PATH`. The example loads Pi's normal model runtime and reuses
+credentials saved by Pi (normally in `~/.pi/agent/auth.json`). It defaults to
+`openai-codex`/`gpt-5.4-mini`; optionally choose `RLM_PROVIDER` and `RLM_MODEL`, then run:
 
 ```sh
 bun run --filter @vt-agent/coder-rlm example
 ```
+
+For other integrations, pass Pi's `getApiKey(provider)` resolver in `RLMOptions`. The resolver
+is invoked for every root and recursive model request, so refreshed credentials are inherited
+without putting secrets into prompts or the JavaScript runtime.

@@ -20,12 +20,13 @@ import {
   prReadyCommand,
   prViewForBranchCommand,
   extractRunId,
+  fetchFailureLogs,
   trimLog,
   parseReviews,
 } from "./logic.ts";
 import { execSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 // ---------------------------------------------------------------------------
@@ -133,6 +134,71 @@ suite("extractRunId", () => {
   test("unrelated URL", () =>
     assert.equal(extractRunId("https://github.com/owner/repo/pull/42"), null));
   test("empty string", () => assert.equal(extractRunId(""), null));
+});
+
+suite("fetchFailureLogs", () => {
+  test("streams complete output to a temporary file and reports its byte size", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "failure-log-fetch-"));
+    let logPath: string | null = null;
+    try {
+      const result = await withFakeGh(
+        cwd,
+        `if [ "$4" = "--log-failed" ]; then
+  i=1
+  while [ "$i" -le 400 ]; do printf 'line-%s\\n' "$i"; i=$((i + 1)); done
+fi`,
+        async () =>
+          fetchFailureLogs(
+            [
+              {
+                name: "test",
+                state: "FAILURE",
+                bucket: "fail",
+                link: "https://github.com/acme/repo/actions/runs/123/job/456",
+              },
+            ],
+            cwd,
+          ),
+      );
+      const failure = result[0]!;
+      assert.equal(failure.logSizeBytes, 3492);
+      assert.ok(failure.logPath);
+      logPath = failure.logPath;
+      const saved = readFileSync(failure.logPath, "utf8");
+      assert.equal(saved.split("\n").length, 401);
+      assert.match(saved, /line-1\n/);
+      assert.match(saved, /line-400\n/);
+    } finally {
+      if (logPath) rmSync(dirname(logPath), { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("does not label gh retrieval errors as complete CI logs", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "failure-log-error-"));
+    try {
+      const [failure] = await withFakeGh(
+        cwd,
+        "printf 'authentication failed\\n' >&2; exit 1",
+        async () =>
+          fetchFailureLogs(
+            [
+              {
+                name: "test",
+                state: "FAILURE",
+                bucket: "fail",
+                link: "https://github.com/acme/repo/actions/runs/123/job/456",
+              },
+            ],
+            cwd,
+          ),
+      );
+      assert.equal(failure?.logPath, null);
+      assert.equal(failure?.logSizeBytes, null);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
 });
 
 suite("trimLog", () => {

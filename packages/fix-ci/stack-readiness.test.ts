@@ -53,7 +53,13 @@ function run(
       };
     },
     fetchFailureLogs: async (failures) =>
-      failures.map((check) => ({ name: check.name, link: check.link, runId: "1", log: "failed" })),
+      failures.map((check) => ({
+        name: check.name,
+        link: check.link,
+        runId: "1",
+        logPath: "/tmp/ci-failure.log",
+        logSizeBytes: 6,
+      })),
     markPrReady: async (_cwd, _signal, branch) => {
       readyCalls.push(branch);
       const success = !options.readyFailures?.has(branch);
@@ -95,7 +101,8 @@ suite("stack readiness orchestration", () => {
     });
     assert.equal(result.allChecksPassed, false);
     assert.deepEqual(readyCalls, []);
-    assert.equal(result.branches[1]?.failureLogs[0]?.log, "failed");
+    assert.equal(result.branches[1]?.failureLogs[0]?.logPath, "/tmp/ci-failure.log");
+    assert.equal(result.branches[1]?.failureLogs[0]?.logSizeBytes, 6);
   });
 
   test("zero checks blocks readiness", async () => {

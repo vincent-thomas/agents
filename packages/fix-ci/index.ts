@@ -1364,8 +1364,9 @@ export function createFixCiExtension(options: {
         "mark the PR as ready for review. For a GitHub stack, resolves every " +
         "stack branch to its exact local SHA, checks every branch, and marks " +
         "draft PRs ready only after all checks pass. " +
-        "Returns the status of every check. For failures, includes " +
-        "the last 200 lines of log output. " +
+        "Returns the status of every check. For failures, saves complete log output " +
+        "to temporary files and returns each file path and size; read these files selectively " +
+        "rather than loading the full contents into context. " +
         "You MUST use this tool instead of running `git push` in bash. " +
         "After fixing failures (local or CI), call this tool again. Provide pull_requests with an agent-authored branch, title, and reviewer-oriented body for every new or changed branch. Bodies must explain context, approach, reviewer focus, and verification; commit-message summaries are not sufficient. Existing descriptions may be omitted only for CI retries when their managed section already matches the current branch SHA.",
       parameters: TObject({
@@ -2695,10 +2696,16 @@ function formatStackReadiness(result: StackReadinessResult): string {
     if (branch.reason) lines.push(`Action needed: ${branch.reason}.`);
     if (branch.failureLogs.length > 0) {
       lines.push("");
+      lines.push(
+        "Complete failure output is stored in the files below. Read logs selectively (for example with `grep`, `sed`, or `tail`) rather than loading an entire file into context.",
+        "",
+      );
       for (const failureLog of branch.failureLogs) {
         lines.push(`#### Failure logs: ${failureLog.name}`);
-        if (failureLog.log) {
-          lines.push("```", failureLog.log, "```");
+        if (failureLog.logPath && failureLog.logSizeBytes !== null) {
+          lines.push(
+            `Log file: ${failureLog.logPath} (${failureLog.logSizeBytes} bytes). Read it selectively rather than loading it all at once.`,
+          );
         } else {
           lines.push("_(no logs available)_");
         }
@@ -2759,16 +2766,20 @@ function buildReport(
 
   lines.push("### Failures");
   lines.push("");
+  lines.push(
+    "Complete failure output is stored in the files below. Read logs selectively (for example with `grep`, `sed`, or `tail`) rather than loading an entire file into context.",
+    "",
+  );
   for (const fl of failureLogs) {
     lines.push(`#### ❌ ${fl.name}`);
     if (fl.link) {
       lines.push(`URL: ${fl.link}`);
     }
     lines.push("");
-    if (fl.log) {
-      lines.push("```");
-      lines.push(fl.log);
-      lines.push("```");
+    if (fl.logPath && fl.logSizeBytes !== null) {
+      lines.push(
+        `Log file: ${fl.logPath} (${fl.logSizeBytes} bytes). Read it selectively rather than loading it all at once.`,
+      );
     } else {
       lines.push("_(no logs available)_");
     }

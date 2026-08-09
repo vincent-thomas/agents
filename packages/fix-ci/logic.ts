@@ -7,6 +7,10 @@
  * (which freezes the TUI). The abort signal is threaded through so Ctrl+C
  * kills child processes promptly.
  */
+import { spawn } from "node:child_process";
+import { mkdtemp, open, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { execAsync, execSucceeds, extractErrorOutput, tryExec } from "./exec-async.ts";
 import { hasUpstream, currentBranch } from "./git-utils.ts";
 import { shellQuote } from "./shell-quote.ts";
@@ -37,7 +41,10 @@ export interface FailureLog {
   name: string;
   link: string | null;
   runId: string | null;
-  log: string | null;
+  /** Temporary file containing the complete output, when fetching succeeded. */
+  logPath: string | null;
+  /** Size of logPath in bytes. */
+  logSizeBytes: number | null;
 }
 
 interface PushResult {
@@ -676,31 +683,26 @@ export async function fetchFailureLogs(
   signal?: AbortSignal,
 ): Promise<FailureLog[]> {
   const results: FailureLog[] = [];
-  const seenRunIds = new Set<string>();
+  const logsByRunId = new Map<string, { logPath: string; logSizeBytes: number } | null>();
 
   for (const check of failures) {
     if (signal?.aborted) break;
 
     const runId = extractRunId(check.link);
-
-    if (runId && seenRunIds.has(runId)) {
-      results.push({
-        name: check.name,
-        link: check.link,
-        runId,
-        log: "(see logs above — same workflow run)",
-      });
-      continue;
+    let savedLog: { logPath: string; logSizeBytes: number } | null = null;
+    if (runId && logsByRunId.has(runId)) {
+      savedLog = logsByRunId.get(runId) ?? null;
+    } else if (runId) {
+      savedLog = await fetchRunLog(runId, cwd, signal);
+      logsByRunId.set(runId, savedLog);
     }
 
-    if (runId) seenRunIds.add(runId);
-
-    const log = runId ? await fetchRunLog(runId, cwd, signal) : null;
     results.push({
       name: check.name,
       link: check.link,
       runId,
-      log,
+      logPath: savedLog?.logPath ?? null,
+      logSizeBytes: savedLog?.logSizeBytes ?? null,
     });
   }
 
@@ -717,31 +719,70 @@ async function fetchRunLog(
   runId: string,
   cwd: string,
   signal?: AbortSignal,
-): Promise<string | null> {
-  // Try --log-failed first (focused output)
+): Promise<{ logPath: string; logSizeBytes: number } | null> {
+  let directory: string | null = null;
   try {
-    const { stdout } = await execAsync(`gh run view ${runId} --log-failed 2>&1`, {
-      cwd,
-      timeout: 30_000,
-      signal,
-    });
-    if (stdout.trim().length > 0) {
-      return trimLog(stdout, 200);
+    directory = await mkdtemp(join(tmpdir(), "vt-fix-ci-"));
+    const logPath = join(directory, "failure.log");
+
+    for (const flag of ["--log-failed", "--log"]) {
+      const succeeded = await streamRunLog(runId, flag, logPath, cwd, signal);
+      if (!succeeded) {
+        if (signal?.aborted) break;
+        continue;
+      }
+
+      const { size } = await stat(logPath);
+      if (size > 0) return { logPath, logSizeBytes: size };
     }
   } catch {
-    // may exit non-zero or produce nothing
+    // A retrieval or filesystem failure means no complete log is available.
   }
 
-  // Fall back to full log
+  if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+  return null;
+}
+
+async function streamRunLog(
+  runId: string,
+  flag: string,
+  logPath: string,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (signal?.aborted) return false;
+
+  const output = await open(logPath, "w");
   try {
-    const { stdout } = await execAsync(`gh run view ${runId} --log 2>&1`, {
-      cwd,
-      timeout: 30_000,
-      signal,
+    return await new Promise<boolean>((resolve) => {
+      const child = spawn("gh", ["run", "view", runId, flag], {
+        cwd,
+        stdio: ["ignore", output.fd, output.fd],
+      });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      let timedOut = false;
+
+      const finish = (succeeded: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(succeeded);
+      };
+      const onAbort = () => child.kill();
+
+      child.once("error", () => finish(false));
+      child.once("close", (code) => finish(code === 0 && !signal?.aborted && !timedOut));
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill();
+      }, 30_000);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
     });
-    return trimLog(stdout, 300);
-  } catch {
-    return null;
+  } finally {
+    await output.close();
   }
 }
 

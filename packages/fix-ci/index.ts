@@ -57,6 +57,7 @@ import {
   probeGhStackRepository,
   probeGhStackPullRequest,
   parseGhStackPullRequestRepository,
+  isGhStackPullRequestIdentity,
   resolveGhStackStaleBase,
   runGhStackPullRequestEdit,
   isMiddleInsertionRejectionOutput,
@@ -161,6 +162,11 @@ export function createFixCiExtension(options: {
       replacementBase: string,
       pullRequest: number,
       repository: { owner: string; repository: string },
+      originalAssociation: {
+        number: number;
+        url: string;
+        baseBranch: string | null;
+      },
       activeBase: string,
       signal: AbortSignal | undefined,
     ): Promise<{ success: boolean; details: Record<string, unknown> }> => {
@@ -175,18 +181,13 @@ export function createFixCiExtension(options: {
         undefined,
         stackRunner,
       );
-      const initialReturnedRepository =
-        initialProbe.status === "found" && initialProbe.pullRequest.url
-          ? parseGhStackPullRequestRepository(initialProbe.pullRequest.url)
-          : null;
-      const initialVerified =
-        initialProbe.status === "found" &&
-        initialProbe.pullRequest.number === pullRequest &&
-        initialProbe.pullRequest.headRefName === branch &&
-        initialProbe.pullRequest.baseRefName === activeBase &&
-        initialReturnedRepository?.owner === repository.owner &&
-        initialReturnedRepository?.repository === repository.repository &&
-        initialReturnedRepository?.number === pullRequest;
+      const initialVerified = isGhStackPullRequestIdentity(initialProbe, {
+        number: pullRequest,
+        owner: repository.owner,
+        repository: repository.repository,
+        headRefName: branch,
+        baseRefName: activeBase,
+      });
       if (!initialVerified) {
         return {
           success: false,
@@ -221,11 +222,13 @@ export function createFixCiExtension(options: {
           stackRunner,
         );
         return {
-          verified:
-            probe.status === "found" &&
-            probe.pullRequest.number === pullRequest &&
-            probe.pullRequest.headRefName === branch &&
-            probe.pullRequest.baseRefName === expected,
+          verified: isGhStackPullRequestIdentity(probe, {
+            number: pullRequest,
+            owner: repository.owner,
+            repository: repository.repository,
+            headRefName: branch,
+            baseRefName: expected,
+          }),
           output: probe.output,
           base: probe.status === "found" ? probe.pullRequest.baseRefName : null,
           status: probe.status,
@@ -233,13 +236,29 @@ export function createFixCiExtension(options: {
       };
       const probeOriginalLocal = async () => {
         const probe = await probeGhStack(cwd, undefined, stackRunner);
+        const localBranch = probe.view?.branches[0];
+        const localPr = localBranch?.pr;
+        const localRepository = localPr?.url
+          ? parseGhStackPullRequestRepository(localPr.url)
+          : null;
+        const associationVerified =
+          !!localPr &&
+          localPr.number === originalAssociation.number &&
+          localPr.url === originalAssociation.url &&
+          localRepository?.owner === repository.owner &&
+          localRepository?.repository === repository.repository &&
+          localRepository?.number === originalAssociation.number;
         return {
           probe,
           verified:
             probe.status === "stacked" &&
             probe.branches.length === 1 &&
             probe.branches[0] === branch &&
-            probe.baseBranch === staleBase,
+            probe.baseBranch === staleBase &&
+            localBranch?.name === branch &&
+            (originalAssociation.baseBranch === null ||
+              localBranch.base === originalAssociation.baseBranch) &&
+            associationVerified,
         };
       };
       const restoreOriginal = async () => {
@@ -1854,6 +1873,11 @@ export function createFixCiExtension(options: {
                   resolution.replacementBase,
                   localPr.number,
                   repository,
+                  {
+                    number: localPr.number,
+                    url: localPr.url!,
+                    baseBranch: stackProbe.view.branches[0].base,
+                  },
                   resolution.activeBase,
                   signal,
                 );

@@ -954,6 +954,31 @@ export function parseGhStackPullRequestRepository(
   }
 }
 
+/** Verify that a PR probe is the exact PR requested at a mutation boundary. */
+export function isGhStackPullRequestIdentity(
+  probe: GhStackPullRequestProbeResult,
+  expected: {
+    number: number;
+    owner: string;
+    repository: string;
+    headRefName: string;
+    baseRefName: string;
+  },
+): boolean {
+  if (probe.status !== "found") return false;
+  const returnedRepository = probe.pullRequest.url
+    ? parseGhStackPullRequestRepository(probe.pullRequest.url)
+    : null;
+  return (
+    probe.pullRequest.number === expected.number &&
+    probe.pullRequest.headRefName === expected.headRefName &&
+    probe.pullRequest.baseRefName === expected.baseRefName &&
+    returnedRepository?.owner === expected.owner &&
+    returnedRepository?.repository === expected.repository &&
+    returnedRepository?.number === expected.number
+  );
+}
+
 function isNoPullRequestOutput(output: string) {
   return /no pull requests? found for (?:the )?branch/i.test(output);
 }
@@ -1167,17 +1192,14 @@ export async function resolveGhStackStaleBase(
     runner,
   );
   if (current.status === "found") {
-    const returnedRepository = current.pullRequest.url
-      ? parseGhStackPullRequestRepository(current.pullRequest.url)
-      : null;
-    const repositoryMatches =
-      returnedRepository?.owner === repository.owner &&
-      returnedRepository.repository === repository.repository &&
-      returnedRepository.number === pullRequest;
     if (
-      current.pullRequest.number !== pullRequest ||
-      current.pullRequest.headRefName !== activeBranch ||
-      !repositoryMatches
+      !isGhStackPullRequestIdentity(current, {
+        number: pullRequest,
+        owner: repository.owner,
+        repository: repository.repository,
+        headRefName: activeBranch,
+        baseRefName: current.pullRequest.baseRefName,
+      })
     ) {
       return {
         status: "unresolved",

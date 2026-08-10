@@ -237,11 +237,13 @@ export async function inspectUnstackedStack(
   );
   if (remoteProbe.status === "absent") return { status: "absent", output: remoteProbe.output };
   if (remoteProbe.status === "error") return { status: "unavailable", output: remoteProbe.output };
+  const remoteCurrentPr = remoteProbe.stack.pullRequests.find(
+    (pullRequest) => pullRequest.number === currentPrProbe.pullRequest.number,
+  );
   if (
     activePr.pullRequest.baseRefName !== remoteProbe.stack.base.ref ||
-    !remoteProbe.stack.pullRequests.some(
-      (pullRequest) => pullRequest.number === currentPrProbe.pullRequest.number,
-    )
+    !remoteCurrentPr ||
+    remoteCurrentPr.head.ref !== activeBranch
   ) {
     return {
       status: "unavailable",
@@ -301,9 +303,13 @@ export async function inspectStackReport(
     } else {
       const repository = parseGhStackPullRequestRepository(firstUrl);
       const firstPr = view.branches.find((branch) => branch.pr?.url)?.pr?.number;
-      if (!repository || !firstPr) {
+      if (!repository || !firstPr || repository.number !== firstPr) {
         remoteStatus = "unavailable";
-        remoteMismatches = ["could not parse the repository from the local PR URL"];
+        remoteMismatches = [
+          repository && firstPr && repository.number !== firstPr
+            ? `local PR URL number #${repository.number} does not match reported PR #${firstPr}`
+            : "could not parse the repository or PR number from the local PR URL",
+        ];
       } else {
         const remoteProbe = await probeGhStackRemote(
           cwd,

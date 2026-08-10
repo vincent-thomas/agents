@@ -45,8 +45,7 @@ Events include unique `runId`/`parentRunId` relationships and normalized `run_st
 records. Child lifecycle records and serializable handles expose the selected tier, never the
 resolved model. JavaScript events expose generated code and captured console output; terminal events
 include aggregate usage. Events are queued per top-level run in admission order; asynchronous
-observer callbacks are serialized, and the queue is flushed before `runDetailed()` settles. If `onEvent` throws or rejects, the run is aborted and rejects with that
-observer error after cleanup; observer failures are never silently swallowed. Pi's internal event
+observer callbacks are serialized and each callback is host-bounded by `eventObserverTimeoutMs` (default 30 seconds). The queue is flushed before `runDetailed()` settles when observers are healthy. If `onEvent` throws, rejects, or exceeds its deadline, the queue closes, queued-but-undelivered events are skipped, active work and children are aborted, and `runDetailed()` rejects with that observer error after cleanup. The callback itself cannot be canceled, but its late settlement is detached safely and cannot deliver later events. The overall `runTimeoutMs` deadline remains active through event flushing, so a flush that outlives the run deadline is closed and rejected rather than hanging. Pi's internal event
 types are deliberately not exposed as the public tracing contract.
 
 Top-level `await` is supported and declarations persist between JavaScript calls. Separate
@@ -54,7 +53,7 @@ Top-level `await` is supported and declarations persist between JavaScript calls
 
 ## Limits
 
-The MVP defaults to 32 model calls per top-level run, a 60-second JavaScript stall timeout, a 300-second per-model-request timeout, a 30-minute overall top-level run timeout, 50,000 characters of tool output, and 4 deep children. `maxModelCalls`, `maxDeepChildren`, `javascriptStallTimeoutMs`, `modelRequestTimeoutMs`, `runTimeoutMs`, and `maxOutputChars` can override those safeguards. The JavaScript watchdog only bounds stalled synchronous execution; heartbeats while `ctx.rlm.waitAll()` is waiting prevent model latency from being mistaken for a JavaScript stall. Each model request and the overall top-level run have separate host-enforced deadlines. The model-call budget is shared by all recursive
+The MVP defaults to 32 model calls per top-level run, a 60-second JavaScript stall timeout, a 300-second per-model-request timeout, a 30-minute overall top-level run timeout, a 30-second per-event-observer timeout, 50,000 characters of tool output, and 4 deep children. `maxModelCalls`, `maxDeepChildren`, `javascriptStallTimeoutMs`, `modelRequestTimeoutMs`, `runTimeoutMs`, `eventObserverTimeoutMs`, and `maxOutputChars` can override those safeguards. The JavaScript watchdog only bounds stalled synchronous execution; heartbeats while `ctx.rlm.waitAll()` is waiting prevent model latency from being mistaken for a JavaScript stall. Each model request, event observer, and the overall top-level run have separate host-enforced deadlines. The model-call budget is shared by all recursive
 calls in one `run()`; when concurrent delegation exhausts it, active agent turns are stopped and the
 primary error remains the budget-limit error rather than a later runtime-lifecycle error.
 
@@ -66,7 +65,7 @@ capabilities. Its explicit capabilities are limited to `ctx.context`, `ctx.rlm.*
 sandbox arrays or null-prototype records before generated code receives them. A timeout
 hard-kills the runtime process.
 
-Cancellation, model-request timeouts, and overall run timeouts abort in-flight recursive calls before disposing the worker.
+Cancellation, model-request timeouts, overall run timeouts, and event-observer timeouts abort in-flight recursive calls before disposing the worker.
 Every run receives a fresh runtime, which is disposed on success, model failure, tool failure, or
 abort. These lifecycle guarantees do not expand the sandbox: generated JavaScript receives only
 `ctx.context`, `ctx.rlm.*`, `ctx.console.*`, and `ctx.fs.read()`.
@@ -97,7 +96,7 @@ The prompt example prints tree-aware progress, recursive calls, and concise Java
 stderr, leaving the final answer on stdout. Successful JavaScript result bodies are intentionally
 suppressed; concise error text remains visible. It uses a demo-oriented default of 64 model calls so
 several concurrent delegates can each recurse and still return their parent synthesis; the `RLM`
-library default remains the deliberate 32-call safeguard. It uses the same 60-second JavaScript stall default as the library, while allowing generous model and overall deadlines for high-thinking delegates. Configure recursion and timeouts with positive-integer environment variables `RLM_MAX_DEPTH` (default `3`), `RLM_MAX_MODEL_CALLS` (default `64` for this example), `RLM_JAVASCRIPT_STALL_TIMEOUT_MS` (default `60000`), `RLM_MODEL_REQUEST_TIMEOUT_MS` (default `300000`), and `RLM_RUN_TIMEOUT_MS` (default `1800000`); invalid values are rejected using the same validation
+library default remains the deliberate 32-call safeguard. It uses the same 60-second JavaScript stall default as the library, while allowing generous model and overall deadlines for high-thinking delegates. Configure recursion and timeouts with positive-integer environment variables `RLM_MAX_DEPTH` (default `3`), `RLM_MAX_MODEL_CALLS` (default `64` for this example), `RLM_JAVASCRIPT_STALL_TIMEOUT_MS` (default `60000`), `RLM_MODEL_REQUEST_TIMEOUT_MS` (default `300000`), `RLM_RUN_TIMEOUT_MS` (default `1800000`), and `RLM_EVENT_OBSERVER_TIMEOUT_MS` (default `30000`); invalid values are rejected using the same validation
 as `RLMOptions`:
 
 ```sh

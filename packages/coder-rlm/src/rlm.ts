@@ -54,6 +54,8 @@ export interface RLMOptions {
   javascriptStallTimeoutMs?: number;
   modelRequestTimeoutMs?: number;
   runTimeoutMs?: number;
+  /** Maximum time allowed for each asynchronous onEvent callback. */
+  eventObserverTimeoutMs?: number;
   maxOutputChars?: number;
 }
 
@@ -129,6 +131,7 @@ export type RLMEvent = RLMEventBase &
 
 const DEFAULT_MODEL_REQUEST_TIMEOUT_MS = 300_000;
 const DEFAULT_RUN_TIMEOUT_MS = 1_800_000;
+const DEFAULT_EVENT_OBSERVER_TIMEOUT_MS = 30_000;
 
 export interface RLMDependencies {
   streamFn?: StreamFn;
@@ -155,7 +158,8 @@ interface ResolvedOptions {
   maxDeepChildren: number;
   javascriptStallTimeoutMs: number | undefined;
   modelRequestTimeoutMs: number;
-  runTimeoutMs: number | undefined;
+  runTimeoutMs: number;
+  eventObserverTimeoutMs: number;
   maxOutputChars: number | undefined;
 }
 
@@ -165,6 +169,10 @@ interface RunState {
   nextRunId: number;
   topAbort: AbortController;
   timedOut: boolean;
+  eventFailure?: Error;
+  eventFailureOrder?: number;
+  executionFailureOrder?: number;
+  nextFailureOrder: number;
   registry: ChildRegistry;
   events: EventQueue;
 }
@@ -173,21 +181,26 @@ interface RunState {
 class EventQueue {
   private tail: Promise<void> = Promise.resolve();
   private failure: Error | undefined;
+  private closed = false;
+  private rejectActive: ((error: Error) => void) | undefined;
 
   constructor(
     private readonly observer: RLMOptions["onEvent"],
+    private readonly timeoutMs: number,
     private readonly onFailure: (error: Error) => void,
   ) {}
 
   enqueue(event: RLMEvent): Promise<void> {
-    const delivery = this.tail.then(async () => {
-      if (this.failure) throw this.failure;
-      await this.observer?.(event);
-    });
+    if (this.closed) return Promise.resolve();
+    const delivery = this.tail.then(() => this.deliver(event));
     this.tail = delivery.catch((error) => {
       this.fail(error);
     });
     return delivery;
+  }
+
+  close(error: Error): void {
+    this.fail(error);
   }
 
   async flush(): Promise<void> {
@@ -195,10 +208,43 @@ class EventQueue {
     if (this.failure) throw this.failure;
   }
 
+  private async deliver(event: RLMEvent): Promise<void> {
+    if (this.closed) return;
+    let rejectClose!: (error: Error) => void;
+    const closePromise = new Promise<never>((_resolve, reject) => {
+      rejectClose = reject;
+    });
+    this.rejectActive = rejectClose;
+    let observerPromise: Promise<void>;
+    try {
+      observerPromise = Promise.resolve(this.observer?.(event));
+    } catch (error) {
+      observerPromise = Promise.reject(error);
+    }
+    // The observer cannot be canceled. Keep its eventual rejection handled after a timeout.
+    void observerPromise.catch(() => undefined);
+    let rejectTimeout!: (error: Error) => void;
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      rejectTimeout = reject;
+    });
+    const timer = setTimeout(
+      () => rejectTimeout(new Error(`RLM event observer exceeded ${this.timeoutMs}ms timeout`)),
+      this.timeoutMs,
+    );
+    try {
+      await Promise.race([observerPromise, timeoutPromise, closePromise]);
+    } finally {
+      clearTimeout(timer);
+      if (this.rejectActive === rejectClose) this.rejectActive = undefined;
+    }
+  }
+
   private fail(error: unknown): void {
     if (this.failure) return;
     this.failure = asError(error);
+    this.closed = true;
     this.onFailure(this.failure);
+    this.rejectActive?.(this.failure);
   }
 }
 
@@ -541,6 +587,10 @@ export class RLM {
       ),
       modelRequestTimeoutMs,
       runTimeoutMs: positiveInteger(options.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS, "runTimeoutMs"),
+      eventObserverTimeoutMs: positiveInteger(
+        options.eventObserverTimeoutMs ?? DEFAULT_EVENT_OBSERVER_TIMEOUT_MS,
+        "eventObserverTimeoutMs",
+      ),
       maxOutputChars: optionalPositiveInteger(options.maxOutputChars, "maxOutputChars"),
     };
     this.streamFn = dependencies.streamFn ?? streamSimple;
@@ -559,15 +609,23 @@ export class RLM {
     throwIfAborted(options.signal);
     const topAbort = new AbortController();
     let registry!: ChildRegistry;
-    const events = new EventQueue(this.options.onEvent, (error) => {
-      topAbort.abort(error);
-    });
-    const state: RunState = {
+    let state!: RunState;
+    const events = new EventQueue(
+      this.options.onEvent,
+      this.options.eventObserverTimeoutMs,
+      (error) => {
+        state.eventFailure = error;
+        state.eventFailureOrder = ++state.nextFailureOrder;
+        topAbort.abort(error);
+      },
+    );
+    state = {
       budget: new ModelCallBudget(this.options.maxModelCalls),
       usage: new UsageAccumulator(),
       nextRunId: 0,
       topAbort,
       timedOut: false,
+      nextFailureOrder: 0,
       registry,
       events,
     };
@@ -580,14 +638,15 @@ export class RLM {
       (childPrompt, childContext, tier, depth, parentRunId, runId, signal) =>
         this.runAtDepth(childPrompt, childContext, tier, depth, parentRunId, state, signal, runId),
     );
-    const timeout =
-      this.options.runTimeoutMs === undefined
-        ? undefined
-        : setTimeout(() => {
-            state.timedOut = true;
-            topAbort.abort();
-            void state.registry.cancelAll();
-          }, this.options.runTimeoutMs);
+    let phase: "running" | "cleanup" | "flushing" | "settled" = "running";
+    const timeout = setTimeout(() => {
+      state.timedOut = true;
+      topAbort.abort();
+      void state.registry.cancelAll();
+      if (phase !== "running") {
+        events.close(this.overallTimeoutError(true));
+      }
+    }, this.options.runTimeoutMs);
     let result: RLMResult | undefined;
     let failure: unknown;
     try {
@@ -603,17 +662,44 @@ export class RLM {
       result = { text, usage: state.usage.snapshot() };
     } catch (error) {
       failure = error;
+      state.executionFailureOrder = ++state.nextFailureOrder;
     } finally {
-      if (timeout !== undefined) clearTimeout(timeout);
+      phase = "cleanup";
       topAbort.abort();
       state.registry.cancelAll();
       await state.registry.waitForLaunches();
       unlink();
+      phase = "flushing";
+      if (state.timedOut) events.close(this.overallTimeoutError(true));
     }
-    await events.flush();
+    let flushFailure: unknown;
+    try {
+      await events.flush();
+    } catch (error) {
+      flushFailure = error;
+    } finally {
+      clearTimeout(timeout);
+      phase = "settled";
+    }
+    const eventFailure = state.eventFailure ?? flushFailure;
+    if (
+      eventFailure !== undefined &&
+      (failure === undefined ||
+        (state.eventFailureOrder ?? Number.POSITIVE_INFINITY) <
+          (state.executionFailureOrder ?? Number.POSITIVE_INFINITY))
+    ) {
+      throw eventFailure;
+    }
     if (failure !== undefined) throw failure;
+    if (eventFailure !== undefined) throw eventFailure;
     if (!result) throw new Error("RLM completed without a result");
     return result;
+  }
+
+  private overallTimeoutError(duringEventDelivery: boolean): Error {
+    return new Error(
+      `RLM run exceeded ${this.options.runTimeoutMs}ms overall timeout${duringEventDelivery ? " during event delivery" : ""}`,
+    );
   }
 
   private async runAtDepth(

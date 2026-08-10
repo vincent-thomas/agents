@@ -402,6 +402,129 @@ suite("RLM", () => {
     await assert.rejects(rlm.run("observe failure"), /observer failed/);
   });
 
+  test("validates the event observer timeout", () => {
+    const faux = createFauxCore({});
+    for (const value of [0, -1, 1.5]) {
+      assert.throws(
+        () =>
+          new RLM({
+            model: faux.getModel(),
+            context: "",
+            eventObserverTimeoutMs: value,
+          }),
+        /eventObserverTimeoutMs must be a positive integer/,
+      );
+    }
+  });
+
+  test("times out a never-resolving observer during an active run", async () => {
+    const faux = createFauxCore({});
+    faux.setResponses([fauxAssistantMessage("answer")]);
+    const rlm = new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        eventObserverTimeoutMs: 10,
+        onEvent: (event) => {
+          if (event.type === "model_start") return new Promise<void>(() => undefined);
+        },
+      },
+      { streamFn: faux.streamSimple },
+    );
+
+    await assert.rejects(rlm.run("observe timeout"), /event observer exceeded 10ms timeout/);
+    assert.equal(faux.state.callCount, 1);
+  });
+
+  test("skips queued events after an observer timeout", async () => {
+    const delivered: string[] = [];
+    const faux = createFauxCore({});
+    faux.setResponses([fauxAssistantMessage("answer")]);
+    const rlm = new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        eventObserverTimeoutMs: 10,
+        onEvent: (event) => {
+          delivered.push(event.type);
+          if (event.type === "run_start") return new Promise<void>(() => undefined);
+        },
+      },
+      { streamFn: faux.streamSimple },
+    );
+
+    await assert.rejects(rlm.run("skip queued events"), /event observer exceeded 10ms timeout/);
+    assert.deepEqual(delivered, ["run_start"]);
+  });
+
+  test("bounds a never-resolving final observer during flush", async () => {
+    const delivered: string[] = [];
+    const faux = createFauxCore({});
+    faux.setResponses([fauxAssistantMessage("answer")]);
+    const rlm = new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        eventObserverTimeoutMs: 10,
+        onEvent: (event) => {
+          delivered.push(event.type);
+          if (event.type === "run_end") return new Promise<void>(() => undefined);
+        },
+      },
+      { streamFn: faux.streamSimple },
+    );
+
+    await assert.rejects(rlm.run("final observer timeout"), /event observer exceeded 10ms timeout/);
+    assert.equal(delivered.at(-1), "run_end");
+  });
+
+  test("keeps the overall deadline active during event flush", async () => {
+    let reachedRunEnd = false;
+    const faux = createFauxCore({});
+    faux.setResponses([fauxAssistantMessage("answer")]);
+    const rlm = new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        runTimeoutMs: 250,
+        eventObserverTimeoutMs: 1_000,
+        onEvent: (event) => {
+          if (event.type !== "run_end") return;
+          reachedRunEnd = true;
+          return new Promise<void>(() => undefined);
+        },
+      },
+      { streamFn: faux.streamSimple },
+    );
+
+    await assert.rejects(
+      rlm.run("overall flush timeout"),
+      /run exceeded 250ms overall timeout during event delivery/,
+    );
+    assert.equal(reachedRunEnd, true);
+  });
+
+  test("keeps healthy delayed observers ordered through flush", async () => {
+    const delivered: string[] = [];
+    const faux = createFauxCore({});
+    faux.setResponses([fauxAssistantMessage("answer")]);
+    const answer = await new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        eventObserverTimeoutMs: 50,
+        onEvent: async (event) => {
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          delivered.push(event.type);
+        },
+      },
+      { streamFn: faux.streamSimple },
+    ).run("ordered observers");
+
+    assert.equal(answer, "answer");
+    assert.deepEqual(delivered, ["run_start", "model_start", "model_end", "run_end"]);
+  });
+
   test("enforces a separate model-request timeout", async () => {
     const events: RLMEvent[] = [];
     const faux = createFauxCore({ tokensPerSecond: 1 });

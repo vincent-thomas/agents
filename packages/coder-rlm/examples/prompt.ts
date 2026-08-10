@@ -22,8 +22,9 @@ const javascriptStallTimeoutMs = positiveIntegerEnv(
 );
 const modelRequestTimeoutMs = positiveIntegerEnv("RLM_MODEL_REQUEST_TIMEOUT_MS", 300_000);
 const runTimeoutMs = positiveIntegerEnv("RLM_RUN_TIMEOUT_MS", 1_800_000);
+const eventObserverTimeoutMs = positiveIntegerEnv("RLM_EVENT_OBSERVER_TIMEOUT_MS", 30_000);
 console.error(
-  `[rlm] loading ${provider}/${modelId} (max depth: ${maxDepth ?? 3}, model calls: ${maxModelCalls}, javascript stall timeout: ${javascriptStallTimeoutMs}ms, model timeout: ${modelRequestTimeoutMs}ms, run timeout: ${runTimeoutMs}ms)`,
+  `[rlm] loading ${provider}/${modelId} (max depth: ${maxDepth ?? 3}, model calls: ${maxModelCalls}, javascript stall timeout: ${javascriptStallTimeoutMs}ms, model timeout: ${modelRequestTimeoutMs}ms, run timeout: ${runTimeoutMs}ms, event observer timeout: ${eventObserverTimeoutMs}ms)`,
 );
 const modelRuntime = await ModelRuntime.create();
 const model = modelRuntime.getModel(provider, modelId);
@@ -37,6 +38,7 @@ const rlm = new RLM({
   javascriptStallTimeoutMs,
   modelRequestTimeoutMs,
   runTimeoutMs,
+  eventObserverTimeoutMs,
   getApiKey: async (providerId) => (await modelRuntime.getAuth(providerId))?.auth.apiKey,
   onEvent: createRLMEventTracer(),
 });

@@ -57,6 +57,16 @@ To run a focused RLM request with a prompt from the command line:
 bun run --filter @vt-agent/coder-rlm example:prompt "Explain how recursive delegation can help analyze large context."
 ```
 
+The prompt example prints depth-aware progress, recursive calls, and JavaScript tool code/output to
+stderr, leaving the final answer on stdout. Configure recursion with positive-integer environment
+variables `RLM_MAX_DEPTH` (default `3`) and `RLM_MAX_MODEL_CALLS` (default `32`); invalid values
+are rejected using the same validation as `RLMOptions`:
+
+```sh
+RLM_MAX_DEPTH=4 RLM_MAX_MODEL_CALLS=48 \
+  bun run --filter @vt-agent/coder-rlm example:prompt "Summarize the repository's retry behavior."
+```
+
 The autonomous evaluation gives the model a large, semantically varied incident corpus and asks
 only for its analytical conclusion; it does not tell the model to recurse. Its final metrics show
 whether the model chose recursive `ctx.llm()` calls, along with depth, call counts, delegated context

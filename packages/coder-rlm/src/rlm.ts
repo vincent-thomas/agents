@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-agent-core";
 import {
   contentText,
+  createAssistantMessageEventStream,
   type AssistantMessage,
   type Model,
   type StopReason,
@@ -15,7 +16,13 @@ import {
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { createJavascriptTool } from "./javascript-tool.ts";
 import { buildLeafPrompt, RLM_SYSTEM_PROMPT } from "./prompt.ts";
-import { JavaScriptRuntime, type JavaScriptRuntimeOptions } from "./runtime.ts";
+import {
+  JavaScriptRuntime,
+  type JavaScriptRuntimeOptions,
+  type JavaScriptRuntimeRLM,
+} from "./runtime.ts";
+import type { RLMChildHandle, RLMChildResult, RLMChildStatus } from "./child-types.ts";
+export type { RLMChildHandle, RLMChildResult, RLMChildStatus } from "./child-types.ts";
 
 export interface RLMOptions {
   model: Model<any>;
@@ -25,7 +32,9 @@ export interface RLMOptions {
   onEvent?: (event: RLMEvent) => Promise<void> | void;
   maxDepth?: number;
   maxModelCalls?: number;
-  executionTimeoutMs?: number;
+  javascriptStallTimeoutMs?: number;
+  modelRequestTimeoutMs?: number;
+  runTimeoutMs?: number;
   maxOutputChars?: number;
 }
 
@@ -86,7 +95,15 @@ export type RLMEvent = RLMEventBase &
       }
     | { type: "run_end"; result: string; usage: RLMUsage }
     | { type: "run_error"; error: string; usage: RLMUsage }
+    | { type: "child_spawn"; handle: RLMChildHandle; prompt: string; contextLength: number }
+    | { type: "child_start"; handle: RLMChildHandle }
+    | { type: "child_end"; result: RLMChildResult }
+    | { type: "child_error"; result: RLMChildResult }
+    | { type: "child_cancel"; result: RLMChildResult }
   );
+
+const DEFAULT_MODEL_REQUEST_TIMEOUT_MS = 300_000;
+const DEFAULT_RUN_TIMEOUT_MS = 1_800_000;
 
 export interface RLMDependencies {
   streamFn?: StreamFn;
@@ -101,7 +118,9 @@ interface ResolvedOptions {
   onEvent: RLMOptions["onEvent"];
   maxDepth: number;
   maxModelCalls: number;
-  executionTimeoutMs: number | undefined;
+  javascriptStallTimeoutMs: number | undefined;
+  modelRequestTimeoutMs: number | undefined;
+  runTimeoutMs: number | undefined;
   maxOutputChars: number | undefined;
 }
 
@@ -109,6 +128,43 @@ interface RunState {
   budget: ModelCallBudget;
   usage: UsageAccumulator;
   nextRunId: number;
+  topAbort: AbortController;
+  timedOut: boolean;
+  registry: ChildRegistry;
+  events: EventQueue;
+}
+
+/** Serializes observer delivery without making admission or execution wait for it. */
+class EventQueue {
+  private tail: Promise<void> = Promise.resolve();
+  private failure: Error | undefined;
+
+  constructor(
+    private readonly observer: RLMOptions["onEvent"],
+    private readonly onFailure: (error: Error) => void,
+  ) {}
+
+  enqueue(event: RLMEvent): Promise<void> {
+    const delivery = this.tail.then(async () => {
+      if (this.failure) throw this.failure;
+      await this.observer?.(event);
+    });
+    this.tail = delivery.catch((error) => {
+      this.fail(error);
+    });
+    return delivery;
+  }
+
+  async flush(): Promise<void> {
+    await this.tail;
+    if (this.failure) throw this.failure;
+  }
+
+  private fail(error: unknown): void {
+    if (this.failure) return;
+    this.failure = asError(error);
+    this.onFailure(this.failure);
+  }
 }
 
 class ModelCallBudget {
@@ -169,6 +225,239 @@ class UsageAccumulator {
   }
 }
 
+interface ChildParent {
+  runId: number;
+  depth: number;
+  signal: AbortSignal;
+}
+
+interface ChildRecord {
+  handle: RLMChildHandle;
+  runId: number;
+  controller: AbortController;
+  status: RLMChildStatus;
+  result: RLMChildResult;
+  /** Public completion may resolve on cancellation before launch cleanup finishes. */
+  promise: Promise<RLMChildResult>;
+  resolveResult: (result: RLMChildResult) => void;
+  /** Underlying launch task, awaited by top-level cleanup. */
+  launchTask: Promise<void>;
+  settled: boolean;
+}
+
+class ChildRegistry {
+  private nextId = 1;
+  private readonly records = new Map<number, ChildRecord>();
+
+  constructor(
+    private readonly maxDepth: number,
+    private readonly emit: (event: RLMEvent) => Promise<void>,
+    private readonly reserveRunId: () => number,
+    private readonly runChild: (
+      prompt: string,
+      context: string,
+      depth: number,
+      parentRunId: number,
+      runId: number,
+      signal: AbortSignal,
+    ) => Promise<string>,
+  ) {}
+
+  spawn(
+    parent: ChildParent,
+    prompt: string,
+    options: { name?: string; context?: string },
+  ): RLMChildHandle {
+    throwIfAborted(parent.signal);
+    if (parent.depth >= this.maxDepth) {
+      throw new Error(`RLM maximum depth ${this.maxDepth} reached`);
+    }
+    const id = this.nextId++;
+    const handle: RLMChildHandle = {
+      id,
+      name: options.name ?? `child-${id}`,
+      parentRunId: parent.runId,
+      depth: parent.depth + 1,
+    };
+    const controller = new AbortController();
+    const unlink = linkAbort(parent.signal, controller);
+    let resolveResult!: (result: RLMChildResult) => void;
+    const record: ChildRecord = {
+      handle,
+      runId: this.reserveRunId(),
+      controller,
+      status: "pending",
+      result: { handle, status: "pending" },
+      promise: new Promise<RLMChildResult>((resolve) => {
+        resolveResult = resolve;
+      }),
+      resolveResult,
+      launchTask: Promise.resolve(),
+      settled: false,
+    };
+    this.records.set(id, record);
+    void this.emit({
+      type: "child_spawn",
+      runId: parent.runId,
+      parentRunId: parent.runId,
+      depth: parent.depth,
+      handle,
+      prompt,
+      contextLength: (options.context ?? "").length,
+    }).catch(() => undefined);
+    record.launchTask = this.launch(record, prompt, options.context ?? "", unlink);
+    return handle;
+  }
+
+  async waitAll(handles: RLMChildHandle[], signal?: AbortSignal): Promise<RLMChildResult[]> {
+    if (!Array.isArray(handles)) throw new TypeError("ctx.rlm.waitAll() expects an array");
+    throwIfAborted(signal);
+    const completion = Promise.all(handles.map((handle) => this.get(handle).promise));
+    if (!signal) return completion;
+    return new Promise<RLMChildResult[]>((resolve, reject) => {
+      let settled = false;
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        reject(abortError());
+      };
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      completion.then(
+        (results) => finish(() => resolve(results)),
+        (error) => finish(() => reject(error)),
+      );
+    });
+  }
+
+  result(handle: RLMChildHandle): RLMChildResult {
+    return structuredClone(this.get(handle).result);
+  }
+
+  async cancel(handle: RLMChildHandle): Promise<RLMChildResult> {
+    const record = this.get(handle);
+    this.markCancelled(record);
+    await record.launchTask;
+    return record.promise;
+  }
+
+  cancelAll(): void {
+    for (const record of this.records.values()) this.markCancelled(record);
+  }
+
+  async waitForLaunches(): Promise<void> {
+    for (;;) {
+      const records = [...this.records.values()];
+      await Promise.all(records.map((record) => record.launchTask));
+      if (records.length === this.records.size) return;
+    }
+  }
+
+  private markCancelled(record: ChildRecord): void {
+    if (record.settled || (record.status !== "pending" && record.status !== "running")) return;
+    record.controller.abort();
+    this.finish(
+      record,
+      {
+        ...record.result,
+        status: "cancelled",
+        error: { name: "AbortError", message: "RLM child cancelled" },
+      },
+      "child_cancel",
+    );
+  }
+
+  private finish(
+    record: ChildRecord,
+    result: RLMChildResult,
+    eventType: "child_end" | "child_error" | "child_cancel",
+  ): void {
+    if (record.settled) return;
+    record.settled = true;
+    record.status = result.status;
+    record.result = result;
+    record.resolveResult(structuredClone(result));
+    void this.emit({
+      type: eventType,
+      runId: record.runId,
+      parentRunId: record.handle.parentRunId,
+      depth: record.handle.depth,
+      result,
+    }).catch(() => undefined);
+  }
+
+  private get(handle: RLMChildHandle): ChildRecord {
+    if (!handle || !Number.isSafeInteger(handle.id))
+      throw new TypeError("invalid RLM child handle");
+    const record = this.records.get(handle.id);
+    if (
+      !record ||
+      record.handle.name !== handle.name ||
+      record.handle.parentRunId !== handle.parentRunId ||
+      record.handle.depth !== handle.depth
+    ) {
+      throw new Error(`unknown RLM child handle ${String(handle.id)}`);
+    }
+    return record;
+  }
+
+  private async launch(
+    record: ChildRecord,
+    prompt: string,
+    context: string,
+    unlink: () => void,
+  ): Promise<void> {
+    try {
+      if (record.settled) return;
+      record.status = "running";
+      record.result = { ...record.result, status: "running" };
+      void this.emit({
+        type: "child_start",
+        runId: record.runId,
+        parentRunId: record.handle.parentRunId,
+        depth: record.handle.depth,
+        handle: record.handle,
+      }).catch(() => undefined);
+      if (record.settled) return;
+      const text = await this.runChild(
+        prompt,
+        context,
+        record.handle.depth,
+        record.handle.parentRunId,
+        record.runId,
+        record.controller.signal,
+      );
+      if (!record.settled) {
+        this.finish(record, { ...record.result, status: "succeeded", text }, "child_end");
+      }
+    } catch (error) {
+      if (!record.settled) {
+        const cancelled = record.controller.signal.aborted;
+        this.finish(
+          record,
+          {
+            ...record.result,
+            status: cancelled ? "cancelled" : "failed",
+            error: {
+              name: cancelled ? "AbortError" : asError(error).name,
+              message: cancelled ? "RLM child cancelled" : errorMessage(error),
+            },
+          },
+          cancelled ? "child_cancel" : "child_error",
+        );
+      }
+    } finally {
+      unlink();
+    }
+  }
+}
+
 export class RLM {
   private readonly options: ResolvedOptions;
   private readonly streamFn: StreamFn;
@@ -184,7 +473,15 @@ export class RLM {
       onEvent: options.onEvent,
       maxDepth: positiveInteger(options.maxDepth ?? 3, "maxDepth"),
       maxModelCalls: positiveInteger(options.maxModelCalls ?? 32, "maxModelCalls"),
-      executionTimeoutMs: optionalPositiveInteger(options.executionTimeoutMs, "executionTimeoutMs"),
+      javascriptStallTimeoutMs: optionalPositiveInteger(
+        options.javascriptStallTimeoutMs,
+        "javascriptStallTimeoutMs",
+      ),
+      modelRequestTimeoutMs: positiveInteger(
+        options.modelRequestTimeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS,
+        "modelRequestTimeoutMs",
+      ),
+      runTimeoutMs: positiveInteger(options.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS, "runTimeoutMs"),
       maxOutputChars: optionalPositiveInteger(options.maxOutputChars, "maxOutputChars"),
     };
     this.streamFn = dependencies.streamFn ?? streamSimple;
@@ -201,20 +498,61 @@ export class RLM {
       throw new TypeError("prompt must be a non-empty string");
     }
     throwIfAborted(options.signal);
+    const topAbort = new AbortController();
+    let registry!: ChildRegistry;
+    const events = new EventQueue(this.options.onEvent, (error) => {
+      topAbort.abort(error);
+    });
     const state: RunState = {
       budget: new ModelCallBudget(this.options.maxModelCalls),
       usage: new UsageAccumulator(),
       nextRunId: 0,
+      topAbort,
+      timedOut: false,
+      registry,
+      events,
     };
-    const text = await this.runAtDepth(
-      prompt,
-      this.options.context,
-      0,
-      undefined,
-      state,
-      options.signal,
+    const unlink = options.signal ? linkAbort(options.signal, topAbort) : () => undefined;
+    state.registry = new ChildRegistry(
+      this.options.maxDepth,
+      (event) => state.events.enqueue(event),
+      () => state.nextRunId++,
+      (childPrompt, childContext, depth, parentRunId, runId, signal) =>
+        this.runAtDepth(childPrompt, childContext, depth, parentRunId, state, signal, runId),
     );
-    return { text, usage: state.usage.snapshot() };
+    const timeout =
+      this.options.runTimeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            state.timedOut = true;
+            topAbort.abort();
+            void state.registry.cancelAll();
+          }, this.options.runTimeoutMs);
+    let result: RLMResult | undefined;
+    let failure: unknown;
+    try {
+      const text = await this.runAtDepth(
+        prompt,
+        this.options.context,
+        0,
+        undefined,
+        state,
+        topAbort.signal,
+      );
+      result = { text, usage: state.usage.snapshot() };
+    } catch (error) {
+      failure = error;
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      topAbort.abort();
+      state.registry.cancelAll();
+      await state.registry.waitForLaunches();
+      unlink();
+    }
+    await events.flush();
+    if (failure !== undefined) throw failure;
+    if (!result) throw new Error("RLM completed without a result");
+    return result;
   }
 
   private async runAtDepth(
@@ -224,46 +562,109 @@ export class RLM {
     parentRunId: number | undefined,
     state: RunState,
     signal?: AbortSignal,
+    reservedRunId?: number,
   ): Promise<string> {
     throwIfAborted(signal);
-    if (!state.budget.acquire()) {
-      if (state.budget.error) throw state.budget.error;
-      throw new Error(`RLM exceeded its ${state.budget.maximum} model-call limit`);
-    }
-
-    const runId = state.nextRunId++;
+    const runId = reservedRunId ?? state.nextRunId++;
     const trace = { runId, parentRunId, depth };
     const isLeaf = depth >= this.options.maxDepth;
-    await this.emit({
-      ...trace,
-      type: "run_start",
-      prompt,
-      contextLength: context.length,
-      isLeaf,
-    });
+    // Trace delivery must not prevent an admitted sibling from reaching its model turn.
+    // In particular, observers may perform their own asynchronous coordination here.
+    void state.events
+      .enqueue({
+        ...trace,
+        type: "run_start",
+        prompt,
+        contextLength: context.length,
+        isLeaf,
+      })
+      .catch(() => undefined);
 
     let runtime: JavaScriptRuntime | undefined;
     if (!isLeaf) {
+      const rlm: JavaScriptRuntimeRLM = {
+        spawn: async (childPrompt, childOptions, operationSignal) => {
+          throwIfAborted(operationSignal);
+          return state.registry.spawn(
+            { runId, depth, signal: signal ?? state.topAbort.signal },
+            childPrompt,
+            { ...childOptions, context: childOptions?.context ?? context },
+          );
+        },
+        waitAll: (handles, childSignal) => state.registry.waitAll(handles, childSignal),
+        result: async (handle) => state.registry.result(handle),
+        cancel: (handle) => state.registry.cancel(handle),
+      };
       runtime = this.createRuntime({
         context,
-        executionTimeoutMs: this.options.executionTimeoutMs,
+        javascriptStallTimeoutMs: this.options.javascriptStallTimeoutMs,
         maxOutputChars: this.options.maxOutputChars,
-        llm: (childPrompt, childContext, childSignal) =>
-          this.runAtDepth(
-            childPrompt,
-            childContext ?? context,
-            depth + 1,
-            runId,
-            state,
-            childSignal ?? signal,
-          ),
+        signal,
+        rlm,
       });
     }
 
     let stoppedForBudget = false;
     let activeModelCall = 0;
+    let modelCallInFlight = false;
     let fatalRuntimeError: Error | undefined;
+    let modelRequestTimedOut = false;
     let abortAgent: (() => void) | undefined;
+    let cleanupModelRequest: (() => void) | undefined;
+    let rejectModelRequestTimeout: ((error: Error) => void) | undefined;
+    const modelTimeoutPromise = new Promise<never>((_resolve, reject) => {
+      rejectModelRequestTimeout = reject;
+    });
+    let rejectAbort: ((error: DOMException) => void) | undefined;
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+      rejectAbort = reject;
+    });
+    let removeAbortListener: (() => void) | undefined;
+    let modelCallReserved = false;
+    const requestStreamFn: StreamFn = (model, modelContext, streamOptions) => {
+      const parentSignal = streamOptions?.signal;
+      const unavailable =
+        signal?.aborted || parentSignal?.aborted || state.budget.error || !modelCallReserved;
+      modelCallReserved = false;
+      if (unavailable) {
+        stoppedForBudget ||= state.budget.error !== undefined;
+        const error = state.budget.error ?? abortError();
+        return assistantFailureStream(model, error, state.budget.error ? "error" : "aborted");
+      }
+
+      activeModelCall = state.usage.startModelCall();
+      modelCallInFlight = true;
+      void state.events
+        .enqueue({ ...trace, type: "model_start", modelCall: activeModelCall })
+        .catch(() => undefined);
+      const controller = new AbortController();
+      const onAbort = () => controller.abort();
+      parentSignal?.addEventListener("abort", onAbort, { once: true });
+      const timer = setTimeout(() => {
+        modelRequestTimedOut = true;
+        controller.abort();
+        rejectModelRequestTimeout?.(
+          new Error(`RLM model request exceeded ${this.options.modelRequestTimeoutMs}ms timeout`),
+        );
+        abortAgent?.();
+      }, this.options.modelRequestTimeoutMs);
+      cleanupModelRequest = () => {
+        clearTimeout(timer);
+        parentSignal?.removeEventListener("abort", onAbort);
+        if (cleanupModelRequest) cleanupModelRequest = undefined;
+      };
+
+      try {
+        return Promise.resolve(
+          this.streamFn(model, modelContext, {
+            ...streamOptions,
+            signal: controller.signal,
+          }),
+        ).catch((error) => assistantFailureStream(model, asError(error), "error"));
+      } catch (error) {
+        return assistantFailureStream(model, asError(error), "error");
+      }
+    };
     const onFatalRuntimeError = (error: unknown) => {
       if (fatalRuntimeError) return;
       fatalRuntimeError = asError(error);
@@ -280,44 +681,65 @@ export class RLM {
           ? [createJavascriptTool(runtime, { onFatalError: onFatalRuntimeError })]
           : [],
       },
-      streamFn: this.streamFn,
+      streamFn: requestStreamFn,
       getApiKey: this.options.getApiKey,
       shouldStopAfterTurn: ({ toolResults }) => {
         if (fatalRuntimeError) return true;
         if (toolResults.length === 0) return false;
-        if (state.budget.acquire()) return false;
+        if (state.budget.acquire()) {
+          modelCallReserved = true;
+          return false;
+        }
         stoppedForBudget = true;
         return true;
       },
     });
     abortAgent = () => agent.abort();
     const unsubscribe = agent.subscribe(async (event) => {
-      if (event.type === "turn_start") {
-        activeModelCall = state.usage.startModelCall();
-        await this.emit({ ...trace, type: "model_start", modelCall: activeModelCall });
-        return;
-      }
+      if (event.type === "turn_start") return;
       if (event.type === "message_end" && event.message.role === "assistant") {
+        if (!modelCallInFlight) return;
+        modelCallInFlight = false;
+        cleanupModelRequest?.();
         state.usage.add(event.message.usage);
-        await this.emit({
-          ...trace,
-          type: "model_end",
-          modelCall: activeModelCall,
-          stopReason: event.message.stopReason,
-          usage: structuredClone(event.message.usage),
-        });
+        void state.events
+          .enqueue({
+            ...trace,
+            type: "model_end",
+            modelCall: activeModelCall,
+            stopReason: event.message.stopReason,
+            usage: structuredClone(event.message.usage),
+          })
+          .catch(() => undefined);
         return;
       }
-      await this.emitToolEvent(trace, event);
+      this.emitToolEvent(state.events, trace, event);
     });
     const unsubscribeBudget = state.budget.onExhausted(() => agent.abort());
     const onAbort = () => agent.abort();
     signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal) {
+      const onSignalAbort = () => {
+        abortAgent?.();
+        rejectAbort?.(abortError());
+      };
+      signal.addEventListener("abort", onSignalAbort, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", onSignalAbort);
+    }
 
     try {
       throwIfAborted(signal);
-      if (state.budget.error) throw state.budget.error;
-      await agent.prompt(isLeaf ? buildLeafPrompt(prompt, context) : prompt);
+      if (!state.budget.acquire())
+        throw (
+          state.budget.error ??
+          new Error(`RLM exceeded its ${state.budget.maximum} model-call limit`)
+        );
+      modelCallReserved = true;
+      const promptPromise = agent.prompt(isLeaf ? buildLeafPrompt(prompt, context) : prompt);
+      const waits: Promise<unknown>[] = [promptPromise];
+      if (this.options.modelRequestTimeoutMs !== undefined) waits.push(modelTimeoutPromise);
+      if (signal) waits.push(abortPromise);
+      await Promise.race(waits);
       throwIfAborted(signal);
       if (state.budget.error) throw state.budget.error;
       if (fatalRuntimeError) throw fatalRuntimeError;
@@ -327,52 +749,89 @@ export class RLM {
         );
       }
       const result = finalResponse(agent.state.messages);
-      await this.emit({ ...trace, type: "run_end", result, usage: state.usage.snapshot() });
+      void state.events
+        .enqueue({ ...trace, type: "run_end", result, usage: state.usage.snapshot() })
+        .catch(() => undefined);
       return result;
     } catch (error) {
-      const failure = signal?.aborted
-        ? abortError()
-        : (fatalRuntimeError ??
-          (stoppedForBudget && state.budget.error
-            ? new Error(`${state.budget.error.message} before synthesis`)
-            : (state.budget.error ?? error)));
-      await this.emit({
-        ...trace,
-        type: "run_error",
-        error: errorMessage(failure),
-        usage: state.usage.snapshot(),
-      });
+      const failure = state.timedOut
+        ? new Error(`RLM run exceeded ${this.options.runTimeoutMs}ms overall timeout`)
+        : signal?.aborted
+          ? abortError()
+          : modelRequestTimedOut
+            ? new Error(
+                `RLM model request exceeded ${this.options.modelRequestTimeoutMs}ms timeout`,
+              )
+            : (fatalRuntimeError ??
+              (stoppedForBudget && state.budget.error
+                ? new Error(`${state.budget.error.message} before synthesis`)
+                : (state.budget.error ?? error)));
+      void state.events
+        .enqueue({
+          ...trace,
+          type: "run_error",
+          error: errorMessage(failure),
+          usage: state.usage.snapshot(),
+        })
+        .catch(() => undefined);
       throw failure;
     } finally {
       signal?.removeEventListener("abort", onAbort);
+      removeAbortListener?.();
+      cleanupModelRequest?.();
       unsubscribeBudget();
       unsubscribe();
       runtime?.dispose();
     }
   }
 
-  private async emitToolEvent(trace: RLMEventBase, event: AgentEvent): Promise<void> {
+  private emitToolEvent(events: EventQueue, trace: RLMEventBase, event: AgentEvent): void {
     if (event.type === "tool_execution_start" && event.toolName === "javascript") {
-      await this.emit({
-        ...trace,
-        type: "javascript_start",
-        toolCallId: event.toolCallId,
-        code: typeof event.args?.code === "string" ? event.args.code : "",
-      });
+      void events
+        .enqueue({
+          ...trace,
+          type: "javascript_start",
+          toolCallId: event.toolCallId,
+          code: typeof event.args?.code === "string" ? event.args.code : "",
+        })
+        .catch(() => undefined);
     } else if (event.type === "tool_execution_end" && event.toolName === "javascript") {
-      await this.emit({
-        ...trace,
-        type: "javascript_end",
-        toolCallId: event.toolCallId,
-        output: toolResultText(event.result),
-        isError: event.isError,
-      });
+      void events
+        .enqueue({
+          ...trace,
+          type: "javascript_end",
+          toolCallId: event.toolCallId,
+          output: toolResultText(event.result),
+          isError: event.isError,
+        })
+        .catch(() => undefined);
     }
   }
+}
 
-  private async emit(event: RLMEvent): Promise<void> {
-    await this.options.onEvent?.(event);
-  }
+function assistantFailureStream(model: Model<any>, error: Error, stopReason: "error" | "aborted") {
+  const stream = createAssistantMessageEventStream();
+  const message: AssistantMessage = {
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason,
+    errorMessage: error.message,
+    timestamp: Date.now(),
+  };
+  stream.push({ type: "error", reason: stopReason, error: message });
+  stream.end(message);
+  return stream;
 }
 
 function emptyUsage(): RLMUsage {
@@ -393,13 +852,16 @@ function toolResultText(result: unknown): string {
   if (typeof result !== "object" || result === null || !("content" in result)) {
     return String(result);
   }
-  const content = (result as { content?: Array<{ type?: string; text?: string }> }).content;
-  return (
-    content
-      ?.filter((item) => item.type === "text")
-      .map((item) => item.text)
-      .join("\n") ?? ""
-  );
+  const content = result.content;
+  if (!Array.isArray(content)) return String(result);
+  return content
+    .filter(
+      (item): item is { type?: unknown; text?: unknown } =>
+        typeof item === "object" && item !== null,
+    )
+    .filter((item) => item.type === "text")
+    .map((item) => (typeof item.text === "string" ? item.text : ""))
+    .join("\n");
 }
 
 function asError(error: unknown): Error {
@@ -411,12 +873,7 @@ function errorMessage(error: unknown): string {
 }
 
 function finalResponse(messages: readonly unknown[]): string {
-  const response = messages.findLast(
-    (message): message is AssistantMessage =>
-      typeof message === "object" &&
-      message !== null &&
-      (message as AssistantMessage).role === "assistant",
-  );
+  const response = messages.findLast(isAssistantMessage);
   if (!response) throw new Error("RLM completed without an assistant response");
   if (response.stopReason === "error" || response.stopReason === "aborted") {
     throw new Error(response.errorMessage || `RLM model stopped with ${response.stopReason}`);
@@ -426,8 +883,24 @@ function finalResponse(messages: readonly unknown[]): string {
   return text;
 }
 
+function isAssistantMessage(message: unknown): message is AssistantMessage {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    "role" in message &&
+    message.role === "assistant"
+  );
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError();
+}
+
+function linkAbort(parent: AbortSignal, child: AbortController): () => void {
+  const onAbort = () => child.abort();
+  if (parent.aborted) child.abort();
+  else parent.addEventListener("abort", onAbort, { once: true });
+  return () => parent.removeEventListener("abort", onAbort);
 }
 
 function abortError(): DOMException {

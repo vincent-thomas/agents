@@ -6,3 +6,9 @@ export {
   type RLMRunOptions,
   type RLMUsage,
 } from "./rlm.ts";
+export type {
+  RLMChildError,
+  RLMChildHandle,
+  RLMChildResult,
+  RLMChildStatus,
+} from "./child-types.ts";

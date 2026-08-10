@@ -21,7 +21,7 @@ export function createJavascriptTool(
     name: "javascript",
     label: "JavaScript",
     description:
-      "Execute JavaScript in a persistent, capability-constrained runtime. Capabilities are exposed under ctx: ctx.context, ctx.llm(), ctx.console.log/error(), and the read-only ctx.fs.read(selector).",
+      "Execute JavaScript in a persistent, capability-constrained runtime. Capabilities are exposed under ctx: ctx.context, ctx.rlm.spawn/waitAll/result/cancel(), ctx.console.log/error(), and the read-only ctx.fs.read(selector).",
     parameters,
     executionMode: "sequential",
     async execute(_toolCallId, { code }, signal) {

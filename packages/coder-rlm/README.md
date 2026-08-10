@@ -4,7 +4,9 @@
 tool, `javascript({ code })`; the tool's persistent runtime exposes one capability global:
 
 - `ctx.context` — external context that is not inserted into the root model prompt
-- `ctx.llm(prompt, context?)` — a recursive RLM invocation over inherited or delegated context
+- `ctx.rlm.spawn(prompt, { name?, context? })` — admit an independent child and receive a serializable handle
+- `ctx.rlm.waitAll(handles)` — wait for child results without treating model waiting as JavaScript stall
+- `ctx.rlm.result(handle)` and `ctx.rlm.cancel(handle)` — inspect or cancel a child
 - `ctx.console.log()` and `ctx.console.error()` — output returned to the parent model
 - `ctx.fs.read(selector)` — read-only repository file access, rooted at the host working directory; selectors support `./file.ts`, `./file.ts:100`, and `./file.ts:100-106`
 
@@ -34,21 +36,17 @@ Pass `onEvent` to observe the stable, depth-aware RLM lifecycle while a run is i
 Events include unique `runId`/`parentRunId` relationships and normalized `run_start`,
 `model_start`, `model_end`, `javascript_start`, `javascript_end`, `run_end`, and `run_error`
 records. JavaScript events expose generated code and captured console output; terminal events
-include aggregate usage. Pi's internal event types are deliberately not exposed as the public
-tracing contract.
+include aggregate usage. Events are queued per top-level run in admission order; asynchronous
+observer callbacks are serialized, and the queue is flushed before `runDetailed()` settles. If `onEvent` throws or rejects, the run is aborted and rejects with that
+observer error after cleanup; observer failures are never silently swallowed. Pi's internal event
+types are deliberately not exposed as the public tracing contract.
 
 Top-level `await` is supported and declarations persist between JavaScript calls. Separate
-`run()` calls receive separate runtimes. At `maxDepth` (default `3`, minimum `1`), `ctx.llm()` becomes an
-ordinary Pi model call without the JavaScript tool; only that delegated leaf context is placed
-in the leaf prompt.
+`run()` calls receive separate runtimes. At `maxDepth` (default `3`, minimum `1`), spawned children become ordinary Pi model calls without the JavaScript tool; only that delegated leaf context is placed in the leaf prompt. Child handles and terminal results are host-owned and serializable, so children continue after the JavaScript cell returns.
 
 ## Limits
 
-The MVP defaults to 32 model calls per top-level run, a 60-second timeout per JavaScript
-execution, and 50,000 characters of tool output. `maxModelCalls`, `executionTimeoutMs`, and
-`maxOutputChars` can override those safeguards. The 60-second JavaScript watchdog is kept as the
-library default so synchronous runaway code is always bounded, including while `ctx.llm()` is in
-flight. The model-call budget is shared by all recursive
+The MVP defaults to 32 model calls per top-level run, a 60-second JavaScript stall timeout, a 300-second per-model-request timeout, a 30-minute overall top-level run timeout, and 50,000 characters of tool output. `maxModelCalls`, `javascriptStallTimeoutMs`, `modelRequestTimeoutMs`, `runTimeoutMs`, and `maxOutputChars` can override those safeguards. The JavaScript watchdog only bounds stalled synchronous execution; heartbeats while `ctx.rlm.waitAll()` is waiting prevent model latency from being mistaken for a JavaScript stall. Each model request and the overall top-level run have separate host-enforced deadlines. The model-call budget is shared by all recursive
 calls in one `run()`; when concurrent delegation exhausts it, active agent turns are stopped and the
 primary error remains the budget-limit error rather than a later runtime-lifecycle error.
 
@@ -58,10 +56,10 @@ a `node:vm` context with string/Wasm code generation disabled and no direct `pro
 `require`, network, timers, or other host capabilities beyond the read-only `ctx.fs.read()` capability. A timeout hard-kills the
 runtime process.
 
-Cancellation and execution timeouts abort in-flight recursive calls before disposing the worker.
+Cancellation, model-request timeouts, and overall run timeouts abort in-flight recursive calls before disposing the worker.
 Every run receives a fresh runtime, which is disposed on success, model failure, tool failure, or
-abort. These lifecycle guarantees do not expand the sandbox: generated JavaScript still receives
-only `context`, `llm()`, and `console`.
+abort. These lifecycle guarantees do not expand the sandbox: generated JavaScript receives only
+`ctx.context`, `ctx.rlm.*`, `ctx.console.*`, and `ctx.fs.read()`.
 
 This is capability reduction for an MVP, not a production security boundary. `node:vm` is not
 designed to safely execute actively hostile code, and the subprocess has no OS-level sandbox.
@@ -88,21 +86,17 @@ bun run --filter @vt-agent/coder-rlm example:prompt "Explain how recursive deleg
 The prompt example prints depth-aware progress, recursive calls, and JavaScript tool code/output to
 stderr, leaving the final answer on stdout. It uses a demo-oriented default of 64 model calls so
 several concurrent delegates can each recurse and still return their parent synthesis; the `RLM`
-library default remains the deliberate 32-call safeguard. It also uses a five-minute per-execution
-JavaScript timeout: this gives concurrent high-thinking delegates practical room to complete while
-still bounding a runaway turn. Configure recursion and timeout with positive-integer environment
-variables `RLM_MAX_DEPTH` (default `3`), `RLM_MAX_MODEL_CALLS` (default `64` for this example), and
-`RLM_EXECUTION_TIMEOUT_MS` (default `300000`); invalid values are rejected using the same validation
+library default remains the deliberate 32-call safeguard. It uses the same 60-second JavaScript stall default as the library, while allowing generous model and overall deadlines for high-thinking delegates. Configure recursion and timeouts with positive-integer environment variables `RLM_MAX_DEPTH` (default `3`), `RLM_MAX_MODEL_CALLS` (default `64` for this example), `RLM_JAVASCRIPT_STALL_TIMEOUT_MS` (default `60000`), `RLM_MODEL_REQUEST_TIMEOUT_MS` (default `300000`), and `RLM_RUN_TIMEOUT_MS` (default `1800000`); invalid values are rejected using the same validation
 as `RLMOptions`:
 
 ```sh
-RLM_MAX_DEPTH=4 RLM_MAX_MODEL_CALLS=48 RLM_EXECUTION_TIMEOUT_MS=300000 \
+RLM_MAX_DEPTH=4 RLM_MAX_MODEL_CALLS=48 RLM_JAVASCRIPT_STALL_TIMEOUT_MS=300000 \
   bun run --filter @vt-agent/coder-rlm example:prompt "Summarize the repository's retry behavior."
 ```
 
 The autonomous evaluation gives the model a large, semantically varied incident corpus and asks
 only for its analytical conclusion; it does not tell the model to recurse. Its final metrics show
-whether the model chose recursive `ctx.llm()` calls, along with depth, call counts, delegated context
+whether the model chose recursive `ctx.rlm.spawn()` calls, along with depth, call counts, delegated context
 sizes, elapsed time, and the expected top themes:
 
 ```sh

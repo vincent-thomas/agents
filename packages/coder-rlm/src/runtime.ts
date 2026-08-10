@@ -1,20 +1,33 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
+import type { RLMChildHandle, RLMChildResult } from "./child-types.ts";
 
 export interface JavaScriptExecutionResult {
   output: string;
-  error?: {
-    name: string;
-    message: string;
-  };
+  error?: { name: string; message: string };
+}
+
+export interface JavaScriptRuntimeRLM {
+  spawn: (
+    prompt: string,
+    options?: { name?: string; context?: string },
+    signal?: AbortSignal,
+  ) => Promise<RLMChildHandle>;
+  waitAll: (handles: RLMChildHandle[], signal?: AbortSignal) => Promise<RLMChildResult[]>;
+  result: (handle: RLMChildHandle, signal?: AbortSignal) => Promise<RLMChildResult>;
+  cancel: (handle: RLMChildHandle, signal?: AbortSignal) => Promise<RLMChildResult>;
 }
 
 export interface JavaScriptRuntimeOptions {
   context: string;
-  llm: (prompt: string, context?: string, signal?: AbortSignal) => Promise<string>;
-  executionTimeoutMs?: number;
+  rlm: JavaScriptRuntimeRLM;
+  javascriptStallTimeoutMs?: number;
   maxOutputChars?: number;
+  /** The owning run signal; admitted children are intentionally not tied to worker disposal. */
+  signal?: AbortSignal;
+  /** Heartbeat period sent by the worker while an execution awaits waitAll. */
+  heartbeatIntervalMs?: number;
 }
 
 interface PendingExecution {
@@ -22,33 +35,54 @@ interface PendingExecution {
   reject: (error: Error) => void;
 }
 
-const DEFAULT_EXECUTION_TIMEOUT_MS = 60_000;
+interface ActiveExecution {
+  requestId: number;
+  abortController: AbortController;
+  watchdog: ReturnType<typeof setTimeout> | undefined;
+  onTimeout: () => void;
+}
+
+interface WorkerHeartbeatMessage {
+  type: "heartbeat";
+  requestId?: number;
+  operation?: string;
+  pendingRlmCalls: number;
+}
+
+const DEFAULT_JAVASCRIPT_STALL_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_CHARS = 50_000;
 
 export class JavaScriptRuntime {
   private readonly child: ChildProcessWithoutNullStreams;
-  private readonly llm: JavaScriptRuntimeOptions["llm"];
-  private readonly executionTimeoutMs: number;
+  private readonly rlm: JavaScriptRuntimeRLM;
+  private readonly ownerSignal: AbortSignal | undefined;
+  private readonly javascriptStallTimeoutMs: number;
   private readonly pending = new Map<number, PendingExecution>();
   private readonly ready: Promise<void>;
   private resolveReady!: () => void;
   private rejectReady!: (error: Error) => void;
   private executionQueue: Promise<void> = Promise.resolve();
   private nextRequestId = 1;
-  private activeExecution: { requestId: number; abortController: AbortController } | undefined;
+  private activeExecution: ActiveExecution | undefined;
   private stderr = "";
   private closed = false;
 
   constructor(options: JavaScriptRuntimeOptions) {
-    this.executionTimeoutMs = positiveInteger(
-      options.executionTimeoutMs ?? DEFAULT_EXECUTION_TIMEOUT_MS,
-      "executionTimeoutMs",
+    this.javascriptStallTimeoutMs = positiveInteger(
+      options.javascriptStallTimeoutMs ?? DEFAULT_JAVASCRIPT_STALL_TIMEOUT_MS,
+      "javascriptStallTimeoutMs",
     );
     const maxOutputChars = positiveInteger(
       options.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
       "maxOutputChars",
     );
-    this.llm = options.llm;
+    const heartbeatIntervalMs = positiveInteger(
+      options.heartbeatIntervalMs ??
+        Math.max(1, Math.min(250, Math.floor(this.javascriptStallTimeoutMs / 3))),
+      "heartbeatIntervalMs",
+    );
+    this.rlm = options.rlm;
+    this.ownerSignal = options.signal;
     this.ready = new Promise((resolve, reject) => {
       this.resolveReady = resolve;
       this.rejectReady = reject;
@@ -66,6 +100,7 @@ export class JavaScriptRuntime {
       context: options.context,
       rootDirectory: process.cwd(),
       maxOutputChars,
+      heartbeatIntervalMs,
     });
   }
 
@@ -95,19 +130,27 @@ export class JavaScriptRuntime {
     signal?: AbortSignal,
   ): Promise<JavaScriptExecutionResult> {
     if (this.closed) throw new Error("JavaScript runtime is closed");
-    if (signal?.aborted) throw abortError();
+    if (signal?.aborted || this.ownerSignal?.aborted) throw abortError();
     await this.ready;
 
     const requestId = this.nextRequestId++;
     const abortController = new AbortController();
-    this.activeExecution = { requestId, abortController };
+    const execution: ActiveExecution = {
+      requestId,
+      abortController,
+      watchdog: undefined,
+      onTimeout: () => undefined,
+    };
+    this.activeExecution = execution;
     return new Promise((resolve, reject) => {
       let settled = false;
       const settle = (callback: () => void) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
+        if (execution.watchdog !== undefined) clearTimeout(execution.watchdog);
+        execution.watchdog = undefined;
         signal?.removeEventListener("abort", onAbort);
+        this.ownerSignal?.removeEventListener("abort", onOwnerAbort);
         this.pending.delete(requestId);
         if (this.activeExecution?.requestId === requestId) this.activeExecution = undefined;
         callback();
@@ -118,19 +161,21 @@ export class JavaScriptRuntime {
         abortController.abort();
       };
       const onAbort = () => terminate(abortError());
-      const timeout = setTimeout(
-        () =>
-          terminate(
-            new Error(`JavaScript execution exceeded ${this.executionTimeoutMs}ms timeout`),
+      const onOwnerAbort = () => terminate(abortError());
+      execution.onTimeout = () =>
+        terminate(
+          new Error(
+            `JavaScript execution exceeded ${this.javascriptStallTimeoutMs}ms stall timeout`,
           ),
-        this.executionTimeoutMs,
-      );
+        );
+      this.rearmWatchdog(execution);
 
       this.pending.set(requestId, {
         resolve: (result) => settle(() => resolve(result)),
         reject: (error) => settle(() => reject(error)),
       });
       signal?.addEventListener("abort", onAbort, { once: true });
+      this.ownerSignal?.addEventListener("abort", onOwnerAbort, { once: true });
       this.send({ type: "execute", requestId, code });
     });
   }
@@ -157,8 +202,14 @@ export class JavaScriptRuntime {
         });
         return;
       }
-      if (message.type === "llm") {
-        void this.handleLlm(message);
+      if (message.type === "heartbeat") {
+        this.handleHeartbeat(message);
+        return;
+      }
+      if (message.type === "rlm") {
+        void this.handleRlm(message).catch((error) => {
+          this.disposeWithError(asError(error));
+        });
         return;
       }
       if (message.type === "fatal") {
@@ -182,18 +233,64 @@ export class JavaScriptRuntime {
     });
   }
 
-  private async handleLlm(message: any): Promise<void> {
+  private handleHeartbeat(message: WorkerHeartbeatMessage): void {
+    if (
+      !Number.isSafeInteger(message.requestId) ||
+      message.requestId < 1 ||
+      message.operation !== "waitAll" ||
+      !Number.isSafeInteger(message.pendingRlmCalls) ||
+      message.pendingRlmCalls < 1
+    ) {
+      return;
+    }
+    const activeExecution = this.activeExecution;
+    if (activeExecution?.requestId === message.requestId) this.rearmWatchdog(activeExecution);
+  }
+
+  private rearmWatchdog(execution: ActiveExecution): void {
+    if (this.activeExecution?.requestId !== execution.requestId || this.closed) return;
+    if (execution.watchdog !== undefined) clearTimeout(execution.watchdog);
+    execution.watchdog = setTimeout(execution.onTimeout, this.javascriptStallTimeoutMs);
+  }
+
+  private async handleRlm(message: any): Promise<void> {
     try {
-      const result = await this.llm(
-        String(message.prompt),
-        message.context === undefined ? undefined : String(message.context),
-        this.activeExecution?.abortController.signal,
-      );
-      this.send({ type: "llmResult", callId: message.callId, result });
+      const signal = this.activeExecution?.abortController.signal;
+      let result: unknown;
+      switch (message.op) {
+        case "spawn":
+          result = await this.rlm.spawn(
+            String(message.prompt),
+            message.options === undefined
+              ? undefined
+              : {
+                  name:
+                    message.options.name === undefined ? undefined : String(message.options.name),
+                  context:
+                    message.options.context === undefined
+                      ? undefined
+                      : String(message.options.context),
+                },
+            signal,
+          );
+          break;
+        case "waitAll":
+          result = await this.rlm.waitAll(message.handles, signal);
+          break;
+        case "result":
+          result = await this.rlm.result(message.handle, signal);
+          break;
+        case "cancel":
+          result = await this.rlm.cancel(message.handle, signal);
+          break;
+        default:
+          throw new Error(`Unknown RLM operation: ${String(message.op)}`);
+      }
+      this.send({ type: "rlmResult", callId: message.callId, result });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
       this.send({
-        type: "llmResult",
+        type: "rlmResult",
         callId: message.callId,
         error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
       });
@@ -202,7 +299,11 @@ export class JavaScriptRuntime {
 
   private send(message: unknown): void {
     if (this.closed) return;
-    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    try {
+      this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    } catch (error) {
+      this.disposeWithError(asError(error));
+    }
   }
 
   private disposeWithError(error: Error): void {
@@ -226,6 +327,10 @@ function positiveInteger(value: number, name: string): number {
     throw new TypeError(`${name} must be a positive integer`);
   }
   return value;
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function abortError(): DOMException {

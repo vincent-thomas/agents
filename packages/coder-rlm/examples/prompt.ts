@@ -3,9 +3,7 @@ import { RLM } from "../src/index.ts";
 import { traceRLMEvent } from "./trace.ts";
 
 const DEFAULT_PROMPT_MAX_MODEL_CALLS = 64;
-// Five minutes gives several concurrent high-thinking delegates time to finish while
-// retaining a hard bound for a single JavaScript turn.
-const DEFAULT_PROMPT_EXECUTION_TIMEOUT_MS = 300_000;
+const DEFAULT_PROMPT_JAVASCRIPT_STALL_TIMEOUT_MS = 60_000;
 
 const prompt = process.argv.slice(2).join(" ").trim();
 if (!prompt) {
@@ -18,12 +16,14 @@ const modelId = process.env.RLM_MODEL ?? "gpt-5.6-luna";
 const maxDepth =
   process.env.RLM_MAX_DEPTH === undefined ? undefined : Number(process.env.RLM_MAX_DEPTH);
 const maxModelCalls = positiveIntegerEnv("RLM_MAX_MODEL_CALLS", DEFAULT_PROMPT_MAX_MODEL_CALLS);
-const executionTimeoutMs = positiveIntegerEnv(
-  "RLM_EXECUTION_TIMEOUT_MS",
-  DEFAULT_PROMPT_EXECUTION_TIMEOUT_MS,
+const javascriptStallTimeoutMs = positiveIntegerEnv(
+  "RLM_JAVASCRIPT_STALL_TIMEOUT_MS",
+  DEFAULT_PROMPT_JAVASCRIPT_STALL_TIMEOUT_MS,
 );
+const modelRequestTimeoutMs = positiveIntegerEnv("RLM_MODEL_REQUEST_TIMEOUT_MS", 300_000);
+const runTimeoutMs = positiveIntegerEnv("RLM_RUN_TIMEOUT_MS", 1_800_000);
 console.error(
-  `[rlm] loading ${provider}/${modelId} (max depth: ${maxDepth ?? 3}, model calls: ${maxModelCalls}, execution timeout: ${executionTimeoutMs}ms)`,
+  `[rlm] loading ${provider}/${modelId} (max depth: ${maxDepth ?? 3}, model calls: ${maxModelCalls}, javascript stall timeout: ${javascriptStallTimeoutMs}ms, model timeout: ${modelRequestTimeoutMs}ms, run timeout: ${runTimeoutMs}ms)`,
 );
 const modelRuntime = await ModelRuntime.create();
 const model = modelRuntime.getModel(provider, modelId);
@@ -34,7 +34,9 @@ const rlm = new RLM({
   context: "",
   maxDepth,
   maxModelCalls,
-  executionTimeoutMs,
+  javascriptStallTimeoutMs,
+  modelRequestTimeoutMs,
+  runTimeoutMs,
   getApiKey: async (providerId) => (await modelRuntime.getAuth(providerId))?.auth.apiKey,
   onEvent: traceRLMEvent,
 });

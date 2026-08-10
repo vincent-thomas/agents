@@ -18,12 +18,36 @@ let runtimeContext;
 let replServer;
 let maxOutputChars = 50_000;
 let activeOutput;
-let nextLlmCallId = 1;
+let nextRlmCallId = 1;
 let rootDirectory;
-const pendingLlmCalls = new Map();
+let activeExecutionRequestId;
+let heartbeatTimer;
+let heartbeatIntervalMs = 250;
+const pendingRlmCalls = new Map();
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+function sendHeartbeat() {
+  const pending =
+    activeExecutionRequestId === undefined
+      ? []
+      : [...pendingRlmCalls.values()].filter(
+          ({ requestId }) => requestId === activeExecutionRequestId,
+        );
+  send({
+    type: "heartbeat",
+    requestId: activeExecutionRequestId,
+    operation:
+      pending.length > 0 && pending.every(({ op }) => op === "waitAll") ? "waitAll" : undefined,
+    pendingRlmCalls: pending.length,
+  });
+}
+
+function startHeartbeats() {
+  heartbeatTimer = setInterval(sendHeartbeat, heartbeatIntervalMs);
+  heartbeatTimer.unref?.();
 }
 
 function safeFunction(fn) {
@@ -84,20 +108,78 @@ function outputText(value) {
   return `${text.slice(0, Math.max(0, maxOutputChars - marker.length))}${marker}`;
 }
 
-function createLlm() {
-  return safeFunction((prompt, childContext) => {
-    if (typeof prompt !== "string") throw new TypeError("llm() prompt must be a string");
-    if (childContext !== undefined && typeof childContext !== "string") {
-      throw new TypeError("llm() context must be a string when provided");
-    }
-
-    const callId = nextLlmCallId++;
-    const promise = new Promise((resolve, reject) => {
-      pendingLlmCalls.set(callId, { resolve, reject });
-      send({ type: "llm", callId, prompt, context: childContext });
+function createRlmCall(op, payload) {
+  const callId = nextRlmCallId++;
+  const promise = new Promise((resolve, reject) => {
+    pendingRlmCalls.set(callId, {
+      resolve,
+      reject,
+      requestId: activeExecutionRequestId,
+      op,
     });
-    return safeThenable(promise);
+    send({ type: "rlm", op, callId, ...payload });
+    sendHeartbeat();
   });
+  return safeThenable(promise);
+}
+
+function createRlm() {
+  const rlm = Object.create(null);
+  Object.defineProperties(rlm, {
+    spawn: {
+      value: safeFunction((prompt, options) => {
+        if (typeof prompt !== "string" || prompt.trim() === "") {
+          throw new TypeError("ctx.rlm.spawn() prompt must be a non-empty string");
+        }
+        if (
+          options !== undefined &&
+          (typeof options !== "object" || options === null || Array.isArray(options))
+        ) {
+          throw new TypeError("ctx.rlm.spawn() options must be an object when provided");
+        }
+        if (options?.name !== undefined && typeof options.name !== "string") {
+          throw new TypeError("ctx.rlm.spawn() name must be a string when provided");
+        }
+        if (options?.context !== undefined && typeof options.context !== "string") {
+          throw new TypeError("ctx.rlm.spawn() context must be a string when provided");
+        }
+        return createRlmCall("spawn", { prompt, options });
+      }),
+      enumerable: true,
+    },
+    waitAll: {
+      value: safeFunction((handles) => {
+        if (!Array.isArray(handles)) throw new TypeError("ctx.rlm.waitAll() expects an array");
+        return safeThenable(
+          Promise.all(handles).then((resolvedHandles) =>
+            createRlmCall("waitAll", { handles: resolvedHandles }),
+          ),
+        );
+      }),
+      enumerable: true,
+    },
+    result: {
+      value: safeFunction((handle) =>
+        safeThenable(
+          Promise.resolve(handle).then((resolvedHandle) =>
+            createRlmCall("result", { handle: resolvedHandle }),
+          ),
+        ),
+      ),
+      enumerable: true,
+    },
+    cancel: {
+      value: safeFunction((handle) =>
+        safeThenable(
+          Promise.resolve(handle).then((resolvedHandle) =>
+            createRlmCall("cancel", { handle: resolvedHandle }),
+          ),
+        ),
+      ),
+      enumerable: true,
+    },
+  });
+  return Object.freeze(rlm);
 }
 
 function createFs(root) {
@@ -175,8 +257,12 @@ function initialize(message) {
   if (!Number.isSafeInteger(message.maxOutputChars) || message.maxOutputChars <= 0) {
     throw new TypeError("maxOutputChars must be a positive integer");
   }
+  if (!Number.isSafeInteger(message.heartbeatIntervalMs) || message.heartbeatIntervalMs <= 0) {
+    throw new TypeError("heartbeatIntervalMs must be a positive integer");
+  }
   rootDirectory = realpathSync(message.rootDirectory);
   maxOutputChars = message.maxOutputChars;
+  heartbeatIntervalMs = message.heartbeatIntervalMs;
 
   const consoleCapability = Object.create(null);
   Object.defineProperties(consoleCapability, {
@@ -191,7 +277,7 @@ function initialize(message) {
   const ctx = Object.create(null);
   Object.defineProperties(ctx, {
     context: { value: message.context, enumerable: true },
-    llm: { value: createLlm(), enumerable: true },
+    rlm: { value: createRlm(), enumerable: true },
     console: { value: consoleCapability, enumerable: true },
     fs: { value: createFs(rootDirectory), enumerable: true },
   });
@@ -201,7 +287,7 @@ function initialize(message) {
   Object.defineProperties(sandbox, {
     ctx: { value: ctx, enumerable: true },
     context: { value: undefined },
-    llm: { value: undefined },
+    rlm: { value: undefined },
     console: { value: undefined },
   });
   runtimeContext = vm.createContext(sandbox, {
@@ -217,6 +303,7 @@ function initialize(message) {
     ignoreUndefined: true,
   });
   send({ type: "ready" });
+  startHeartbeats();
 }
 
 function execute(message) {
@@ -226,9 +313,11 @@ function execute(message) {
 
   activeOutput = { lines: [], length: 0, truncated: false };
   let finished = false;
+  activeExecutionRequestId = message.requestId;
   const finish = (error, value) => {
     if (finished) return;
     finished = true;
+    activeExecutionRequestId = undefined;
     replServer._domain.removeListener("error", onDomainError);
     const output = outputText(error ? undefined : value);
     activeOutput = undefined;
@@ -254,10 +343,10 @@ function execute(message) {
   replServer.eval(message.code, runtimeContext, "coder-rlm", finish);
 }
 
-function settleLlm(message) {
-  const pending = pendingLlmCalls.get(message.callId);
+function settleRlm(message) {
+  const pending = pendingRlmCalls.get(message.callId);
   if (!pending) return;
-  pendingLlmCalls.delete(message.callId);
+  pendingRlmCalls.delete(message.callId);
   if (message.error) pending.reject(new Error(message.error));
   else pending.resolve(message.result);
 }
@@ -267,7 +356,7 @@ input.on("line", (line) => {
     const message = JSON.parse(line);
     if (message.type === "init") initialize(message);
     else if (message.type === "execute") execute(message);
-    else if (message.type === "llmResult") settleLlm(message);
+    else if (message.type === "rlmResult") settleRlm(message);
     else throw new Error(`Unknown message type: ${String(message.type)}`);
   } catch (error) {
     send({

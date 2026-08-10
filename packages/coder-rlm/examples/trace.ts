@@ -30,6 +30,16 @@ export function formatRLMEvent(event: RLMEvent, outputLimit?: number): string {
       return `${prefix} complete`;
     case "run_error":
       return `${prefix} error: ${event.error}`;
+    case "child_spawn":
+      return `${prefix} child ${event.handle.id} admitted (context: ${event.contextLength} chars)`;
+    case "child_start":
+      return `${prefix} child ${event.handle.id} started`;
+    case "child_end":
+      return `${prefix} child ${event.result.handle.id} ${event.result.status}`;
+    case "child_error":
+      return `${prefix} child ${event.result.handle.id} failed: ${event.result.error?.message ?? "unknown error"}`;
+    case "child_cancel":
+      return `${prefix} child ${event.result.handle.id} cancelled`;
     default: {
       const exhaustiveEvent: never = event;
       return `${prefix} unknown event: ${String(exhaustiveEvent)}`;

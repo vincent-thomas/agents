@@ -3,13 +3,29 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { suite, test } from "node:test";
-import { JavaScriptRuntime } from "./runtime.ts";
+import { JavaScriptRuntime, type JavaScriptRuntimeRLM } from "./runtime.ts";
+import type { RLMChildHandle, RLMChildResult } from "./child-types.ts";
+
+function testHandle(id: number, name = `child-${id}`): RLMChildHandle {
+  return { id, name, parentRunId: 0, depth: 1 };
+}
+function testResult(handle: RLMChildHandle, text = "child result"): RLMChildResult {
+  return { handle, status: "succeeded", text };
+}
+function testRlm(): JavaScriptRuntimeRLM {
+  return {
+    spawn: async (prompt, options) => testHandle(prompt === "one" ? 1 : 2, options?.name),
+    waitAll: async (handles) => handles.map((handle) => testResult(handle)),
+    result: async (handle) => ({ handle, status: "pending" }),
+    cancel: async (handle) => ({ handle, status: "cancelled" }),
+  };
+}
 
 suite("JavaScriptRuntime", () => {
   test("inspects external context and preserves declarations", async () => {
     const runtime = new JavaScriptRuntime({
       context: "NEEDLE x NEEDLE",
-      llm: async () => "unused",
+      rlm: testRlm(),
     });
     try {
       const first = await runtime.execute(
@@ -23,18 +39,25 @@ suite("JavaScriptRuntime", () => {
     }
   });
 
-  test("supports await, parallel llm calls, and delegated context", async () => {
+  test("supports await, parallel child calls, and delegated context", async () => {
     const calls: Array<{ prompt: string; context?: string }> = [];
+    const handles = [testHandle(1, "one"), testHandle(2, "two")];
     const runtime = new JavaScriptRuntime({
       context: "abcdefgh",
-      llm: async (prompt, context) => {
-        calls.push({ prompt, context });
-        return `${prompt}:${context}`;
+      rlm: {
+        spawn: async (prompt, options) => {
+          calls.push({ prompt, context: options?.context });
+          return handles[prompt === "one" ? 0 : 1];
+        },
+        waitAll: async (children) =>
+          children.map((child) => testResult(child, child.name === "one" ? "one:ab" : "two:cd")),
+        result: async (child) => testResult(child),
+        cancel: async (child) => ({ handle: child, status: "cancelled" }),
       },
     });
     try {
       const result = await runtime.execute(
-        'ctx.console.log(await Promise.all([ctx.llm("one", ctx.context.slice(0, 2)), ctx.llm("two", ctx.context.slice(2, 4))]))',
+        'const handles = await Promise.all([ctx.rlm.spawn("one", { context: ctx.context.slice(0, 2) }), ctx.rlm.spawn("two", { context: ctx.context.slice(2, 4) })]); ctx.console.log((await ctx.rlm.waitAll(handles)).map((result) => result.text))',
       );
       assert.match(result.output, /one:ab/);
       assert.match(result.output, /two:cd/);
@@ -47,9 +70,21 @@ suite("JavaScriptRuntime", () => {
     }
   });
 
+  test("reads current child results and cancels through the host protocol", async () => {
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
+    try {
+      const result = await runtime.execute(
+        'const h = await ctx.rlm.spawn("inspect", { name: "worker" }); const before = await ctx.rlm.result(h); const after = await ctx.rlm.cancel(h); ctx.console.log(h.name, before.status, after.status)',
+      );
+      assert.equal(result.output, "worker pending cancelled");
+    } finally {
+      runtime.dispose();
+    }
+  });
+
   test("does not share variables between runtimes", async () => {
-    const first = new JavaScriptRuntime({ context: "", llm: async () => "" });
-    const second = new JavaScriptRuntime({ context: "", llm: async () => "" });
+    const first = new JavaScriptRuntime({ context: "", rlm: testRlm() });
+    const second = new JavaScriptRuntime({ context: "", rlm: testRlm() });
     try {
       await first.execute("const privateValue = 42");
       const result = await second.execute("ctx.console.log(typeof privateValue)");
@@ -61,14 +96,14 @@ suite("JavaScriptRuntime", () => {
   });
 
   test("omits host capabilities", async () => {
-    const runtime = new JavaScriptRuntime({ context: "", llm: async () => "" });
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
     try {
       const result = await runtime.execute(
-        "ctx.console.log(typeof context, typeof llm, typeof console, typeof process, typeof require, typeof fetch, typeof Buffer, typeof setTimeout)",
+        "ctx.console.log(typeof context, typeof llm, typeof rlm, typeof console, typeof process, typeof require, typeof fetch, typeof Buffer, typeof setTimeout)",
       );
       assert.equal(
         result.output,
-        "undefined undefined undefined undefined undefined undefined undefined undefined",
+        "undefined undefined undefined undefined undefined undefined undefined undefined undefined",
       );
       const imported = await runtime.execute('await import("node:fs")');
       assert.deepEqual(imported.error, {
@@ -82,7 +117,7 @@ suite("JavaScriptRuntime", () => {
   });
 
   test("returns exceptions without destroying the runtime", async () => {
-    const runtime = new JavaScriptRuntime({ context: "", llm: async () => "" });
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
     try {
       const failed = await runtime.execute('ctx.console.error("before"); throw new Error("boom")');
       assert.deepEqual(failed.error, { name: "Error", message: "boom" });
@@ -94,7 +129,7 @@ suite("JavaScriptRuntime", () => {
   });
 
   test("reads working-directory files and selected lines through ctx.fs", async () => {
-    const runtime = new JavaScriptRuntime({ context: "", llm: async () => "" });
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
     try {
       const result = await runtime.execute(`
         const full = ctx.fs.read("./packages/coder-rlm/package.json");
@@ -116,7 +151,7 @@ suite("JavaScriptRuntime", () => {
   });
 
   test("rejects unsafe and malformed fs selectors", async () => {
-    const runtime = new JavaScriptRuntime({ context: "", llm: async () => "" });
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
     try {
       const result = await runtime.execute(`
         const selectors = [
@@ -152,7 +187,7 @@ suite("JavaScriptRuntime", () => {
     writeFileSync(outsideFile, "outside");
     symlinkSync(outsideFile, link);
 
-    const runtime = new JavaScriptRuntime({ context: "", llm: async () => "" });
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
     try {
       const selector = `./${relative(process.cwd(), link)}`;
       const result = await runtime.execute(`ctx.fs.read(${JSON.stringify(selector)})`);
@@ -167,13 +202,37 @@ suite("JavaScriptRuntime", () => {
     }
   });
 
-  test("hard-stops programs that exceed the timeout", async () => {
+  test("hard-stops programs that exceed the stall timeout", async () => {
     const runtime = new JavaScriptRuntime({
       context: "",
-      llm: async () => "",
-      executionTimeoutMs: 100,
+      rlm: testRlm(),
+      javascriptStallTimeoutMs: 100,
     });
-    await assert.rejects(runtime.execute("while (true) {}"), /exceeded 100ms timeout/);
+    await assert.rejects(runtime.execute("while (true) {}"), /exceeded 100ms stall timeout/);
+  });
+
+  test("times out unresolved JavaScript without a pending host wait", async () => {
+    const runtime = new JavaScriptRuntime({
+      context: "",
+      rlm: testRlm(),
+      javascriptStallTimeoutMs: 100,
+    });
+    await assert.rejects(
+      runtime.execute("await new Promise(() => {})"),
+      /exceeded 100ms stall timeout/,
+    );
+  });
+
+  test("starting a child does not exempt a synchronous stall", async () => {
+    const runtime = new JavaScriptRuntime({
+      context: "",
+      rlm: testRlm(),
+      javascriptStallTimeoutMs: 100,
+    });
+    await assert.rejects(
+      runtime.execute('ctx.rlm.spawn("child"); while (true) {}'),
+      /exceeded 100ms stall timeout/,
+    );
   });
 
   test("aborts recursive calls when an execution times out", async () => {
@@ -183,31 +242,56 @@ suite("JavaScriptRuntime", () => {
     });
     const runtime = new JavaScriptRuntime({
       context: "",
-      executionTimeoutMs: 100,
-      llm: async (_prompt, _context, signal) =>
-        new Promise((_resolve, reject) => {
-          signal?.addEventListener(
-            "abort",
-            () => {
-              resolveAborted();
-              reject(new DOMException("child aborted", "AbortError"));
-            },
-            { once: true },
-          );
-        }),
+      javascriptStallTimeoutMs: 100,
+      rlm: {
+        ...testRlm(),
+        spawn: async (_prompt, _options, signal) =>
+          new Promise((_resolve, reject) =>
+            signal?.addEventListener(
+              "abort",
+              () => {
+                resolveAborted();
+                reject(new DOMException("child aborted", "AbortError"));
+              },
+              { once: true },
+            ),
+          ),
+      },
     });
 
     await assert.rejects(
-      runtime.execute('await ctx.llm("never finishes")'),
-      /exceeded 100ms timeout/,
+      runtime.execute('await ctx.rlm.spawn("never finishes")'),
+      /exceeded 100ms stall timeout/,
     );
     await aborted;
+  });
+
+  test("concurrent waitAll latency does not trigger the stall watchdog", async () => {
+    const runtime = new JavaScriptRuntime({
+      context: "",
+      rlm: {
+        ...testRlm(),
+        waitAll: async (handles) => {
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          return handles.map((child) => testResult(child, "done"));
+        },
+      },
+      javascriptStallTimeoutMs: 500,
+    });
+    try {
+      const result = await runtime.execute(
+        'const h = await ctx.rlm.spawn("slow"); const waits = await Promise.all([ctx.rlm.waitAll([h]), ctx.rlm.waitAll([h])]); waits[1][0].text',
+      );
+      assert.equal(result.output, "[result] done");
+    } finally {
+      runtime.dispose();
+    }
   });
 
   test("truncates console output", async () => {
     const runtime = new JavaScriptRuntime({
       context: "",
-      llm: async () => "",
+      rlm: testRlm(),
       maxOutputChars: 100,
     });
     try {

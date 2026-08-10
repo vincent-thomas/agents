@@ -59,7 +59,9 @@ suite("RLM", () => {
       (_context, options) => {
         seenApiKeys.push(options?.apiKey);
         seenReasoning.push(options?.reasoning);
-        return javascript('ctx.console.log(await ctx.llm("delegate"))');
+        return javascript(
+          'const h = await ctx.rlm.spawn("delegate"); ctx.console.log((await ctx.rlm.waitAll([h]))[0].text)',
+        );
       },
       (_context, options) => {
         seenApiKeys.push(options?.apiKey);
@@ -97,7 +99,9 @@ suite("RLM", () => {
     const events: RLMEvent[] = [];
     const faux = createFauxCore({});
     faux.setResponses([
-      javascript('ctx.console.log(await ctx.llm("child task", ctx.context.slice(0, 5)))'),
+      javascript(
+        'const h = await ctx.rlm.spawn("child task", { context: ctx.context.slice(0, 5) }); ctx.console.log((await ctx.rlm.waitAll([h]))[0].text)',
+      ),
       fauxAssistantMessage("child answer"),
       fauxAssistantMessage("root answer"),
     ]);
@@ -130,7 +134,10 @@ suite("RLM", () => {
     assert.equal(events.filter((event) => event.type === "model_end").length, 3);
     const toolStart = events.find((event) => event.type === "javascript_start");
     assert.equal(toolStart?.depth, 0);
-    assert.match(toolStart?.type === "javascript_start" ? toolStart.code : "", /llm\("child task"/);
+    assert.match(
+      toolStart?.type === "javascript_start" ? toolStart.code : "",
+      /rlm\.spawn\("child task"/,
+    );
     const toolEnd = events.find((event) => event.type === "javascript_end");
     assert.equal(toolEnd?.depth, 0);
     assert.match(toolEnd?.type === "javascript_end" ? toolEnd.output : "", /child answer/);
@@ -201,7 +208,7 @@ suite("RLM", () => {
       (context) => {
         seen.push(context);
         return javascript(
-          'ctx.console.log(await ctx.llm("analyze delegated text", ctx.context.slice(2, 7)))',
+          'const h = await ctx.rlm.spawn("analyze delegated text", { context: ctx.context.slice(2, 7) }); ctx.console.log((await ctx.rlm.waitAll([h]))[0].text)',
         );
       },
       (context) => {
@@ -233,11 +240,15 @@ suite("RLM", () => {
     faux.setResponses([
       (context) => {
         seen.push(context);
-        return javascript('ctx.console.log(await ctx.llm("recurse"))');
+        return javascript(
+          'const h = await ctx.rlm.spawn("recurse"); ctx.console.log((await ctx.rlm.waitAll([h]))[0].text)',
+        );
       },
       (context) => {
         seen.push(context);
-        return javascript('ctx.console.log(await ctx.llm("recurse"))');
+        return javascript(
+          'const h = await ctx.rlm.spawn("recurse"); ctx.console.log((await ctx.rlm.waitAll([h]))[0].text)',
+        );
       },
       (context) => {
         seen.push(context);
@@ -283,11 +294,11 @@ suite("RLM", () => {
     const faux = createFauxCore({});
     faux.setResponses([
       javascript(
-        'await Promise.all([ctx.llm("child one"), ctx.llm("child two"), ctx.llm("child three")])',
+        'const hs = await Promise.all([ctx.rlm.spawn("child one"), ctx.rlm.spawn("child two"), ctx.rlm.spawn("child three")]); await ctx.rlm.waitAll(hs)',
       ),
-      javascript('await ctx.llm("grandchild")'),
-      javascript('await ctx.llm("grandchild")'),
-      javascript('await ctx.llm("grandchild")'),
+      javascript('const h = await ctx.rlm.spawn("grandchild"); await ctx.rlm.waitAll([h])'),
+      javascript('const h = await ctx.rlm.spawn("grandchild"); await ctx.rlm.waitAll([h])'),
+      javascript('const h = await ctx.rlm.spawn("grandchild"); await ctx.rlm.waitAll([h])'),
       fauxAssistantMessage("leaf one"),
       fauxAssistantMessage("leaf two"),
       fauxAssistantMessage("leaf three"),
@@ -315,13 +326,13 @@ suite("RLM", () => {
   });
 
   test("does not start a delayed recursive turn after sibling budget exhaustion", async () => {
-    let releaseRunStart!: () => void;
-    const runStartBarrier = new Promise<void>((resolve) => {
-      releaseRunStart = resolve;
-    });
+    const runStartBarrier = new Promise<void>((resolve) => setTimeout(resolve, 20));
+    const events: RLMEvent[] = [];
     const faux = createFauxCore({});
     faux.setResponses([
-      javascript('await Promise.all([ctx.llm("delayed"), ctx.llm("exhausts budget")])'),
+      javascript(
+        'const hs = await Promise.all([ctx.rlm.spawn("delayed"), ctx.rlm.spawn("exhausts budget")]); await ctx.rlm.waitAll(hs)',
+      ),
     ]);
     const rlm = new RLM(
       {
@@ -329,11 +340,9 @@ suite("RLM", () => {
         context: "",
         maxModelCalls: 2,
         onEvent: async (event) => {
+          events.push(event);
           if (event.type === "run_start" && event.depth === 1) {
             await runStartBarrier;
-          }
-          if (event.type === "javascript_end" && event.depth === 0) {
-            releaseRunStart();
           }
         },
       },
@@ -341,7 +350,99 @@ suite("RLM", () => {
     );
 
     await assert.rejects(rlm.run("start"), /model-call limit/);
+    assert.equal(faux.state.callCount, 2);
+    assert.ok(events.every((event) => event.type !== "model_end" || event.modelCall > 0));
+  });
+
+  test("serializes and flushes asynchronous event observers", async () => {
+    const delivered: string[] = [];
+    let observerActive = false;
+    const faux = createFauxCore({});
+    faux.setResponses([fauxAssistantMessage("answer")]);
+
+    const answer = await new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        onEvent: async (event) => {
+          assert.equal(observerActive, false);
+          observerActive = true;
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          delivered.push(event.type);
+          observerActive = false;
+        },
+      },
+      { streamFn: faux.streamSimple },
+    ).run("observe");
+
+    assert.equal(answer, "answer");
+    assert.equal(observerActive, false);
+    assert.equal(delivered[0], "run_start");
+    assert.equal(delivered.at(-1), "run_end");
+  });
+
+  test("aborts and rejects when an event observer fails", async () => {
+    const faux = createFauxCore({});
+    faux.setResponses([fauxAssistantMessage("answer")]);
+    const rlm = new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        onEvent: (event) => {
+          if (event.type === "model_start") throw new Error("observer failed");
+        },
+      },
+      { streamFn: faux.streamSimple },
+    );
+
+    await assert.rejects(rlm.run("observe failure"), /observer failed/);
+  });
+
+  test("enforces a separate model-request timeout", async () => {
+    const events: RLMEvent[] = [];
+    const faux = createFauxCore({ tokensPerSecond: 1 });
+    faux.setResponses([fauxAssistantMessage("response that arrives too late")]);
+    const rlm = new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        modelRequestTimeoutMs: 20,
+        runTimeoutMs: 1_000,
+        onEvent: (event) => events.push(event),
+      },
+      { streamFn: faux.streamSimple },
+    );
+
+    await assert.rejects(rlm.run("slow model"), /model request exceeded 20ms timeout/);
     assert.equal(faux.state.callCount, 1);
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "run_error" && /model request exceeded 20ms timeout/.test(event.error),
+      ),
+    );
+  });
+
+  test("enforces an overall run timeout without late events", async () => {
+    const events: RLMEvent[] = [];
+    const faux = createFauxCore({ tokensPerSecond: 1 });
+    faux.setResponses([fauxAssistantMessage("response that arrives too late")]);
+    const rlm = new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        modelRequestTimeoutMs: 1_000,
+        runTimeoutMs: 20,
+        onEvent: (event) => events.push(event),
+      },
+      { streamFn: faux.streamSimple },
+    );
+
+    await assert.rejects(rlm.run("slow run"), /run exceeded 20ms overall timeout/);
+    const settledEventCount = events.length;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(events.length, settledEventCount);
+    assert.equal(events.at(-1)?.type, "run_error");
   });
 
   test("isolates separate top-level run invocations", async () => {
@@ -373,12 +474,12 @@ suite("RLM", () => {
       {
         model: faux.getModel(),
         context: "",
-        executionTimeoutMs: 100,
+        javascriptStallTimeoutMs: 100,
       },
       { streamFn: faux.streamSimple },
     );
 
-    await assert.rejects(rlm.run("stop on timeout"), /exceeded 100ms timeout/);
+    await assert.rejects(rlm.run("stop on timeout"), /exceeded 100ms stall timeout/);
     assert.equal(faux.state.callCount, 1);
   });
 
@@ -405,5 +506,33 @@ suite("RLM", () => {
     assert.equal(answer, "recovered");
     assert.match(observations[0], /boom/);
     assert.match(observations[1], /still alive/);
+  });
+
+  test("returns named host handles and terminal results without per-child usage claims", async () => {
+    const events: RLMEvent[] = [];
+    const faux = createFauxCore({});
+    faux.setResponses([
+      javascript(
+        'const h = await ctx.rlm.spawn("child", { name: "worker", context: "selected" }); const r = (await ctx.rlm.waitAll([h]))[0]; ctx.console.log(h.id, h.name, h.parentRunId, h.depth, r.status, r.text, typeof r.usage)',
+      ),
+      fauxAssistantMessage("child result"),
+      fauxAssistantMessage("root result"),
+    ]);
+    const result = await new RLM(
+      {
+        model: faux.getModel(),
+        context: "root",
+        maxDepth: 1,
+        onEvent: (event) => events.push(event),
+      },
+      { streamFn: faux.streamSimple },
+    ).run("root");
+    assert.equal(result, "root result");
+    assert.ok(
+      events.some((event) => event.type === "child_end" && event.result.handle.name === "worker"),
+    );
+    assert.ok(
+      events.every((event) => event.type !== "child_end" || event.result.usage === undefined),
+    );
   });
 });

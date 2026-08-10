@@ -65,6 +65,7 @@ test("reconciles the primary checkout before workspace selection", async () => {
         calls.push("resolve");
         return "/primary";
       },
+      assertOwnedWorkspace: async () => undefined,
       reconcileMergedWorkspaces: async (options) => {
         calls.push(`reconcile:${options.cwd}`);
         available = available.filter((candidate) => candidate.id !== existing.id);
@@ -83,6 +84,40 @@ test("reconciles the primary checkout before workspace selection", async () => {
 
   assert.deepEqual(calls, ["resolve", "reconcile:/primary", "select:/primary"]);
   assert.equal(result.selectedWorkspace?.workspace.id, "remaining");
+});
+
+test("reports a detached target workspace as a launch error", async () => {
+  const target = workspace("detached", "2026-01-02T00:00:00.000Z");
+
+  await assert.rejects(
+    prepareWorkspaceStartup({
+      store: {} as WorkspaceStore,
+      sourceCwd: "/managed/worktree",
+      launchCommand: { kind: "goto", branch: target.branch },
+      sessionPointers: {
+        read: async () => undefined,
+        write: async () => undefined,
+        remove: async () => undefined,
+      },
+      dependencies: {
+        resolveRegularCheckout: async () => "/primary",
+        reconcileMergedWorkspaces: async () => ({ removed: [], retained: [] }),
+        removeWorkspaceByBranch: async () => {
+          throw new Error("must not delete");
+        },
+        selectWorkspace: async () => ({ workspace: target, created: false }),
+        assertOwnedWorkspace: async () => {
+          throw new Error(
+            `Agent workspace branch mismatch: expected ${target.branch}, found detached HEAD.`,
+          );
+        },
+      },
+    }),
+    (error) =>
+      error instanceof LaunchError &&
+      error.message ===
+        `Could not enter workspace ${target.branch}: Agent workspace branch mismatch: expected ${target.branch}, found detached HEAD.`,
+  );
 });
 
 test("deletes a branch workspace without reconciling or selecting", async () => {
@@ -109,6 +144,9 @@ test("deletes a branch workspace without reconciling or selecting", async () => 
       selectWorkspace: async () => {
         throw new Error("must not select");
       },
+      assertOwnedWorkspace: async () => {
+        throw new Error("must not validate");
+      },
     },
   });
 
@@ -118,6 +156,42 @@ test("deletes a branch workspace without reconciling or selecting", async () => 
     branch: deleted.branch,
   });
   assert.deepEqual(result.reconciliation, { removed: [], retained: [] });
+});
+
+test("reports a detached workspace deletion as a launch error", async () => {
+  const branch = "feature/detached-delete";
+
+  await assert.rejects(
+    prepareWorkspaceStartup({
+      store: {} as WorkspaceStore,
+      sourceCwd: "/repo",
+      launchCommand: { kind: "delete", branch },
+      sessionPointers: {
+        read: async () => undefined,
+        write: async () => undefined,
+        remove: async () => undefined,
+      },
+      dependencies: {
+        resolveRegularCheckout: async () => "/repo",
+        reconcileMergedWorkspaces: async () => {
+          throw new Error("must not reconcile");
+        },
+        removeWorkspaceByBranch: async () => {
+          throw new Error(`Workspace branch mismatch: expected ${branch}, found detached HEAD.`);
+        },
+        selectWorkspace: async () => {
+          throw new Error("must not select");
+        },
+        assertOwnedWorkspace: async () => {
+          throw new Error("must not validate");
+        },
+      },
+    }),
+    (error) =>
+      error instanceof LaunchError &&
+      error.message ===
+        `Could not delete workspace ${branch}: Workspace branch mismatch: expected ${branch}, found detached HEAD.`,
+  );
 });
 
 test("rejects deletion when the branch has no workspace", async () => {
@@ -139,6 +213,9 @@ test("rejects deletion when the branch has no workspace", async () => {
         removeWorkspaceByBranch: async () => undefined,
         selectWorkspace: async () => {
           throw new Error("must not select");
+        },
+        assertOwnedWorkspace: async () => {
+          throw new Error("must not validate");
         },
       },
     }),

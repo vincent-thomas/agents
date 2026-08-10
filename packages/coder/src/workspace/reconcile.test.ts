@@ -187,6 +187,23 @@ test("removes every artifact for an explicitly deleted branch workspace", async 
   }
 });
 
+test("rejects deleting a workspace whose checkout is detached", async () => {
+  const { repo, store, pointers, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/delete-detached");
+    git(workspace.worktree, "checkout", "--detach");
+
+    await assert.rejects(
+      removeWorkspaceByBranch({ store, cwd: repo, sessionPointers: pointers }, workspace.branch),
+      /branch mismatch.*detached HEAD/,
+    );
+    assert.equal(existsSync(workspace.worktree), true);
+    assert.equal((await records(store, repo)).length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
 test("deletes a stack workspace when addressed by a non-active member", async () => {
   const { root, repo, store, pointers, cleanup } = fixture();
   try {

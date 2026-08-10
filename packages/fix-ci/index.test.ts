@@ -2455,6 +2455,47 @@ test("inspect_stack enriches remote PR details without mutating local state", as
   }
 });
 
+test("inspect_stack reports stale local metadata when remote stack membership is absent", async () => {
+  const cwd = createRepository();
+  try {
+    git(cwd, ["branch", "former-stack", "main"]);
+    git(cwd, ["switch", "former-stack"]);
+    writeFileSync(join(cwd, "file.txt"), "former stack\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "former stack"]);
+    git(cwd, ["switch", "main"]);
+    git(cwd, ["merge", "--no-ff", "former-stack", "-m", "merge former stack"]);
+    git(cwd, ["switch", "feature"]);
+    const fixture = stackFixture(
+      cwd,
+      [{ branch: "feature", pr: { number: 14, state: "OPEN", draft: false } }],
+      { base: "former-stack", remote: [] },
+    );
+    const ownership = controllerFixture({
+      activeBranch: "feature",
+      branches: ["feature"],
+      baseBranch: "former-stack",
+    });
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner, workspaceController: ownership.controller }),
+      "inspect_stack",
+    ).execute("inspect-stale-local", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.status, "mismatch");
+    assert.equal((result.details.remote as { status: string }).status, "absent");
+    assert.equal((result.details.ownership as { status: string }).status, "synchronized");
+    assert.equal((result.details.local as { status: string }).status, "mismatch");
+    assert.match(
+      ((result.details.local as { mismatches: string[] }).mismatches ?? []).join(" "),
+      /stale local stack metadata/,
+    );
+    assert.match(result.content?.[0]?.text ?? "", /Base: former-stack \(stale local metadata\)/);
+    assert.deepEqual(ownership.calls, ["snapshot"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("inspect_stack falls back to authoritative remote membership when local metadata is unstacked", async () => {
   const cwd = createRepository();
   try {

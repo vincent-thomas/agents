@@ -311,6 +311,14 @@ export async function inspectStackReport(
     }
   }
 
+  const localMetadataContradicted =
+    remoteStatus === "absent" && local.some((member) => member.prNumber !== null);
+  if (localMetadataContradicted) {
+    localMismatches.push(
+      "stale local stack metadata: authoritative remote stack membership is absent",
+    );
+  }
+
   let ownershipStatus: "synchronized" | "mismatch" | "unavailable" = "unavailable";
   let ownershipMismatches: string[] = [];
   let ownershipSnapshot: WorkspaceControllerSnapshot | undefined;
@@ -351,7 +359,7 @@ export async function inspectStackReport(
   const descendants =
     activeIndex >= 0 ? view.branches.slice(activeIndex + 1).map((branch) => branch.name) : [];
   const lines = [
-    `Base: ${baseBranch ?? "<unknown>"}`,
+    `Base: ${baseBranch ?? "<unknown>"}${localMetadataContradicted ? " (stale local metadata)" : ""}`,
     `Active: ${activeBranch || "<unknown>"}`,
     ...local.map((member, index) => {
       const branch = view.branches[index];

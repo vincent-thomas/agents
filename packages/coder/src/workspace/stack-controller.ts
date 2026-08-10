@@ -44,6 +44,14 @@ export function createWorkspaceStackController(
   });
 
   return {
+    async getParentBranch(cwd: string): Promise<string | null> {
+      const workspace = options.getWorkspace();
+      if (!workspace) return null;
+      const latest = await latestWorkspace();
+      await assertOwnedWorkspace(latest, cwd);
+      return latest.parentBranch ?? null;
+    },
+
     async snapshot(cwd: string): Promise<WorkspaceControllerSnapshot> {
       const workspace = await latestWorkspace();
       await assertOwnedWorkspace(workspace, cwd);

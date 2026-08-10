@@ -146,6 +146,7 @@ const workspaceController = createWorkspaceStackController({
 const { safetyExtensions, workspaceExtensions, subagentExtensions } = createExtensionProfiles({
   assertWorkspace,
   workspaceController,
+  parentBranch: currentWorkspace?.parentBranch,
 });
 
 const currentSessionFile = await sessionPointerStore.read(runtimeCwd);

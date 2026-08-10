@@ -38,6 +38,8 @@ export interface AgentWorkspace {
   worktree: string;
   /** The active checkout; stack members are recorded separately in `stack`. */
   branch: string;
+  /** The branch from which this workspace branch was newly created, if known. */
+  parentBranch?: string;
   baseSha: string;
   createdAt: string;
   updatedAt: string;
@@ -306,6 +308,7 @@ function parseWorkspace(value: unknown, path: string): AgentWorkspace {
     typeof record.sourceRoot !== "string" ||
     typeof record.worktree !== "string" ||
     typeof record.branch !== "string" ||
+    (record.parentBranch !== undefined && typeof record.parentBranch !== "string") ||
     typeof record.baseSha !== "string" ||
     typeof record.createdAt !== "string" ||
     typeof record.updatedAt !== "string" ||
@@ -496,7 +499,9 @@ export async function createWorkspace(
   const worktree = join(store.stateDir, "workspaces", "worktrees", repoKey, id);
   await mkdir(dirname(worktree), { recursive: true });
 
+  const currentBranch = (await git(repo.sourceRoot, ["branch", "--show-current"])).stdout.trim();
   let branchSetup: AgentWorkspace["branchSetup"];
+  let parentBranch: string | undefined;
   if (localBranchExists) {
     try {
       await git(repo.sourceRoot, ["worktree", "add", worktree, branch]);
@@ -527,6 +532,7 @@ export async function createWorkspace(
   } else {
     await git(repo.sourceRoot, ["worktree", "add", "-b", branch, worktree, repo.head]);
     branchSetup = "created";
+    if (currentBranch) parentBranch = currentBranch;
   }
 
   const baseSha = (await git(worktree, ["rev-parse", "HEAD"])).stdout.trim();
@@ -538,6 +544,7 @@ export async function createWorkspace(
     sourceRoot: repo.sourceRoot,
     worktree,
     branch,
+    ...(parentBranch === undefined ? {} : { parentBranch }),
     baseSha,
     createdAt: now,
     updatedAt: now,

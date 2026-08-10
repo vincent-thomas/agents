@@ -818,13 +818,20 @@ async function getExistingPrBase(cwd: string, signal?: AbortSignal): Promise<PrB
 
 /**
  * Get the base branch name of the current PR or infer one for a new PR.
- * Returns null when GitHub cannot be queried or no valid ancestor-side remote
- * branch exists.
+ * An explicit preferred base is used for a new PR before nearest-branch
+ * inference. Returns null when GitHub cannot be queried or no valid
+ * ancestor-side remote branch exists.
  */
-export async function getPrBaseBranch(cwd: string, signal?: AbortSignal): Promise<string | null> {
+export async function getPrBaseBranch(
+  cwd: string,
+  signal?: AbortSignal,
+  preferredBaseBranch?: string | null,
+): Promise<string | null> {
   const existing = await getExistingPrBase(cwd, signal);
   if (!existing.succeeded) return null;
   if (existing.base) return existing.base;
+  const preferred = preferredBaseBranch?.trim();
+  if (preferred) return preferred;
 
   // A new PR should target the remote branch whose history diverged most
   // recently from HEAD, which normally recovers the branch from which the

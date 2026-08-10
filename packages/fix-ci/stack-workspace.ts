@@ -21,6 +21,8 @@ export interface WorkspaceControllerClaim {
  * because the checkout itself may already have changed the workspace signal.
  */
 export interface WorkspaceController {
+  /** Return the persisted parent of a newly created workspace branch, if known. */
+  getParentBranch?(cwd: string): string | null | Promise<string | null>;
   snapshot(cwd: string): WorkspaceControllerSnapshot | Promise<WorkspaceControllerSnapshot>;
   validate(cwd: string, claim: WorkspaceControllerClaim): void | Promise<void>;
   claim(cwd: string, claim: WorkspaceControllerClaim): void | Promise<void>;

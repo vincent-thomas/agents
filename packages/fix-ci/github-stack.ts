@@ -665,17 +665,296 @@ export interface GhStackCurrentPullRequest {
   url: string;
 }
 
+export interface GhStackRepository {
+  owner: string;
+  repository: string;
+}
+
+export type GhStackRepositoryProbeResult =
+  | { status: "found"; output: string; repository: GhStackRepository }
+  | { status: "error"; output: string };
+
 export type GhStackCurrentPullRequestProbeResult =
   | { status: "found"; output: string; pullRequest: GhStackCurrentPullRequest }
   | { status: "absent"; output: string }
   | { status: "error"; output: string };
+
+export interface GhStackPullRequestDetails {
+  number: number;
+  url: string | null;
+  headRefName: string;
+  baseRefName: string;
+}
+
+export type GhStackPullRequestBaseProbeResult =
+  | { status: "found"; output: string; baseRefName: string }
+  | { status: "error"; output: string };
+
+export type GhStackPullRequestProbeResult =
+  | { status: "found"; output: string; pullRequest: GhStackPullRequestDetails }
+  | { status: "error"; output: string };
+
+export type GhStackMergedPullRequestBasesResult =
+  | { status: "found"; output: string; baseRefNames: string[] }
+  | { status: "ambiguous"; output: string; baseRefNames: string[] }
+  | { status: "error"; output: string };
+
+/** Arguments for the read-only canonical checkout repository lookup. */
+export function stackRepositoryArgs(): string[] {
+  return ["repo", "view", "--json", "nameWithOwner"];
+}
+
+/** Parse the exact owner/repository selector returned by `gh repo view`. */
+export function parseGhStackRepository(output: string): GhStackRepository | null {
+  try {
+    const value = JSON.parse(output) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const nameWithOwner = (value as Record<string, unknown>).nameWithOwner;
+    if (typeof nameWithOwner !== "string" || !/^[^/\s]+\/[^/\s]+$/.test(nameWithOwner)) {
+      return null;
+    }
+    const [owner, repository] = nameWithOwner.split("/");
+    return owner && repository ? { owner, repository } : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function probeGhStackRepository(
+  cwd: string,
+  signal?: AbortSignal,
+  runner: GhStackCommandRunner = runGhStackCommand,
+): Promise<GhStackRepositoryProbeResult> {
+  try {
+    const result = await runner(stackRepositoryArgs(), { cwd, signal });
+    const output = commandOutput(result);
+    const repository = parseGhStackRepository(result.stdout);
+    return repository ? { status: "found", output, repository } : { status: "error", output };
+  } catch (error: unknown) {
+    return { status: "error", output: errorOutput(error) };
+  }
+}
 
 /** Arguments for the read-only current-branch pull request lookup. */
 export function stackCurrentPullRequestArgs(): string[] {
   return ["pr", "view", "--json", "number,url"];
 }
 
-function isNoPullRequestOutput(output: string): boolean {
+export function stackPullRequestArgs(
+  owner: string,
+  repository: string,
+  pullRequest: number,
+): string[] {
+  if (!owner.trim() || !repository.trim()) throw new RangeError("repository must be non-empty");
+  if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) {
+    throw new RangeError("pullRequest must be a positive integer");
+  }
+  return [
+    "pr",
+    "view",
+    String(pullRequest),
+    "--repo",
+    `${owner}/${repository}`,
+    "--json",
+    "number,url,headRefName,baseRefName",
+  ];
+}
+
+export function stackPullRequestBaseArgs(
+  owner: string,
+  repository: string,
+  pullRequest: number,
+): string[] {
+  if (!owner.trim() || !repository.trim()) throw new RangeError("repository must be non-empty");
+  if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) {
+    throw new RangeError("pullRequest must be a positive integer");
+  }
+  return [
+    "pr",
+    "view",
+    String(pullRequest),
+    "--repo",
+    `${owner}/${repository}`,
+    "--json",
+    "baseRefName",
+  ];
+}
+
+export function stackMergedPullRequestBasesArgs(
+  owner: string,
+  repository: string,
+  staleBase: string,
+): string[] {
+  if (!owner.trim() || !repository.trim()) throw new RangeError("repository must be non-empty");
+  if (!staleBase.trim()) throw new RangeError("staleBase must be non-empty");
+  return [
+    "pr",
+    "list",
+    "--state",
+    "merged",
+    "--repo",
+    `${owner}/${repository}`,
+    "--head",
+    staleBase,
+    "--json",
+    "baseRefName",
+    "--limit",
+    "1001",
+  ];
+}
+
+export async function probeGhStackPullRequest(
+  cwd: string,
+  owner: string,
+  repository: string,
+  pullRequest: number,
+  signal?: AbortSignal,
+  runner: GhStackCommandRunner = runGhStackCommand,
+): Promise<GhStackPullRequestProbeResult> {
+  try {
+    const result = await runner(stackPullRequestArgs(owner, repository, pullRequest), {
+      cwd,
+      signal,
+    });
+    const output = commandOutput(result);
+    const value = JSON.parse(result.stdout) as Record<string, unknown>;
+    if (
+      !Number.isSafeInteger(value.number) ||
+      (value.number as number) <= 0 ||
+      (typeof value.url !== "string" && value.url !== null) ||
+      typeof value.headRefName !== "string" ||
+      !value.headRefName.trim() ||
+      typeof value.baseRefName !== "string" ||
+      !value.baseRefName.trim()
+    ) {
+      return { status: "error", output };
+    }
+    return {
+      status: "found",
+      output,
+      pullRequest: {
+        number: value.number as number,
+        url: typeof value.url === "string" ? value.url.trim() : null,
+        headRefName: value.headRefName.trim(),
+        baseRefName: value.baseRefName.trim(),
+      },
+    };
+  } catch (error: unknown) {
+    return { status: "error", output: errorOutput(error) };
+  }
+}
+
+export async function probeGhStackPullRequestBase(
+  cwd: string,
+  owner: string,
+  repository: string,
+  pullRequest: number,
+  signal?: AbortSignal,
+  runner: GhStackCommandRunner = runGhStackCommand,
+): Promise<GhStackPullRequestBaseProbeResult> {
+  try {
+    const result = await runner(stackPullRequestBaseArgs(owner, repository, pullRequest), {
+      cwd,
+      signal,
+    });
+    const output = commandOutput(result);
+    const value = JSON.parse(result.stdout) as { baseRefName?: unknown };
+    if (typeof value.baseRefName !== "string" || !value.baseRefName.trim()) {
+      return { status: "error", output };
+    }
+    return { status: "found", output, baseRefName: value.baseRefName.trim() };
+  } catch (error: unknown) {
+    return { status: "error", output: errorOutput(error) };
+  }
+}
+
+export async function probeGhStackMergedPullRequestBases(
+  cwd: string,
+  owner: string,
+  repository: string,
+  staleBase: string,
+  signal?: AbortSignal,
+  runner: GhStackCommandRunner = runGhStackCommand,
+): Promise<GhStackMergedPullRequestBasesResult> {
+  try {
+    const result = await runner(stackMergedPullRequestBasesArgs(owner, repository, staleBase), {
+      cwd,
+      signal,
+    });
+    const output = commandOutput(result);
+    const value = JSON.parse(result.stdout) as unknown;
+    if (!Array.isArray(value)) return { status: "error", output };
+    const baseRefNames: string[] = [];
+    for (const entry of value) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return { status: "error", output };
+      }
+      const baseRefName = (entry as Record<string, unknown>).baseRefName;
+      if (typeof baseRefName !== "string" || !baseRefName.trim()) {
+        return { status: "error", output };
+      }
+      baseRefNames.push(baseRefName.trim());
+    }
+    // gh caps list results at the requested limit. Seeing the sentinel count
+    // means the destination set is not exhaustive and cannot be resolved.
+    return value.length >= 1001
+      ? { status: "ambiguous", output, baseRefNames }
+      : { status: "found", output, baseRefNames };
+  } catch (error: unknown) {
+    return { status: "error", output: errorOutput(error) };
+  }
+}
+
+export function stackPullRequestEditArgs(
+  owner: string,
+  repository: string,
+  pullRequest: number,
+  base: string,
+): string[] {
+  if (!owner.trim() || !repository.trim()) throw new RangeError("repository must be non-empty");
+  if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) {
+    throw new RangeError("pullRequest must be a positive integer");
+  }
+  if (!base.trim()) throw new RangeError("base must be non-empty");
+  return ["pr", "edit", String(pullRequest), "--repo", `${owner}/${repository}`, "--base", base];
+}
+
+export async function runGhStackPullRequestEdit(
+  cwd: string,
+  owner: string,
+  repository: string,
+  pullRequest: number,
+  base: string,
+  signal?: AbortSignal,
+  runner: GhStackCommandRunner = runGhStackCommand,
+): Promise<GhStackOperationResult> {
+  return runStackOperation(
+    stackPullRequestEditArgs(owner, repository, pullRequest, base),
+    cwd,
+    signal,
+    runner,
+  );
+}
+
+export function parseGhStackPullRequestRepository(
+  urlText: string,
+): { owner: string; repository: string; number: number } | null {
+  try {
+    const url = new URL(urlText);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) {
+      return null;
+    }
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (parts.length !== 4 || parts[2] !== "pull" || !/^[1-9][0-9]*$/.test(parts[3])) return null;
+    return parts[0] && parts[1]
+      ? { owner: parts[0], repository: parts[1], number: Number(parts[3]) }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isNoPullRequestOutput(output: string) {
   return /no pull requests? found for (?:the )?branch/i.test(output);
 }
 
@@ -841,10 +1120,167 @@ export async function probeGhStackRemote(
     if (!stacks) return { status: "error", output };
     if (stacks.length === 0) return { status: "absent", output };
     if (stacks.length > 1) return { status: "error", output };
-    return { status: "found", output, stack: stacks[0] };
+    const stack = stacks[0];
+    const queriedMembers = stack.pullRequests.filter((member) => member.number === pullRequest);
+    if (queriedMembers.length !== 1) {
+      return { status: "error", output };
+    }
+    return { status: "found", output, stack };
   } catch (error: unknown) {
     return { status: "error", output: errorOutput(error) };
   }
+}
+
+export type GhStackStaleBaseResolution =
+  | {
+      status: "resolved";
+      staleBase: string;
+      replacementBase: string;
+      activeBase: string;
+      source: "active-pr" | "merged-parent";
+      output: string;
+    }
+  | {
+      status: "unresolved" | "ambiguous";
+      staleBase: string;
+      activeBase: string | null;
+      reason: string;
+      output: string;
+    };
+
+/** Resolve a stale local singleton base without changing local or remote state. */
+export async function resolveGhStackStaleBase(
+  cwd: string,
+  staleBase: string,
+  activeBranch: string,
+  pullRequest: number,
+  repository: { owner: string; repository: string },
+  signal?: AbortSignal,
+  runner: GhStackCommandRunner = runGhStackCommand,
+): Promise<GhStackStaleBaseResolution> {
+  const current = await probeGhStackPullRequest(
+    cwd,
+    repository.owner,
+    repository.repository,
+    pullRequest,
+    signal,
+    runner,
+  );
+  if (current.status === "found") {
+    const returnedRepository = current.pullRequest.url
+      ? parseGhStackPullRequestRepository(current.pullRequest.url)
+      : null;
+    const repositoryMatches =
+      returnedRepository?.owner === repository.owner &&
+      returnedRepository.repository === repository.repository &&
+      returnedRepository.number === pullRequest;
+    if (
+      current.pullRequest.number !== pullRequest ||
+      current.pullRequest.headRefName !== activeBranch ||
+      !repositoryMatches
+    ) {
+      return {
+        status: "unresolved",
+        staleBase,
+        activeBase: current.pullRequest.baseRefName,
+        reason: "the active PR does not match the local PR number, repository, and branch",
+        output: current.output,
+      };
+    }
+  }
+  if (current.status === "error") {
+    return {
+      status: "unresolved",
+      staleBase,
+      activeBase: null,
+      reason: "could not determine the active PR's actual base",
+      output: current.output,
+    };
+  }
+  const activeBase = current.pullRequest.baseRefName;
+  if (activeBase === activeBranch) {
+    return {
+      status: "unresolved",
+      staleBase,
+      activeBase,
+      reason: "the active PR base cannot be the active branch",
+      output: current.output,
+    };
+  }
+  if (activeBase !== staleBase) {
+    return {
+      status: "resolved",
+      staleBase,
+      replacementBase: activeBase,
+      activeBase,
+      source: "active-pr",
+      output: current.output,
+    };
+  }
+
+  const merged = await probeGhStackMergedPullRequestBases(
+    cwd,
+    repository.owner,
+    repository.repository,
+    staleBase,
+    signal,
+    runner,
+  );
+  if (merged.status === "error") {
+    return {
+      status: "unresolved",
+      staleBase,
+      activeBase,
+      reason: "could not inspect merged PRs whose head is the stale base branch",
+      output: merged.output,
+    };
+  }
+  if (merged.status === "ambiguous") {
+    return {
+      status: "ambiguous",
+      staleBase,
+      activeBase,
+      reason: "merged PR lookup reached its result limit and is not exhaustive",
+      output: merged.output,
+    };
+  }
+  if (merged.baseRefNames.length === 0) {
+    return {
+      status: "unresolved",
+      staleBase,
+      activeBase,
+      reason: "no merged PR identifies a replacement destination",
+      output: merged.output,
+    };
+  }
+  const destinations = new Set(merged.baseRefNames);
+  if (destinations.size !== 1) {
+    return {
+      status: "ambiguous",
+      staleBase,
+      activeBase,
+      reason: "merged PRs identify multiple replacement destinations",
+      output: merged.output,
+    };
+  }
+  const replacementBase = merged.baseRefNames[0];
+  if (replacementBase === staleBase || replacementBase === activeBranch) {
+    return {
+      status: "unresolved",
+      staleBase,
+      activeBase,
+      reason: "the merged PR destination is not distinct from the stale base and active branch",
+      output: merged.output,
+    };
+  }
+  return {
+    status: "resolved",
+    staleBase,
+    replacementBase,
+    activeBase,
+    source: "merged-parent",
+    output: merged.output,
+  };
 }
 
 export type GhStackTargetResolution =

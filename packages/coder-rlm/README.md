@@ -15,7 +15,7 @@ const rlm = new RLM({ model, context: hugeString, getApiKey, thinkingLevel: "hig
 const result = await rlm.run("Find the major recurring architectural problems.");
 ```
 
-`thinkingLevel` uses Pi's normal reasoning levels, defaults to `low`, and is inherited by every
+`thinkingLevel` uses Pi's normal reasoning levels, defaults to `high`, and is inherited by every
 recursive call. Pass an `AbortSignal` to cancel the root model, active recursive calls, and the
 JavaScript subprocess together:
 

@@ -51,7 +51,7 @@ suite("RLM", () => {
     assert.equal(seen[0].tools?.map((tool) => tool.name).join(","), "javascript");
   });
 
-  test("resolves credentials for root and recursive model calls", async () => {
+  test("defaults to high thinking and resolves recursive credentials", async () => {
     const seenApiKeys: Array<string | undefined> = [];
     const seenReasoning: Array<string | undefined> = [];
     const faux = createFauxCore({});
@@ -79,7 +79,6 @@ suite("RLM", () => {
         model: faux.getModel(),
         context: "delegated context",
         maxDepth: 1,
-        thinkingLevel: "high",
         getApiKey: (provider) => {
           resolvedProviders.push(provider);
           return "saved-pi-token";

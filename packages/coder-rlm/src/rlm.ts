@@ -179,7 +179,7 @@ export class RLM {
     this.options = {
       model: options.model,
       context: options.context,
-      thinkingLevel: options.thinkingLevel ?? "low",
+      thinkingLevel: options.thinkingLevel ?? "high",
       getApiKey: options.getApiKey,
       onEvent: options.onEvent,
       maxDepth: positiveInteger(options.maxDepth ?? 3, "maxDepth"),

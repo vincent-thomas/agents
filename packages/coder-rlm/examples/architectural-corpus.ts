@@ -1,6 +1,6 @@
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { RLM } from "../src/index.ts";
-import { traceRLMEvent } from "./trace.ts";
+import { createRLMEventTracer } from "./trace.ts";
 
 const provider = process.env.RLM_PROVIDER ?? "openai-codex";
 const modelId = process.env.RLM_MODEL ?? "gpt-5.6-luna";
@@ -23,7 +23,7 @@ const rlm = new RLM({
   model,
   context: issues.join("\n\n"),
   getApiKey: async (providerId) => (await modelRuntime.getAuth(providerId))?.auth.apiKey,
-  onEvent: traceRLMEvent,
+  onEvent: createRLMEventTracer(),
 });
 console.log(
   await rlm.run(

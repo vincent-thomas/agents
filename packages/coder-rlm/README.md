@@ -32,7 +32,7 @@ const { text, usage } = await rlm.runDetailed(prompt);
 console.log(usage.modelCalls, usage.totalTokens, usage.cost.total);
 ```
 
-Pass `onEvent` to observe the stable, depth-aware RLM lifecycle while a run is in progress.
+Pass `onEvent` to observe the stable RLM lifecycle while a run is in progress. The examples render this lifecycle as append-only tree-aware progress: each line carries a branch path built from `runId`/`parentRunId` and child handle names, so interleaved parallel siblings remain distinct.
 Events include unique `runId`/`parentRunId` relationships and normalized `run_start`,
 `model_start`, `model_end`, `javascript_start`, `javascript_end`, `run_end`, and `run_error`
 records. JavaScript events expose generated code and captured console output; terminal events
@@ -83,8 +83,9 @@ To run a focused RLM request with a prompt from the command line:
 bun run --filter @vt-agent/coder-rlm example:prompt "Explain how recursive delegation can help analyze large context."
 ```
 
-The prompt example prints depth-aware progress, recursive calls, and JavaScript tool code/output to
-stderr, leaving the final answer on stdout. It uses a demo-oriented default of 64 model calls so
+The prompt example prints tree-aware progress, recursive calls, and concise JavaScript tool status to
+stderr, leaving the final answer on stdout. Successful JavaScript result bodies are intentionally
+suppressed; concise error text remains visible. It uses a demo-oriented default of 64 model calls so
 several concurrent delegates can each recurse and still return their parent synthesis; the `RLM`
 library default remains the deliberate 32-call safeguard. It uses the same 60-second JavaScript stall default as the library, while allowing generous model and overall deadlines for high-thinking delegates. Configure recursion and timeouts with positive-integer environment variables `RLM_MAX_DEPTH` (default `3`), `RLM_MAX_MODEL_CALLS` (default `64` for this example), `RLM_JAVASCRIPT_STALL_TIMEOUT_MS` (default `60000`), `RLM_MODEL_REQUEST_TIMEOUT_MS` (default `300000`), and `RLM_RUN_TIMEOUT_MS` (default `1800000`); invalid values are rejected using the same validation
 as `RLMOptions`:

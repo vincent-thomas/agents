@@ -1,7 +1,7 @@
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { RLM, type RLMEvent } from "../src/index.ts";
 import { buildAutonomousEvaluationCorpus } from "./autonomous-corpus.ts";
-import { traceRLMEvent } from "./trace.ts";
+import { createRLMEventTracer } from "./trace.ts";
 
 const corpus = buildAutonomousEvaluationCorpus();
 const provider = process.env.RLM_PROVIDER ?? "openai-codex";
@@ -18,6 +18,7 @@ const metrics = {
   delegatedContextSizes: [] as number[],
 };
 const startedAt = performance.now();
+const trace = createRLMEventTracer();
 const rlm = new RLM({
   model,
   context: corpus.context,
@@ -57,5 +58,5 @@ function traceAndMeasure(event: RLMEvent): void {
   }
   if (event.type === "model_start") metrics.modelCalls++;
   if (event.type === "javascript_start") metrics.javascriptCalls++;
-  traceRLMEvent(event, 4_000);
+  trace(event);
 }

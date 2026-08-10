@@ -1,6 +1,6 @@
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { RLM } from "../src/index.ts";
-import { traceRLMEvent } from "./trace.ts";
+import { createRLMEventTracer } from "./trace.ts";
 
 const DEFAULT_PROMPT_MAX_MODEL_CALLS = 64;
 const DEFAULT_PROMPT_JAVASCRIPT_STALL_TIMEOUT_MS = 60_000;
@@ -38,7 +38,7 @@ const rlm = new RLM({
   modelRequestTimeoutMs,
   runTimeoutMs,
   getApiKey: async (providerId) => (await modelRuntime.getAuth(providerId))?.auth.apiKey,
-  onEvent: traceRLMEvent,
+  onEvent: createRLMEventTracer(),
 });
 
 const answer = await rlm.run(prompt);

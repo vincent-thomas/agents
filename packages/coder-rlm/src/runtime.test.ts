@@ -6,15 +6,20 @@ import { suite, test } from "node:test";
 import { JavaScriptRuntime, type JavaScriptRuntimeRLM } from "./runtime.ts";
 import type { RLMChildHandle, RLMChildResult } from "./child-types.ts";
 
-function testHandle(id: number, name = `child-${id}`): RLMChildHandle {
-  return { id, name, parentRunId: 0, depth: 1, tier: "balanced" };
+function testHandle(
+  id: number,
+  name = `child-${id}`,
+  tier: RLMChildHandle["tier"] = "balanced",
+): RLMChildHandle {
+  return { id, name, parentRunId: 0, depth: 1, tier };
 }
 function testResult(handle: RLMChildHandle, text = "child result"): RLMChildResult {
   return { handle, tier: handle.tier, status: "succeeded", text };
 }
 function testRlm(): JavaScriptRuntimeRLM {
   return {
-    spawn: async (prompt, options) => testHandle(prompt === "one" ? 1 : 2, options?.name),
+    spawn: async (prompt, options) =>
+      testHandle(prompt === "one" ? 1 : 2, options?.name, options?.tier),
     waitAll: async (handles) => handles.map((handle) => testResult(handle)),
     result: async (handle) => ({ handle, tier: handle.tier, status: "pending" }),
     cancel: async (handle) => ({ handle, tier: handle.tier, status: "cancelled" }),
@@ -65,6 +70,236 @@ suite("JavaScriptRuntime", () => {
         { prompt: "one", context: "ab" },
         { prompt: "two", context: "cd" },
       ]);
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  test("clones RLM result objects into frozen null-prototype values", async () => {
+    const runtime = new JavaScriptRuntime({
+      context: "",
+      rlm: {
+        ...testRlm(),
+        result: async () =>
+          ({
+            nested: { value: 7, values: [{ value: "a" }, { value: "b" }] },
+          }) as RLMChildResult,
+      },
+    });
+    try {
+      const result = await runtime.execute(`
+        const value = await ctx.rlm.result(await ctx.rlm.spawn("inspect"));
+        let blocked = false;
+        try { value.constructor.constructor("return process")(); } catch { blocked = true; }
+        ctx.console.log(
+          blocked,
+          Object.getPrototypeOf(value) === null,
+          Object.isFrozen(value),
+          Object.getPrototypeOf(value.nested) === null,
+          Object.isFrozen(value.nested),
+          Object.isFrozen(value.nested.values),
+          value.nested.values.map((item) => item.value).join(","),
+        );
+      `);
+      assert.equal(result.output, "true true true true true true a,b");
+      assert.equal(
+        (await runtime.execute('ctx.console.log("result boundary alive")')).output,
+        "result boundary alive",
+      );
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  test("keeps waitAll arrays usable without exposing host constructors", async () => {
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
+    try {
+      const result = await runtime.execute(`
+        const handle = await ctx.rlm.spawn("inspect");
+        const values = await ctx.rlm.waitAll([handle]);
+        let blocked = false;
+        try { values.constructor.constructor("return process")(); } catch { blocked = true; }
+        ctx.console.log(
+          blocked,
+          Array.isArray(values),
+          values.length,
+          values[0].status,
+          values.map((item) => item.status).join(","),
+          Object.isFrozen(values),
+          typeof values.constructor === "function",
+        );
+      `);
+      assert.equal(result.output, "true true 1 succeeded succeeded true true");
+      assert.equal(
+        (await runtime.execute('ctx.console.log("array boundary alive")')).output,
+        "array boundary alive",
+      );
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  test("does not expose host inspection functions to sandbox values", async () => {
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
+    try {
+      const result = await runtime.execute(`
+        let customInspectCalled = false;
+        const value = {
+          [Symbol.for("nodejs.util.inspect.custom")](_depth, _options, inspect) {
+            customInspectCalled = true;
+            return "HOST_PROCESS_" + inspect.constructor("return process")().pid;
+          },
+        };
+        ctx.console.log(value);
+        ctx.console.log("custom-called", customInspectCalled);
+      `);
+      assert.match(result.output, /custom-called false/);
+      assert.doesNotMatch(result.output, /HOST_PROCESS_\d+/);
+      assert.equal(
+        (await runtime.execute('ctx.console.log("inspect boundary alive")')).output,
+        "inspect boundary alive",
+      );
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  test("chains safe thenables without assimilating sandbox callback results", async () => {
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
+    try {
+      const result = await runtime.execute(`
+        const name = await ctx.rlm
+          .spawn("inspect", { name: "worker" })
+          .then((handle) => handle.name)
+          .then((value) => value.toUpperCase());
+        ctx.console.log(name);
+      `);
+      assert.equal(result.output, "WORKER");
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  test("does not assimilate sandbox callback or handle thenables", async () => {
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
+    try {
+      const result = await runtime.execute(`
+        const handle = await ctx.rlm.spawn("inspect");
+        let callbackThenInvoked = false;
+        const pending = ctx.rlm.result(handle);
+        pending.then(() => ({
+          then(resolve) {
+            callbackThenInvoked = true;
+            resolve.constructor("return process")();
+          },
+        }));
+        await pending;
+        await Promise.resolve();
+
+        let handleThenInvoked = false;
+        const hostileHandle = {
+          ...handle,
+          then(resolve) {
+            handleThenInvoked = true;
+            resolve.constructor("return process")();
+          },
+        };
+        await ctx.rlm.result(hostileHandle);
+        ctx.console.log(callbackThenInvoked, handleThenInvoked);
+      `);
+      assert.equal(result.output, "false false");
+      assert.equal(
+        (await runtime.execute('ctx.console.log("thenable boundary alive")')).output,
+        "thenable boundary alive",
+      );
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  test("copies only validated protocol fields from cyclic sandbox payloads", async () => {
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
+    try {
+      const result = await runtime.execute(`
+        const options = { name: "safe", tier: "fast" };
+        options.self = options;
+        const handle = await ctx.rlm.spawn("inspect", options);
+        const forged = { ...handle };
+        forged.self = forged;
+        const child = await ctx.rlm.result(forged);
+        let safeBigIntError = false;
+        try {
+          await ctx.rlm.result({ ...handle, id: 1n });
+        } catch (error) {
+          safeBigIntError = error.constructor === undefined;
+        }
+        ctx.console.log(handle.name, handle.tier, child.status, safeBigIntError);
+      `);
+      assert.equal(result.output, "safe fast pending true");
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  test("keeps RLM rejections as safe error-like values", async () => {
+    const runtime = new JavaScriptRuntime({
+      context: "",
+      rlm: {
+        ...testRlm(),
+        spawn: async () => {
+          throw Object.assign(new Error("child operation failed"), { name: "ChildError" });
+        },
+      },
+    });
+    try {
+      const result = await runtime.execute(`
+        try {
+          await ctx.rlm.spawn("reject");
+        } catch (error) {
+          ctx.console.log(error.name, error.message, error.constructor === undefined);
+        }
+      `);
+      assert.equal(result.output, "ChildError child operation failed true");
+      assert.equal(
+        (await runtime.execute('ctx.console.log("rejection boundary alive")')).output,
+        "rejection boundary alive",
+      );
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  test("keeps fs and validation errors safe and useful", async () => {
+    const runtime = new JavaScriptRuntime({ context: "", rlm: testRlm() });
+    try {
+      const result = await runtime.execute(`
+        const errors = [];
+        for (const operation of [
+          () => ctx.fs.read("./does-not-exist.txt"),
+          () => ctx.fs.read(42),
+          () => ctx.rlm.spawn(""),
+        ]) {
+          try {
+            operation();
+          } catch (error) {
+            errors.push([error.name, error.message, error.constructor === undefined]);
+          }
+        }
+        ctx.console.log(
+          errors.map((error) => error[0] + ":" + error[2]).join(","),
+          errors[0][1].includes("ENOENT"),
+          errors[1][1],
+          errors[2][1],
+        );
+      `);
+      assert.equal(
+        result.output,
+        "Error:true,TypeError:true,TypeError:true true ctx.fs.read() selector must be a string ctx.rlm.spawn() prompt must be a non-empty string",
+      );
+      assert.equal(
+        (await runtime.execute('ctx.console.log("error boundary alive")')).output,
+        "error boundary alive",
+      );
     } finally {
       runtime.dispose();
     }

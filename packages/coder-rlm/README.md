@@ -59,10 +59,12 @@ calls in one `run()`; when concurrent delegation exhausts it, active agent turns
 primary error remains the budget-limit error rather than a later runtime-lifecycle error.
 
 The runtime is a separate Node process with only the host `PATH` retained so Node can be
-resolved. Generated code executes in
-a `node:vm` context with string/Wasm code generation disabled and no direct `process`,
-`require`, network, timers, or other host capabilities beyond the read-only `ctx.fs.read()` capability. A timeout hard-kills the
-runtime process.
+resolved. Generated code executes in a `node:vm` context with string/Wasm code generation
+disabled and no direct `process`, `require`, network, timers, or other ambient host
+capabilities. Its explicit capabilities are limited to `ctx.context`, `ctx.rlm.*`,
+`ctx.console.*`, and read-only `ctx.fs.read()`; host protocol results are copied into frozen
+sandbox arrays or null-prototype records before generated code receives them. A timeout
+hard-kills the runtime process.
 
 Cancellation, model-request timeouts, and overall run timeouts abort in-flight recursive calls before disposing the worker.
 Every run receives a fresh runtime, which is disposed on success, model failure, tool failure, or

@@ -50,21 +50,125 @@ function startHeartbeats() {
   heartbeatTimer.unref?.();
 }
 
-function safeFunction(fn) {
-  Object.setPrototypeOf(fn, null);
-  return Object.freeze(fn);
+function safeError(error) {
+  let name = "Error";
+  let message;
+  try {
+    if (error && typeof error.name === "string" && error.name !== "") name = error.name;
+    message = error && typeof error.message === "string" ? error.message : String(error);
+  } catch {
+    message = "Unknown error";
+  }
+  const safe = Object.create(null);
+  Object.defineProperties(safe, {
+    name: { value: name, enumerable: true },
+    message: { value: message, enumerable: true },
+  });
+  return Object.freeze(safe);
 }
 
-function safeThenable(promise) {
+function safeProtocolError(message) {
+  const text = typeof message === "string" ? message : String(message);
+  const separator = text.indexOf(": ");
+  if (separator <= 0) return safeError({ message: text });
+  return safeError({ name: text.slice(0, separator), message: text.slice(separator + 2) });
+}
+
+function safeFunction(fn) {
+  const safe = (...args) => {
+    try {
+      return fn(...args);
+    } catch (error) {
+      throw safeError(error);
+    }
+  };
+  Object.setPrototypeOf(safe, null);
+  return Object.freeze(safe);
+}
+
+function createSafeDeferred() {
+  let state = "pending";
+  let settledValue;
+  const listeners = [];
+
+  const dispatch = (listener) => {
+    queueMicrotask(() => {
+      const callback = state === "fulfilled" ? listener.onFulfilled : listener.onRejected;
+      if (typeof callback !== "function") {
+        listener.next.settle(state, settledValue);
+        return;
+      }
+      try {
+        listener.next.settle("fulfilled", callback(settledValue));
+      } catch (error) {
+        listener.next.settle("rejected", safeError(error));
+      }
+    });
+  };
+
+  const settle = (nextState, value) => {
+    if (state !== "pending") return;
+    state = nextState;
+    settledValue = nextState === "rejected" ? safeError(value) : value;
+    for (const listener of listeners.splice(0)) dispatch(listener);
+  };
+
   const thenable = Object.create(null);
-  const then = safeFunction((onFulfilled, onRejected) =>
-    safeThenable(promise.then(onFulfilled, onRejected)),
-  );
+  const then = safeFunction((onFulfilled, onRejected) => {
+    const next = createSafeDeferred();
+    const listener = { onFulfilled, onRejected, next };
+    if (state === "pending") listeners.push(listener);
+    else dispatch(listener);
+    return next.thenable;
+  });
   Object.defineProperty(thenable, "then", {
     value: then,
     enumerable: true,
   });
-  return Object.freeze(thenable);
+
+  return { thenable: Object.freeze(thenable), settle };
+}
+
+function safeThenable(promise) {
+  const deferred = createSafeDeferred();
+  void promise
+    .then(
+      (value) => deferred.settle("fulfilled", value),
+      (error) => deferred.settle("rejected", error),
+    )
+    .catch((error) => deferred.settle("rejected", error));
+  return deferred.thenable;
+}
+
+function cloneForSandbox(value, seen = new Map()) {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
+  if (seen.has(value)) return seen.get(value);
+
+  if (Array.isArray(value)) {
+    const clone = vm.runInContext("[]", runtimeContext);
+    seen.set(value, clone);
+    for (const key of Object.keys(value)) {
+      Object.defineProperty(clone, key, {
+        value: cloneForSandbox(value[key], seen),
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
+    }
+    return Object.freeze(clone);
+  }
+
+  const clone = Object.create(null);
+  seen.set(value, clone);
+  for (const key of Object.keys(value)) {
+    Object.defineProperty(clone, key, {
+      value: cloneForSandbox(value[key], seen),
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    });
+  }
+  return Object.freeze(clone);
 }
 
 function formatValue(value) {
@@ -75,6 +179,8 @@ function formatValue(value) {
       depth: 5,
       maxArrayLength: 100,
       maxStringLength: Math.min(maxOutputChars, 20_000),
+      customInspect: false,
+      getters: false,
       breakLength: 100,
     },
     value,
@@ -110,6 +216,14 @@ function outputText(value) {
 
 function createRlmCall(op, payload) {
   const callId = nextRlmCallId++;
+  const message = { type: "rlm", op, callId, ...payload };
+  let encoded;
+  try {
+    encoded = JSON.stringify(message);
+  } catch (error) {
+    throw safeError(error);
+  }
+
   const promise = new Promise((resolve, reject) => {
     pendingRlmCalls.set(callId, {
       resolve,
@@ -117,10 +231,54 @@ function createRlmCall(op, payload) {
       requestId: activeExecutionRequestId,
       op,
     });
-    send({ type: "rlm", op, callId, ...payload });
-    sendHeartbeat();
+    try {
+      process.stdout.write(`${encoded}\n`);
+      sendHeartbeat();
+    } catch (error) {
+      pendingRlmCalls.delete(callId);
+      reject(safeError(error));
+    }
   });
   return safeThenable(promise);
+}
+
+function copySpawnOptions(options) {
+  if (options === undefined) return undefined;
+  const copy = Object.create(null);
+  if (options.name !== undefined) copy.name = options.name;
+  if (options.context !== undefined) copy.context = options.context;
+  if (options.tier !== undefined) copy.tier = options.tier;
+  return Object.freeze(copy);
+}
+
+function copyHandle(handle) {
+  if (typeof handle !== "object" || handle === null || Array.isArray(handle)) {
+    throw new TypeError("RLM child handle must be an object");
+  }
+  if (!Number.isSafeInteger(handle.id) || handle.id < 1) {
+    throw new TypeError("RLM child handle id must be a positive integer");
+  }
+  if (typeof handle.name !== "string") {
+    throw new TypeError("RLM child handle name must be a string");
+  }
+  if (!Number.isSafeInteger(handle.parentRunId) || handle.parentRunId < 0) {
+    throw new TypeError("RLM child handle parentRunId must be a non-negative integer");
+  }
+  if (!Number.isSafeInteger(handle.depth) || handle.depth < 1) {
+    throw new TypeError("RLM child handle depth must be a positive integer");
+  }
+  if (handle.tier !== "fast" && handle.tier !== "balanced" && handle.tier !== "deep") {
+    throw new TypeError("RLM child handle tier must be fast, balanced, or deep");
+  }
+  const copy = Object.create(null);
+  Object.defineProperties(copy, {
+    id: { value: handle.id, enumerable: true },
+    name: { value: handle.name, enumerable: true },
+    parentRunId: { value: handle.parentRunId, enumerable: true },
+    depth: { value: handle.depth, enumerable: true },
+    tier: { value: handle.tier, enumerable: true },
+  });
+  return Object.freeze(copy);
 }
 
 function createRlm() {
@@ -149,39 +307,27 @@ function createRlm() {
         ) {
           throw new TypeError("ctx.rlm.spawn() tier must be fast, balanced, or deep");
         }
-        return createRlmCall("spawn", { prompt, options });
+        return createRlmCall("spawn", { prompt, options: copySpawnOptions(options) });
       }),
       enumerable: true,
     },
     waitAll: {
       value: safeFunction((handles) => {
         if (!Array.isArray(handles)) throw new TypeError("ctx.rlm.waitAll() expects an array");
-        return safeThenable(
-          Promise.all(handles).then((resolvedHandles) =>
-            createRlmCall("waitAll", { handles: resolvedHandles }),
-          ),
-        );
+        const copies = [];
+        for (let index = 0; index < handles.length; index += 1) {
+          copies.push(copyHandle(handles[index]));
+        }
+        return createRlmCall("waitAll", { handles: copies });
       }),
       enumerable: true,
     },
     result: {
-      value: safeFunction((handle) =>
-        safeThenable(
-          Promise.resolve(handle).then((resolvedHandle) =>
-            createRlmCall("result", { handle: resolvedHandle }),
-          ),
-        ),
-      ),
+      value: safeFunction((handle) => createRlmCall("result", { handle: copyHandle(handle) })),
       enumerable: true,
     },
     cancel: {
-      value: safeFunction((handle) =>
-        safeThenable(
-          Promise.resolve(handle).then((resolvedHandle) =>
-            createRlmCall("cancel", { handle: resolvedHandle }),
-          ),
-        ),
-      ),
+      value: safeFunction((handle) => createRlmCall("cancel", { handle: copyHandle(handle) })),
       enumerable: true,
     },
   });
@@ -353,8 +499,8 @@ function settleRlm(message) {
   const pending = pendingRlmCalls.get(message.callId);
   if (!pending) return;
   pendingRlmCalls.delete(message.callId);
-  if (message.error) pending.reject(new Error(message.error));
-  else pending.resolve(message.result);
+  if (message.error !== undefined) pending.reject(safeProtocolError(message.error));
+  else pending.resolve(cloneForSandbox(message.result));
 }
 
 input.on("line", (line) => {

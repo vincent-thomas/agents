@@ -296,7 +296,7 @@ export class JavaScriptRuntime {
       this.send({
         type: "rlmResult",
         callId: message.callId,
-        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        error: formatRlmError(error),
       });
     }
   }
@@ -333,8 +333,28 @@ function positiveInteger(value: number, name: string): number {
   return value;
 }
 
+function formatRlmError(error: unknown): string {
+  if (typeof error === "string") return error;
+  try {
+    if (error && typeof error === "object") {
+      const name =
+        typeof (error as { name?: unknown }).name === "string"
+          ? (error as { name: string }).name
+          : "Error";
+      const message =
+        typeof (error as { message?: unknown }).message === "string"
+          ? (error as { message: string }).message
+          : String(error);
+      return `${name}: ${message}`;
+    }
+    return String(error);
+  } catch {
+    return "Error: Unknown error";
+  }
+}
+
 function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
+  return error instanceof Error ? error : new Error(formatRlmError(error));
 }
 
 function abortError(): DOMException {

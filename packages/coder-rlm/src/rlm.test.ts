@@ -300,12 +300,8 @@ suite("RLM", () => {
         maxModelCalls: 7,
         onEvent: (event) => {
           if (event.type === "run_error") errors.push(event.error);
-          if (
-            event.type === "agent_event" &&
-            event.event.type === "tool_execution_end" &&
-            event.event.isError
-          ) {
-            toolErrors.push(JSON.stringify(event.event.result));
+          if (event.type === "javascript_end" && event.isError) {
+            toolErrors.push(event.output);
           }
         },
       },
@@ -336,11 +332,7 @@ suite("RLM", () => {
           if (event.type === "run_start" && event.depth === 1) {
             await runStartBarrier;
           }
-          if (
-            event.type === "agent_event" &&
-            event.depth === 0 &&
-            event.event.type === "tool_execution_end"
-          ) {
+          if (event.type === "javascript_end" && event.depth === 0) {
             releaseRunStart();
           }
         },

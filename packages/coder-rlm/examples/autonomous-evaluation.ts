@@ -1,6 +1,7 @@
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { RLM, type RLMEvent } from "../src/index.ts";
 import { buildAutonomousEvaluationCorpus } from "./autonomous-corpus.ts";
+import { traceRLMEvent } from "./trace.ts";
 
 const corpus = buildAutonomousEvaluationCorpus();
 const provider = process.env.RLM_PROVIDER ?? "openai-codex";
@@ -50,37 +51,11 @@ console.error(`  expected top themes: ${corpus.expectedTopThemes.join("; ")}`);
 
 function traceAndMeasure(event: RLMEvent): void {
   metrics.maxDepth = Math.max(metrics.maxDepth, event.depth);
-  const prefix = `[rlm depth=${event.depth}]`;
-  if (event.type === "run_start") {
-    if (event.depth > 0) {
-      metrics.recursiveCalls++;
-      metrics.delegatedContextSizes.push(event.contextLength);
-    }
-    console.error(
-      `${prefix} ${event.depth === 0 ? "start" : "recursive call"}: ${event.prompt} (external context: ${event.contextLength} chars)`,
-    );
-    return;
-  }
-  if (event.type === "run_end") {
-    console.error(`${prefix} complete`);
-    return;
-  }
-  if (event.type === "run_error") {
-    console.error(`${prefix} error: ${event.error}`);
-    return;
+  if (event.type === "run_start" && event.depth > 0) {
+    metrics.recursiveCalls++;
+    metrics.delegatedContextSizes.push(event.contextLength);
   }
   if (event.type === "model_start") metrics.modelCalls++;
-  if (event.type === "javascript_start") {
-    metrics.javascriptCalls++;
-    console.error(`${prefix} javascript:\n${event.code}`);
-  } else if (event.type === "javascript_end") {
-    const output = truncate(event.output || "<no output>", 4_000);
-    console.error(`${prefix} javascript ${event.isError ? "error" : "result"}:\n${output}`);
-  }
-}
-
-function truncate(value: string, maximum: number): string {
-  return value.length <= maximum
-    ? value
-    : `${value.slice(0, maximum)}\n... ${value.length - maximum} chars omitted`;
+  if (event.type === "javascript_start") metrics.javascriptCalls++;
+  traceRLMEvent(event, 4_000);
 }

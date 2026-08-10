@@ -1,5 +1,6 @@
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { RLM, type RLMEvent } from "../src/index.ts";
+import { RLM } from "../src/index.ts";
+import { traceRLMEvent } from "./trace.ts";
 
 const provider = process.env.RLM_PROVIDER ?? "openai-codex";
 const modelId = process.env.RLM_MODEL ?? "gpt-5.6-luna";
@@ -22,35 +23,10 @@ const rlm = new RLM({
   model,
   context: issues.join("\n\n"),
   getApiKey: async (providerId) => (await modelRuntime.getAuth(providerId))?.auth.apiKey,
-  onEvent: traceEvent,
+  onEvent: traceRLMEvent,
 });
 console.log(
   await rlm.run(
     "Identify the three most common architectural problems in this corpus and give supporting examples.",
   ),
 );
-
-function traceEvent(event: RLMEvent): void {
-  const prefix = `[rlm depth=${event.depth}]`;
-  if (event.type === "run_start") {
-    const kind = event.depth === 0 ? "start" : "recursive call";
-    console.error(
-      `${prefix} ${kind}: ${event.prompt} (external context: ${event.contextLength} chars)`,
-    );
-    return;
-  }
-  if (event.type === "run_end") {
-    console.error(`${prefix} complete`);
-    return;
-  }
-  if (event.type === "run_error") {
-    console.error(`${prefix} error: ${event.error}`);
-    return;
-  }
-  if (event.type === "javascript_start") {
-    console.error(`${prefix} javascript:\n${event.code}`);
-  } else if (event.type === "javascript_end") {
-    const output = event.output || "<no output>";
-    console.error(`${prefix} javascript ${event.isError ? "error" : "result"}:\n${output}`);
-  }
-}

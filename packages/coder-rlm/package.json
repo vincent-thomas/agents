@@ -11,6 +11,7 @@
     "build": "tsc && cp src/runtime-worker.mjs dist/runtime-worker.mjs",
     "evaluate:autonomous": "bun examples/autonomous-evaluation.ts",
     "example": "bun examples/architectural-corpus.ts",
+    "example:prompt": "bun examples/prompt.ts",
     "test": "bun test",
     "typecheck": "tsc -p tsconfig.check.json"
   },

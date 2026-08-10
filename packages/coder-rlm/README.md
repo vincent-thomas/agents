@@ -50,6 +50,12 @@ credentials saved by Pi (normally in `~/.pi/agent/auth.json`). It defaults to
 bun run --filter @vt-agent/coder-rlm example
 ```
 
+To run a focused RLM request with a prompt from the command line:
+
+```sh
+bun run --filter @vt-agent/coder-rlm example:prompt "Explain how recursive delegation can help analyze large context."
+```
+
 The autonomous evaluation gives the model a large, semantically varied incident corpus and asks
 only for its analytical conclusion; it does not tell the model to recurse. Its final metrics show
 whether the model chose recursive `llm()` calls, along with depth, call counts, delegated context

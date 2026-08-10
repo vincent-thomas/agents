@@ -1,11 +1,12 @@
 # coder-rlm
 
 `coder-rlm` is a minimal recursive language model harness built on Pi. The model sees one
-tool, `javascript({ code })`; the tool's persistent runtime contains only:
+tool, `javascript({ code })`; the tool's persistent runtime exposes one capability global:
 
-- `context` — external context that is not inserted into the root model prompt
-- `llm(prompt, context?)` — a recursive RLM invocation over inherited or delegated context
-- `console.log()` and `console.error()` — output returned to the parent model
+- `ctx.context` — external context that is not inserted into the root model prompt
+- `ctx.llm(prompt, context?)` — a recursive RLM invocation over inherited or delegated context
+- `ctx.console.log()` and `ctx.console.error()` — output returned to the parent model
+- `ctx.fs.read(selector)` — read-only repository file access, rooted at the host working directory; selectors support `./file.ts`, `./file.ts:100`, and `./file.ts:100-106`
 
 ```ts
 import { RLM } from "@vt-agent/coder-rlm";
@@ -19,7 +20,7 @@ events while a run is in progress. Tool start/end events expose the JavaScript c
 captured console output; recursive calls appear as nested `run_start`/`run_end` events.
 
 Top-level `await` is supported and declarations persist between JavaScript calls. Separate
-`run()` calls receive separate runtimes. At `maxDepth` (default `3`, minimum `1`), `llm()` becomes an
+`run()` calls receive separate runtimes. At `maxDepth` (default `3`, minimum `1`), `ctx.llm()` becomes an
 ordinary Pi model call without the JavaScript tool; only that delegated leaf context is placed
 in the leaf prompt.
 
@@ -32,7 +33,7 @@ execution, and 50,000 characters of tool output. `maxModelCalls`, `executionTime
 The runtime is a separate Node process with only the host `PATH` retained so Node can be
 resolved. Generated code executes in
 a `node:vm` context with string/Wasm code generation disabled and no direct `process`,
-`require`, filesystem, network, timers, or other host capabilities. A timeout hard-kills the
+`require`, network, timers, or other host capabilities beyond the read-only `ctx.fs.read()` capability. A timeout hard-kills the
 runtime process.
 
 This is capability reduction for an MVP, not a production security boundary. `node:vm` is not
@@ -58,7 +59,7 @@ bun run --filter @vt-agent/coder-rlm example:prompt "Explain how recursive deleg
 
 The autonomous evaluation gives the model a large, semantically varied incident corpus and asks
 only for its analytical conclusion; it does not tell the model to recurse. Its final metrics show
-whether the model chose recursive `llm()` calls, along with depth, call counts, delegated context
+whether the model chose recursive `ctx.llm()` calls, along with depth, call counts, delegated context
 sizes, elapsed time, and the expected top themes:
 
 ```sh

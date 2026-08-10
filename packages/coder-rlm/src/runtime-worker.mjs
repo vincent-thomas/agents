@@ -4,6 +4,8 @@ import { PassThrough } from "node:stream";
 import { formatWithOptions } from "node:util";
 import { createInterface } from "node:readline";
 import { register } from "node:module";
+import { closeSync, fstatSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 const denyImportsSource = encodeURIComponent(
   'export async function resolve(specifier) { throw new Error("Dynamic import is disabled: " + specifier); }',
@@ -17,6 +19,7 @@ let replServer;
 let maxOutputChars = 50_000;
 let activeOutput;
 let nextLlmCallId = 1;
+let rootDirectory;
 const pendingLlmCalls = new Map();
 
 function send(message) {
@@ -97,12 +100,82 @@ function createLlm() {
   });
 }
 
+function createFs(root) {
+  const fsCapability = Object.create(null);
+  Object.defineProperty(fsCapability, "read", {
+    value: safeFunction((selector) => readFile(root, selector)),
+    enumerable: true,
+  });
+  return Object.freeze(fsCapability);
+}
+
+function readFile(root, selector) {
+  if (typeof selector !== "string") {
+    throw new TypeError("ctx.fs.read() selector must be a string");
+  }
+
+  const match = /^(\.\/[^:\r\n]+?)(?::([1-9]\d*)(?:-([1-9]\d*))?)?$/.exec(selector);
+  if (!match) {
+    throw new Error(
+      "ctx.fs.read() selector must be ./file or ./file:start[-end] with positive line numbers",
+    );
+  }
+  const relativePath = match[1].slice(2);
+  const start = match[2] === undefined ? undefined : Number(match[2]);
+  const end = match[3] === undefined ? start : Number(match[3]);
+  if (
+    (start !== undefined && !Number.isSafeInteger(start)) ||
+    (end !== undefined && !Number.isSafeInteger(end)) ||
+    (start !== undefined && end !== undefined && end < start)
+  ) {
+    throw new Error("ctx.fs.read() line range must use positive safe integers in ascending order");
+  }
+
+  const requestedPath = resolve(root, relativePath);
+  if (!isInside(root, requestedPath)) {
+    throw new Error("ctx.fs.read() path is outside the working directory");
+  }
+  const descriptor = openSync(requestedPath, "r");
+  try {
+    const actualPath = realpathSync(requestedPath);
+    if (!isInside(root, actualPath)) {
+      throw new Error("ctx.fs.read() path is outside the working directory");
+    }
+    const openedFile = fstatSync(descriptor);
+    const resolvedFile = statSync(actualPath);
+    if (openedFile.dev !== resolvedFile.dev || openedFile.ino !== resolvedFile.ino) {
+      throw new Error("ctx.fs.read() path changed while it was being opened");
+    }
+
+    const contents = readFileSync(descriptor, "utf8");
+    if (start === undefined) return contents;
+    return contents
+      .split(/\r?\n/)
+      .slice(start - 1, end)
+      .join("\n");
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function isInside(root, candidate) {
+  const pathRelation = relative(root, candidate);
+  return (
+    pathRelation === "" ||
+    (pathRelation !== ".." && !pathRelation.startsWith(`..${sep}`) && !isAbsolute(pathRelation))
+  );
+}
+
 function initialize(message) {
   if (runtimeContext) throw new Error("Runtime is already initialized");
   if (typeof message.context !== "string") throw new TypeError("context must be a string");
+  if (typeof message.rootDirectory !== "string" || !isAbsolute(message.rootDirectory)) {
+    throw new TypeError("rootDirectory must be an absolute path");
+  }
   if (!Number.isSafeInteger(message.maxOutputChars) || message.maxOutputChars <= 0) {
     throw new TypeError("maxOutputChars must be a positive integer");
   }
+  rootDirectory = realpathSync(message.rootDirectory);
   maxOutputChars = message.maxOutputChars;
 
   const consoleCapability = Object.create(null);
@@ -115,11 +188,21 @@ function initialize(message) {
   });
   Object.freeze(consoleCapability);
 
-  const sandbox = Object.create(null);
-  Object.defineProperties(sandbox, {
+  const ctx = Object.create(null);
+  Object.defineProperties(ctx, {
     context: { value: message.context, enumerable: true },
     llm: { value: createLlm(), enumerable: true },
     console: { value: consoleCapability, enumerable: true },
+    fs: { value: createFs(rootDirectory), enumerable: true },
+  });
+  Object.freeze(ctx);
+
+  const sandbox = Object.create(null);
+  Object.defineProperties(sandbox, {
+    ctx: { value: ctx, enumerable: true },
+    context: { value: undefined },
+    llm: { value: undefined },
+    console: { value: undefined },
   });
   runtimeContext = vm.createContext(sandbox, {
     name: "coder-rlm",

@@ -14,7 +14,7 @@ export function createJavascriptTool(runtime: JavaScriptRuntime): AgentTool<type
     name: "javascript",
     label: "JavaScript",
     description:
-      "Execute JavaScript in a persistent, capability-constrained runtime containing only context, llm(), and console.log/error().",
+      "Execute JavaScript in a persistent, capability-constrained runtime. Capabilities are exposed under ctx: ctx.context, ctx.llm(), ctx.console.log/error(), and the read-only ctx.fs.read(selector).",
     parameters,
     executionMode: "sequential",
     async execute(_toolCallId, { code }, signal) {

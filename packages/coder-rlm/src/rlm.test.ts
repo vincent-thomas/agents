@@ -39,7 +39,7 @@ suite("RLM", () => {
     assert.equal(result, "answer");
     assert.equal(seen.length, 1);
     assert.doesNotMatch(seen[0].systemPrompt ?? "", /SECRET_SENTINEL/);
-    assert.match(seen[0].systemPrompt ?? "", /as the string `context`/);
+    assert.match(seen[0].systemPrompt ?? "", /ctx\.context.*external context string/);
     assert.match(seen[0].systemPrompt ?? "", /correctness can be specified mechanically/);
     assert.match(seen[0].systemPrompt ?? "", /interpretation, judgment, or reasoning/);
     assert.match(seen[0].systemPrompt ?? "", /partition it, delegate the required judgment/);
@@ -55,7 +55,7 @@ suite("RLM", () => {
     faux.setResponses([
       (_context, options) => {
         seenApiKeys.push(options?.apiKey);
-        return javascript('console.log(await llm("delegate"))');
+        return javascript('ctx.console.log(await ctx.llm("delegate"))');
       },
       (_context, options) => {
         seenApiKeys.push(options?.apiKey);
@@ -90,7 +90,7 @@ suite("RLM", () => {
     const events: RLMEvent[] = [];
     const faux = createFauxCore({});
     faux.setResponses([
-      javascript('console.log(await llm("child task", context.slice(0, 5)))'),
+      javascript('ctx.console.log(await ctx.llm("child task", ctx.context.slice(0, 5)))'),
       fauxAssistantMessage("child answer"),
       fauxAssistantMessage("root answer"),
     ]);
@@ -142,10 +142,12 @@ suite("RLM", () => {
     const toolObservations: string[] = [];
     const faux = createFauxCore({});
     faux.setResponses([
-      javascript("const matches = [...context.matchAll(/NEEDLE/g)]; console.log(matches.length)"),
+      javascript(
+        "const matches = [...ctx.context.matchAll(/NEEDLE/g)]; ctx.console.log(matches.length)",
+      ),
       (context) => {
         toolObservations.push(visibleText(context));
-        return javascript("console.log(matches[0][0])");
+        return javascript("ctx.console.log(matches[0][0])");
       },
       (context) => {
         toolObservations.push(visibleText(context));
@@ -169,7 +171,9 @@ suite("RLM", () => {
     faux.setResponses([
       (context) => {
         seen.push(context);
-        return javascript('console.log(await llm("analyze delegated text", context.slice(2, 7)))');
+        return javascript(
+          'ctx.console.log(await ctx.llm("analyze delegated text", ctx.context.slice(2, 7)))',
+        );
       },
       (context) => {
         seen.push(context);
@@ -200,11 +204,11 @@ suite("RLM", () => {
     faux.setResponses([
       (context) => {
         seen.push(context);
-        return javascript('console.log(await llm("recurse"))');
+        return javascript('ctx.console.log(await ctx.llm("recurse"))');
       },
       (context) => {
         seen.push(context);
-        return javascript('console.log(await llm("recurse"))');
+        return javascript('ctx.console.log(await ctx.llm("recurse"))');
       },
       (context) => {
         seen.push(context);
@@ -235,7 +239,7 @@ suite("RLM", () => {
 
   test("enforces the shared model-call limit", async () => {
     const faux = createFauxCore({});
-    faux.setResponses([javascript('console.log("used the only call")')]);
+    faux.setResponses([javascript('ctx.console.log("used the only call")')]);
     const rlm = new RLM(
       { model: faux.getModel(), context: "", maxModelCalls: 1 },
       { streamFn: faux.streamSimple },
@@ -250,7 +254,7 @@ suite("RLM", () => {
     faux.setResponses([
       javascript("const topLevelSecret = 42"),
       fauxAssistantMessage("first"),
-      javascript("console.log(typeof topLevelSecret)"),
+      javascript("ctx.console.log(typeof topLevelSecret)"),
       (context) => {
         observations.push(visibleText(context));
         return fauxAssistantMessage("second");
@@ -270,7 +274,7 @@ suite("RLM", () => {
       javascript('throw new Error("boom")'),
       (context) => {
         observations.push(visibleText(context));
-        return javascript('console.log("still alive")');
+        return javascript('ctx.console.log("still alive")');
       },
       (context) => {
         observations.push(visibleText(context));

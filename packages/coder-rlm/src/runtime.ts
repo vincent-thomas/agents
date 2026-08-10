@@ -60,7 +60,12 @@ export class JavaScriptRuntime {
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.installProcessHandlers();
-    this.send({ type: "init", context: options.context, maxOutputChars });
+    this.send({
+      type: "init",
+      context: options.context,
+      rootDirectory: process.cwd(),
+      maxOutputChars,
+    });
   }
 
   execute(code: string, signal?: AbortSignal): Promise<JavaScriptExecutionResult> {

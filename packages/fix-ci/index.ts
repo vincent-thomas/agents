@@ -2252,10 +2252,13 @@ export function createFixCiExtension(options: {
           const controllerParent = options.workspaceController?.getParentBranch
             ? await options.workspaceController.getParentBranch(cwd)
             : undefined;
+          const hasParentProvenance =
+            options.workspaceController?.getParentBranch !== undefined ||
+            options.parentBranch !== undefined;
           explicitParent = options.workspaceController?.getParentBranch
             ? controllerParent?.trim() || null
             : options.parentBranch?.trim() || null;
-          prBase = await getPrBaseBranch(cwd, signal, explicitParent);
+          prBase = await getPrBaseBranch(cwd, signal, explicitParent, !hasParentProvenance);
 
           if (prBase) {
             const baseAhead = await isBaseBranchAhead(cwd, prBase, signal);
@@ -2439,7 +2442,11 @@ export function createFixCiExtension(options: {
         if (!existingPr) {
           notify("Creating draft pull request…");
 
-          const targetBase = prBase ?? (await getPrBaseBranch(cwd, signal, explicitParent));
+          const hasParentProvenance =
+            options.workspaceController?.getParentBranch !== undefined ||
+            options.parentBranch !== undefined;
+          const targetBase =
+            prBase ?? (await getPrBaseBranch(cwd, signal, explicitParent, !hasParentProvenance));
           if (!targetBase) {
             return respond("Draft PR creation failed: could not determine a target branch.", {
               prCreationFailed: true,

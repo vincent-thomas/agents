@@ -562,6 +562,21 @@ suite("getPrBaseBranch", () => {
   );
 
   test(
+    "does not infer a base when authoritative parent provenance is missing",
+    withGitRepos(async (local) => {
+      git("git checkout -b feature/current", local);
+      writeFileSync(join(local, "feature.txt"), "feature");
+      git("git add .", local);
+      git("git commit -m 'feature commit'", local);
+
+      const fakeGh = 'if [ "$1" = "pr" ] && [ "$2" = "list" ]; then exit 0; fi\nexit 1';
+      await withFakeGh(local, fakeGh, async () => {
+        assert.equal(await getPrBaseBranch(local, undefined, null, false), null);
+      });
+    }),
+  );
+
+  test(
     "fails safely when GitHub cannot determine whether a PR exists",
     withGitRepos(async (local) => {
       git("git checkout -b feature/current", local);

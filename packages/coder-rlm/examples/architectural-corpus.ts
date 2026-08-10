@@ -2,7 +2,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { RLM, type RLMEvent } from "../src/index.ts";
 
 const provider = process.env.RLM_PROVIDER ?? "openai-codex";
-const modelId = process.env.RLM_MODEL ?? "gpt-5.4-mini";
+const modelId = process.env.RLM_MODEL ?? "gpt-5.6-luna";
 const modelRuntime = await ModelRuntime.create();
 const model = modelRuntime.getModel(provider, modelId);
 if (!model) throw new Error(`Unknown Pi model: ${provider}/${modelId}`);

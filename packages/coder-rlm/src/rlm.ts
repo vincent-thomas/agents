@@ -145,7 +145,7 @@ export class RLM {
           ? "Answer the task using the delegated external context supplied by the user."
           : RLM_SYSTEM_PROMPT,
         model: this.options.model,
-        thinkingLevel: "off",
+        thinkingLevel: "high",
         tools: runtime ? [createJavascriptTool(runtime)] : [],
       },
       streamFn: this.streamFn,

@@ -47,7 +47,8 @@ isolation.
 
 The runtime requires `node` on `PATH`. The example loads Pi's normal model runtime and reuses
 credentials saved by Pi (normally in `~/.pi/agent/auth.json`). It defaults to
-`openai-codex`/`gpt-5.4-mini`; optionally choose `RLM_PROVIDER` and `RLM_MODEL`, then run:
+`openai-codex`/`gpt-5.6-luna`, and RLM calls request high thinking; optionally choose
+`RLM_PROVIDER` and `RLM_MODEL`, then run:
 
 ```sh
 bun run --filter @vt-agent/coder-rlm example

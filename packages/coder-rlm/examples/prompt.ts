@@ -10,7 +10,7 @@ if (!prompt) {
 }
 
 const provider = process.env.RLM_PROVIDER ?? "openai-codex";
-const modelId = process.env.RLM_MODEL ?? "gpt-5.4-mini";
+const modelId = process.env.RLM_MODEL ?? "gpt-5.6-luna";
 const maxDepth =
   process.env.RLM_MAX_DEPTH === undefined ? undefined : Number(process.env.RLM_MAX_DEPTH);
 const maxModelCalls =

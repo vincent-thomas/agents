@@ -363,6 +363,25 @@ suite("RLM", () => {
     assert.match(observations[0], /undefined/);
   });
 
+  test("terminates the run on a fatal JavaScript runtime rejection", async () => {
+    const faux = createFauxCore({});
+    faux.setResponses([
+      javascript("while (true) {}"),
+      fauxAssistantMessage("the model must not continue after the runtime closes"),
+    ]);
+    const rlm = new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        executionTimeoutMs: 100,
+      },
+      { streamFn: faux.streamSimple },
+    );
+
+    await assert.rejects(rlm.run("stop on timeout"), /exceeded 100ms timeout/);
+    assert.equal(faux.state.callCount, 1);
+  });
+
   test("returns JavaScript errors to the model and keeps the runtime alive", async () => {
     const observations: string[] = [];
     const faux = createFauxCore({});

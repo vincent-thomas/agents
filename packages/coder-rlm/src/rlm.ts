@@ -262,6 +262,13 @@ export class RLM {
 
     let stoppedForBudget = false;
     let activeModelCall = 0;
+    let fatalRuntimeError: Error | undefined;
+    let abortAgent: (() => void) | undefined;
+    const onFatalRuntimeError = (error: unknown) => {
+      if (fatalRuntimeError) return;
+      fatalRuntimeError = asError(error);
+      abortAgent?.();
+    };
     const agent = new Agent({
       initialState: {
         systemPrompt: isLeaf
@@ -269,17 +276,21 @@ export class RLM {
           : RLM_SYSTEM_PROMPT,
         model: this.options.model,
         thinkingLevel: this.options.thinkingLevel,
-        tools: runtime ? [createJavascriptTool(runtime)] : [],
+        tools: runtime
+          ? [createJavascriptTool(runtime, { onFatalError: onFatalRuntimeError })]
+          : [],
       },
       streamFn: this.streamFn,
       getApiKey: this.options.getApiKey,
       shouldStopAfterTurn: ({ toolResults }) => {
+        if (fatalRuntimeError) return true;
         if (toolResults.length === 0) return false;
         if (state.budget.acquire()) return false;
         stoppedForBudget = true;
         return true;
       },
     });
+    abortAgent = () => agent.abort();
     const unsubscribe = agent.subscribe(async (event) => {
       if (event.type === "turn_start") {
         activeModelCall = state.usage.startModelCall();
@@ -309,6 +320,7 @@ export class RLM {
       await agent.prompt(isLeaf ? buildLeafPrompt(prompt, context) : prompt);
       throwIfAborted(signal);
       if (state.budget.error) throw state.budget.error;
+      if (fatalRuntimeError) throw fatalRuntimeError;
       if (stoppedForBudget) {
         throw new Error(
           `RLM exceeded its ${state.budget.maximum} model-call limit before synthesis`,
@@ -320,9 +332,10 @@ export class RLM {
     } catch (error) {
       const failure = signal?.aborted
         ? abortError()
-        : stoppedForBudget && state.budget.error
-          ? new Error(`${state.budget.error.message} before synthesis`)
-          : (state.budget.error ?? error);
+        : (fatalRuntimeError ??
+          (stoppedForBudget && state.budget.error
+            ? new Error(`${state.budget.error.message} before synthesis`)
+            : (state.budget.error ?? error)));
       await this.emit({
         ...trace,
         type: "run_error",
@@ -387,6 +400,10 @@ function toolResultText(result: unknown): string {
       .map((item) => item.text)
       .join("\n") ?? ""
   );
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function errorMessage(error: unknown): string {

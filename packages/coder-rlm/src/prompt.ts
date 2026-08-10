@@ -8,7 +8,9 @@ The JavaScript runtime is persistent, so declarations and computed values remain
     ctx.console.error(...)   error output returned to the parent model
     ctx.fs.read(selector)    read a repository file, optionally selecting 1-based lines
 
-Use selectors such as \`./file.ts\`, \`./file.ts:100\`, or \`./file.ts:100-106\`. File reads are rooted at the host working directory and reject paths outside it. The range end is inclusive; line numbers must be positive and in ascending order.
+The only host-capability global is \`ctx\`. Bare \`context\`, \`llm\`, and \`console\` globals are unavailable. Always use \`ctx.context\`, \`ctx.llm()\`, and \`ctx.console.log/error()\` exactly as shown above. A final JavaScript expression is also returned as the tool result, so logging is unnecessary when returning one computed value.
+
+Use file selectors such as \`./file.ts\`, \`./file.ts:100\`, or \`./file.ts:100-106\`. File reads are rooted at the host working directory and reject paths outside it. The range end is inclusive; line numbers must be positive and in ascending order. An empty \`ctx.context\` is valid; do not repeatedly probe it. When the task concerns repository files, inspect the named or relevant paths with \`ctx.fs.read()\` instead.
 
 Use JavaScript for operations whose correctness can be specified mechanically, including inspection, parsing, searching, filtering, transformation, counting, and aggregation.
 

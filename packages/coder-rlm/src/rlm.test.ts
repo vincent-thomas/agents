@@ -40,6 +40,8 @@ suite("RLM", () => {
     assert.equal(seen.length, 1);
     assert.doesNotMatch(seen[0].systemPrompt ?? "", /SECRET_SENTINEL/);
     assert.match(seen[0].systemPrompt ?? "", /ctx\.context.*external context string/);
+    assert.match(seen[0].systemPrompt ?? "", /Bare .*console.* globals are unavailable/);
+    assert.match(seen[0].systemPrompt ?? "", /empty .*ctx\.context.* is valid/);
     assert.match(seen[0].systemPrompt ?? "", /correctness can be specified mechanically/);
     assert.match(seen[0].systemPrompt ?? "", /interpretation, judgment, or reasoning/);
     assert.match(seen[0].systemPrompt ?? "", /partition it, delegate the required judgment/);

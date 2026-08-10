@@ -176,6 +176,34 @@ suite("JavaScriptRuntime", () => {
     await assert.rejects(runtime.execute("while (true) {}"), /exceeded 100ms timeout/);
   });
 
+  test("aborts recursive calls when an execution times out", async () => {
+    let resolveAborted!: () => void;
+    const aborted = new Promise<void>((resolve) => {
+      resolveAborted = resolve;
+    });
+    const runtime = new JavaScriptRuntime({
+      context: "",
+      executionTimeoutMs: 100,
+      llm: async (_prompt, _context, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              resolveAborted();
+              reject(new DOMException("child aborted", "AbortError"));
+            },
+            { once: true },
+          );
+        }),
+    });
+
+    await assert.rejects(
+      runtime.execute('await ctx.llm("never finishes")'),
+      /exceeded 100ms timeout/,
+    );
+    await aborted;
+  });
+
   test("truncates console output", async () => {
     const runtime = new JavaScriptRuntime({
       context: "",

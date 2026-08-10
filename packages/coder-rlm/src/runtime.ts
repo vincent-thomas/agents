@@ -12,7 +12,7 @@ export interface JavaScriptExecutionResult {
 
 export interface JavaScriptRuntimeOptions {
   context: string;
-  llm: (prompt: string, context?: string) => Promise<string>;
+  llm: (prompt: string, context?: string, signal?: AbortSignal) => Promise<string>;
   executionTimeoutMs?: number;
   maxOutputChars?: number;
 }
@@ -35,6 +35,7 @@ export class JavaScriptRuntime {
   private rejectReady!: (error: Error) => void;
   private executionQueue: Promise<void> = Promise.resolve();
   private nextRequestId = 1;
+  private activeExecution: { requestId: number; abortController: AbortController } | undefined;
   private stderr = "";
   private closed = false;
 
@@ -81,6 +82,8 @@ export class JavaScriptRuntime {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
+    this.activeExecution?.abortController.abort();
+    this.activeExecution = undefined;
     this.child.kill("SIGKILL");
     const error = new Error("JavaScript runtime was disposed");
     this.rejectReady(error);
@@ -96,6 +99,8 @@ export class JavaScriptRuntime {
     await this.ready;
 
     const requestId = this.nextRequestId++;
+    const abortController = new AbortController();
+    this.activeExecution = { requestId, abortController };
     return new Promise((resolve, reject) => {
       let settled = false;
       const settle = (callback: () => void) => {
@@ -104,11 +109,13 @@ export class JavaScriptRuntime {
         clearTimeout(timeout);
         signal?.removeEventListener("abort", onAbort);
         this.pending.delete(requestId);
+        if (this.activeExecution?.requestId === requestId) this.activeExecution = undefined;
         callback();
       };
       const terminate = (error: Error) => {
         settle(() => reject(error));
         this.dispose();
+        abortController.abort();
       };
       const onAbort = () => terminate(abortError());
       const timeout = setTimeout(
@@ -180,9 +187,11 @@ export class JavaScriptRuntime {
       const result = await this.llm(
         String(message.prompt),
         message.context === undefined ? undefined : String(message.context),
+        this.activeExecution?.abortController.signal,
       );
       this.send({ type: "llmResult", callId: message.callId, result });
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
       this.send({
         type: "llmResult",
         callId: message.callId,
@@ -199,6 +208,8 @@ export class JavaScriptRuntime {
   private disposeWithError(error: Error): void {
     if (this.closed) return;
     this.closed = true;
+    this.activeExecution?.abortController.abort();
+    this.activeExecution = undefined;
     this.child.kill("SIGKILL");
     this.rejectReady(error);
     this.failAll(error);

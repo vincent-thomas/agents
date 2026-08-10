@@ -53,18 +53,22 @@ suite("RLM", () => {
 
   test("resolves credentials for root and recursive model calls", async () => {
     const seenApiKeys: Array<string | undefined> = [];
+    const seenReasoning: Array<string | undefined> = [];
     const faux = createFauxCore({});
     faux.setResponses([
       (_context, options) => {
         seenApiKeys.push(options?.apiKey);
+        seenReasoning.push(options?.reasoning);
         return javascript('ctx.console.log(await ctx.llm("delegate"))');
       },
       (_context, options) => {
         seenApiKeys.push(options?.apiKey);
+        seenReasoning.push(options?.reasoning);
         return fauxAssistantMessage("child");
       },
       (_context, options) => {
         seenApiKeys.push(options?.apiKey);
+        seenReasoning.push(options?.reasoning);
         return fauxAssistantMessage("root");
       },
     ]);
@@ -75,6 +79,7 @@ suite("RLM", () => {
         model: faux.getModel(),
         context: "delegated context",
         maxDepth: 1,
+        thinkingLevel: "high",
         getApiKey: (provider) => {
           resolvedProviders.push(provider);
           return "saved-pi-token";
@@ -85,6 +90,7 @@ suite("RLM", () => {
 
     assert.equal(answer, "root");
     assert.deepEqual(seenApiKeys, ["saved-pi-token", "saved-pi-token", "saved-pi-token"]);
+    assert.deepEqual(seenReasoning, ["high", "high", "high"]);
     assert.deepEqual(resolvedProviders, [faux.provider, faux.provider, faux.provider]);
   });
 
@@ -97,7 +103,7 @@ suite("RLM", () => {
       fauxAssistantMessage("root answer"),
     ]);
 
-    const answer = await new RLM(
+    const result = await new RLM(
       {
         model: faux.getModel(),
         context: "child context",
@@ -107,37 +113,59 @@ suite("RLM", () => {
         },
       },
       { streamFn: faux.streamSimple },
-    ).run("root task");
+    ).runDetailed("root task");
 
-    assert.equal(answer, "root answer");
+    assert.equal(result.text, "root answer");
+    assert.equal(result.usage.modelCalls, 3);
+    assert.ok(result.usage.totalTokens > 0);
     assert.deepEqual(
       events.filter((event) => event.type === "run_start").map((event) => event.depth),
       [0, 1],
     );
-    const toolStart = events.find(
-      (event) => event.type === "agent_event" && event.event.type === "tool_execution_start",
-    );
+    const [rootStart, childStart] = events.filter((event) => event.type === "run_start");
+    assert.equal(rootStart.runId, 0);
+    assert.equal(rootStart.parentRunId, undefined);
+    assert.equal(childStart.runId, 1);
+    assert.equal(childStart.parentRunId, 0);
+    assert.equal(events.filter((event) => event.type === "model_start").length, 3);
+    assert.equal(events.filter((event) => event.type === "model_end").length, 3);
+    const toolStart = events.find((event) => event.type === "javascript_start");
     assert.equal(toolStart?.depth, 0);
-    assert.match(
-      toolStart?.type === "agent_event" && toolStart.event.type === "tool_execution_start"
-        ? toolStart.event.args.code
-        : "",
-      /llm\("child task"/,
-    );
-    const toolEnd = events.find(
-      (event) => event.type === "agent_event" && event.event.type === "tool_execution_end",
-    );
+    assert.match(toolStart?.type === "javascript_start" ? toolStart.code : "", /llm\("child task"/);
+    const toolEnd = events.find((event) => event.type === "javascript_end");
     assert.equal(toolEnd?.depth, 0);
-    assert.match(
-      toolEnd?.type === "agent_event" && toolEnd.event.type === "tool_execution_end"
-        ? JSON.stringify(toolEnd.event.result)
-        : "",
-      /child answer/,
-    );
+    assert.match(toolEnd?.type === "javascript_end" ? toolEnd.output : "", /child answer/);
     assert.deepEqual(
       events.filter((event) => event.type === "run_end").map((event) => event.depth),
       [1, 0],
     );
+    const rootEnd = events.findLast((event) => event.type === "run_end" && event.depth === 0);
+    assert.deepEqual(rootEnd?.type === "run_end" ? rootEnd.usage : undefined, result.usage);
+  });
+
+  test("cancels a run and emits a stable error event", async () => {
+    const controller = new AbortController();
+    const events: RLMEvent[] = [];
+    const faux = createFauxCore({ tokensPerSecond: 1 });
+    faux.setResponses([fauxAssistantMessage("response that should be aborted")]);
+    const rlm = new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        onEvent: (event) => {
+          events.push(event);
+          if (event.type === "model_start") controller.abort();
+        },
+      },
+      { streamFn: faux.streamSimple },
+    );
+
+    await assert.rejects(rlm.run("cancel me", { signal: controller.signal }), {
+      name: "AbortError",
+    });
+    const failure = events.find((event) => event.type === "run_error");
+    assert.equal(failure?.type === "run_error" ? failure.error : "", "RLM run aborted");
+    assert.equal(failure?.type === "run_error" ? failure.usage.modelCalls : 0, 1);
   });
 
   test("lets JavaScript inspect context and preserve state across tool turns", async () => {

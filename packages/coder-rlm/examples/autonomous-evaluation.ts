@@ -69,28 +69,14 @@ function traceAndMeasure(event: RLMEvent): void {
     console.error(`${prefix} error: ${event.error}`);
     return;
   }
-  if (event.event.type === "turn_start") metrics.modelCalls++;
-  if (event.event.type === "tool_execution_start") {
+  if (event.type === "model_start") metrics.modelCalls++;
+  if (event.type === "javascript_start") {
     metrics.javascriptCalls++;
-    const code = event.event.args?.code;
-    console.error(`${prefix} javascript:\n${typeof code === "string" ? code : "<missing code>"}`);
-  } else if (event.event.type === "tool_execution_end") {
-    console.error(
-      `${prefix} javascript ${event.event.isError ? "error" : "result"}:\n${truncate(toolOutput(event.event.result), 4_000)}`,
-    );
+    console.error(`${prefix} javascript:\n${event.code}`);
+  } else if (event.type === "javascript_end") {
+    const output = truncate(event.output || "<no output>", 4_000);
+    console.error(`${prefix} javascript ${event.isError ? "error" : "result"}:\n${output}`);
   }
-}
-
-function toolOutput(result: unknown): string {
-  if (typeof result !== "object" || result === null || !("content" in result))
-    return String(result);
-  const content = (result as { content?: Array<{ type?: string; text?: string }> }).content;
-  return (
-    content
-      ?.filter((item) => item.type === "text")
-      .map((item) => item.text)
-      .join("\n") || "<no output>"
-  );
 }
 
 function truncate(value: string, maximum: number): string {

@@ -11,13 +11,31 @@ tool, `javascript({ code })`; the tool's persistent runtime exposes one capabili
 ```ts
 import { RLM } from "@vt-agent/coder-rlm";
 
-const rlm = new RLM({ model, context: hugeString, getApiKey });
+const rlm = new RLM({ model, context: hugeString, getApiKey, thinkingLevel: "high" });
 const result = await rlm.run("Find the major recurring architectural problems.");
 ```
 
-Pass `onEvent` to observe each depth-aware RLM lifecycle event and the underlying Pi agent
-events while a run is in progress. Tool start/end events expose the JavaScript code and its
-captured console output; recursive calls appear as nested `run_start`/`run_end` events.
+`thinkingLevel` uses Pi's normal reasoning levels, defaults to `low`, and is inherited by every
+recursive call. Pass an `AbortSignal` to cancel the root model, active recursive calls, and the
+JavaScript subprocess together:
+
+```ts
+await rlm.run(prompt, { signal: controller.signal });
+```
+
+For aggregate usage across the root and all recursive calls, use `runDetailed()`:
+
+```ts
+const { text, usage } = await rlm.runDetailed(prompt);
+console.log(usage.modelCalls, usage.totalTokens, usage.cost.total);
+```
+
+Pass `onEvent` to observe the stable, depth-aware RLM lifecycle while a run is in progress.
+Events include unique `runId`/`parentRunId` relationships and normalized `run_start`,
+`model_start`, `model_end`, `javascript_start`, `javascript_end`, `run_end`, and `run_error`
+records. JavaScript events expose generated code and captured console output; terminal events
+include aggregate usage. Pi's internal event types are deliberately not exposed as the public
+tracing contract.
 
 Top-level `await` is supported and declarations persist between JavaScript calls. Separate
 `run()` calls receive separate runtimes. At `maxDepth` (default `3`, minimum `1`), `ctx.llm()` becomes an
@@ -37,6 +55,11 @@ resolved. Generated code executes in
 a `node:vm` context with string/Wasm code generation disabled and no direct `process`,
 `require`, network, timers, or other host capabilities beyond the read-only `ctx.fs.read()` capability. A timeout hard-kills the
 runtime process.
+
+Cancellation and execution timeouts abort in-flight recursive calls before disposing the worker.
+Every run receives a fresh runtime, which is disposed on success, model failure, tool failure, or
+abort. These lifecycle guarantees do not expand the sandbox: generated JavaScript still receives
+only `context`, `llm()`, and `console`.
 
 This is capability reduction for an MVP, not a production security boundary. `node:vm` is not
 designed to safely execute actively hostile code, and the subprocess has no OS-level sandbox.

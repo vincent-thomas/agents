@@ -3,7 +3,7 @@ export const RLM_SYSTEM_PROMPT = `You are operating over external context that m
 The JavaScript runtime is persistent, so declarations and computed values remain available across tool calls. Its capabilities are exposed under the single global \`ctx\`:
 
     ctx.context                 the external context string
-    ctx.rlm.spawn(prompt, { name?, context? })  admit an independent child and return a handle
+    ctx.rlm.spawn(prompt, { name?, context?, tier? })  admit an independent child and return a handle (tier: fast, balanced, or deep; default balanced)
     ctx.rlm.waitAll(handles)     wait for admitted children and return structured results
     ctx.rlm.result(handle)       inspect a child's current structured result without waiting
     ctx.rlm.cancel(handle)       cancel a child and return its terminal result
@@ -19,7 +19,7 @@ Use file selectors such as \`./file.ts\`, \`./file.ts:100\`, or \`./file.ts:100-
 
 Use JavaScript for operations whose correctness can be specified mechanically, including inspection, parsing, searching, filtering, transformation, counting, and aggregation.
 
-Use \`ctx.rlm.spawn()\` when an intermediate result requires interpretation, judgment, or reasoning that cannot be implemented reliably as a mechanical operation. If the relevant evidence is too large to inspect directly, use JavaScript to partition it, delegate the required judgment over the partitions, and combine the structured results. Do not assume a child is complete until its result status is terminal.
+Choose the least expensive reliable tier. Use fast for mechanical or extractive work and clean summaries; balanced is the default for ordinary interpretation, judgment, or reasoning and review; reserve deep for ambiguity, security, architecture, conflicting evidence, consequential advice, or final synthesis. Large context alone is not a reason to use deep. If the relevant evidence is too large to inspect directly, use JavaScript to partition it, delegate the required judgment over the partitions, and combine the structured results. Do not assume a child is complete until its result status is terminal.
 
 Do not replace required judgment with an unvalidated shortcut or proxy. Do not claim information from the external context unless you have inspected or analyzed the relevant evidence.
 

@@ -45,13 +45,17 @@ suite("RLM", () => {
     assert.match(seen[0].systemPrompt ?? "", /correctness can be specified mechanically/);
     assert.match(seen[0].systemPrompt ?? "", /interpretation, judgment, or reasoning/);
     assert.match(seen[0].systemPrompt ?? "", /partition it, delegate the required judgment/);
+    assert.match(seen[0].systemPrompt ?? "", /least expensive reliable tier/);
+    assert.match(seen[0].systemPrompt ?? "", /Large context alone is not a reason to use deep/);
+    assert.match(seen[0].systemPrompt ?? "", /consequential advice, or final synthesis/);
+    assert.doesNotMatch(seen[0].systemPrompt ?? "", /gpt-5\.6-luna|openai-codex/);
     assert.match(seen[0].systemPrompt ?? "", /unvalidated shortcut or proxy/);
     assert.doesNotMatch(visibleText(seen[0]), /SECRET_SENTINEL/);
     assert.match(visibleText(seen[0]), /inspect it/);
     assert.equal(seen[0].tools?.map((tool) => tool.name).join(","), "javascript");
   });
 
-  test("defaults to high thinking and resolves recursive credentials", async () => {
+  test("defaults child recursion to balanced thinking and resolves recursive credentials", async () => {
     const seenApiKeys: Array<string | undefined> = [];
     const seenReasoning: Array<string | undefined> = [];
     const faux = createFauxCore({});
@@ -91,7 +95,7 @@ suite("RLM", () => {
 
     assert.equal(answer, "root");
     assert.deepEqual(seenApiKeys, ["saved-pi-token", "saved-pi-token", "saved-pi-token"]);
-    assert.deepEqual(seenReasoning, ["high", "high", "high"]);
+    assert.deepEqual(seenReasoning, ["high", "medium", "high"]);
     assert.deepEqual(resolvedProviders, [faux.provider, faux.provider, faux.provider]);
   });
 
@@ -506,6 +510,226 @@ suite("RLM", () => {
     assert.equal(answer, "recovered");
     assert.match(observations[0], /boom/);
     assert.match(observations[1], /still alive/);
+  });
+
+  test("applies tier profile model and thinking overrides while root stays configured", async () => {
+    const faux = createFauxCore({});
+    const rootModel = faux.getModel();
+    const fastModel = {
+      ...rootModel,
+      id: "profile-fast-model",
+      provider: "profile-provider",
+    } as typeof rootModel;
+    const seen: Array<{ model: string; reasoning: string | undefined }> = [];
+    const resolvedProviders: string[] = [];
+    faux.setResponses([
+      javascript(
+        'const h = await ctx.rlm.spawn("fast", { tier: "fast" }); await ctx.rlm.waitAll([h])',
+      ),
+      fauxAssistantMessage("fast"),
+      fauxAssistantMessage("root"),
+    ]);
+    const answer = await new RLM(
+      {
+        model: rootModel,
+        context: "",
+        thinkingLevel: "high",
+        tierProfiles: {
+          fast: { model: fastModel, thinkingLevel: "low", modelRequestTimeoutMs: 123 },
+        },
+        getApiKey: (provider) => {
+          resolvedProviders.push(provider);
+          return "token";
+        },
+      },
+      {
+        streamFn: (model, context, options) => {
+          seen.push({ model: model.id, reasoning: options?.reasoning });
+          return faux.streamSimple(model, context, options);
+        },
+      },
+    ).run("root");
+
+    assert.equal(answer, "root");
+    assert.deepEqual(
+      seen.map(({ model }) => model),
+      [rootModel.id, fastModel.id, rootModel.id],
+    );
+    assert.deepEqual(
+      seen.map(({ reasoning }) => reasoning),
+      ["high", "low", "high"],
+    );
+    assert.deepEqual(resolvedProviders, [
+      rootModel.provider,
+      "profile-provider",
+      rootModel.provider,
+    ]);
+  });
+
+  test("enforces a tier-specific model request timeout", async () => {
+    const rootFaux = createFauxCore({});
+    const childFaux = createFauxCore({ tokensPerSecond: 1 });
+    const rootModel = rootFaux.getModel();
+    const fastModel = { ...childFaux.getModel(), id: "slow-fast-model" };
+    const events: RLMEvent[] = [];
+    rootFaux.setResponses([
+      javascript(
+        'const h = await ctx.rlm.spawn("slow child", { tier: "fast" }); await ctx.rlm.waitAll([h])',
+      ),
+      fauxAssistantMessage("root recovered"),
+    ]);
+    childFaux.setResponses([fauxAssistantMessage("slow child response")]);
+
+    const answer = await new RLM(
+      {
+        model: rootModel,
+        context: "",
+        tierProfiles: {
+          fast: { model: fastModel, modelRequestTimeoutMs: 20 },
+        },
+        onEvent: (event) => events.push(event),
+      },
+      {
+        streamFn: (model, context, options) =>
+          model.id === fastModel.id
+            ? childFaux.streamSimple(model, context, options)
+            : rootFaux.streamSimple(model, context, options),
+      },
+    ).run("root");
+
+    assert.equal(answer, "root recovered");
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "child_error" &&
+          event.result.tier === "fast" &&
+          event.result.error?.message.includes("model request exceeded 20ms timeout"),
+      ),
+    );
+  });
+
+  test("selects independent nested tiers and serializes stable tier metadata", async () => {
+    const events: RLMEvent[] = [];
+    const faux = createFauxCore({});
+    faux.setResponses([
+      javascript(
+        'const h = await ctx.rlm.spawn("fast child", { tier: "fast" }); const r = (await ctx.rlm.waitAll([h]))[0]; ctx.console.log(JSON.stringify({ h, r }))',
+      ),
+      javascript(
+        'const h = await ctx.rlm.spawn("deep child", { tier: "deep" }); await ctx.rlm.waitAll([h])',
+      ),
+      fauxAssistantMessage("deep result"),
+      fauxAssistantMessage("fast result"),
+      fauxAssistantMessage("root result"),
+    ]);
+    const result = await new RLM(
+      { model: faux.getModel(), context: "", maxDepth: 2, onEvent: (event) => events.push(event) },
+      { streamFn: faux.streamSimple },
+    ).run("root");
+
+    assert.equal(result, "root result");
+    assert.deepEqual(
+      events.filter((event) => event.type === "child_spawn").map((event) => event.tier),
+      ["fast", "deep"],
+    );
+    const childEndTiers = events
+      .filter((event) => event.type === "child_end")
+      .map((event) => event.result.tier);
+    assert.deepEqual(childEndTiers, ["deep", "fast"]);
+    const fastHandle = events.find(
+      (event) => event.type === "child_spawn" && event.tier === "fast",
+    )?.handle;
+    assert.ok(fastHandle);
+    assert.deepEqual(JSON.parse(JSON.stringify(fastHandle)), fastHandle);
+    assert.equal("model" in fastHandle, false);
+  });
+
+  test("enforces the deep-child admission cap", async () => {
+    const events: RLMEvent[] = [];
+    const faux = createFauxCore({});
+    faux.setResponses([
+      javascript(
+        'const hs = []; for (let i = 0; i < 5; i++) { try { hs.push(await ctx.rlm.spawn("deep", { tier: "deep" })); } catch (error) { ctx.console.log(error.message); } } await ctx.rlm.waitAll(hs)',
+      ),
+      fauxAssistantMessage("one"),
+      fauxAssistantMessage("two"),
+      fauxAssistantMessage("three"),
+      fauxAssistantMessage("four"),
+      fauxAssistantMessage("root"),
+    ]);
+    const answer = await new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        maxDepth: 1,
+        maxDeepChildren: 4,
+        onEvent: (event) => events.push(event),
+      },
+      { streamFn: faux.streamSimple },
+    ).run("root");
+
+    assert.equal(answer, "root");
+    assert.equal(events.filter((event) => event.type === "child_spawn").length, 4);
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "javascript_end" &&
+          event.isError === false &&
+          event.output.includes("maximum deep children 4 reached"),
+      ),
+    );
+  });
+
+  test("rejects forged handles from a sibling run", async () => {
+    const events: RLMEvent[] = [];
+    const faux = createFauxCore({});
+    faux.setResponses([
+      javascript('const h = await ctx.rlm.spawn("child"); await ctx.rlm.waitAll([h])'),
+      javascript(
+        'await ctx.rlm.result({ id: 1, name: "child-1", parentRunId: 0, depth: 1, tier: "balanced" })',
+      ),
+      fauxAssistantMessage("child recovered"),
+      fauxAssistantMessage("root result"),
+    ]);
+    const answer = await new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        maxDepth: 2,
+        onEvent: (event) => events.push(event),
+      },
+      { streamFn: faux.streamSimple },
+    ).run("root");
+
+    assert.equal(answer, "root result");
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "javascript_end" &&
+          event.depth === 1 &&
+          event.isError &&
+          event.output.includes("does not belong to this run"),
+      ),
+    );
+  });
+
+  test("returns a strict invalid-tier error from the worker", async () => {
+    const { JavaScriptRuntime } = await import("./runtime.ts");
+    const runtime = new JavaScriptRuntime({
+      context: "",
+      rlm: {
+        spawn: async () => ({ id: 1, name: "child-1", parentRunId: 0, depth: 1, tier: "balanced" }),
+        waitAll: async () => [],
+        result: async (handle) => ({ handle, tier: handle.tier, status: "pending" }),
+        cancel: async (handle) => ({ handle, tier: handle.tier, status: "cancelled" }),
+      },
+    });
+    try {
+      const result = await runtime.execute('await ctx.rlm.spawn("bad", { tier: "bogus" })');
+      assert.match(result.error?.message ?? "", /tier must be fast, balanced, or deep/);
+    } finally {
+      runtime.dispose();
+    }
   });
 
   test("returns named host handles and terminal results without per-child usage claims", async () => {

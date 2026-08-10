@@ -4,7 +4,7 @@
 tool, `javascript({ code })`; the tool's persistent runtime exposes one capability global:
 
 - `ctx.context` — external context that is not inserted into the root model prompt
-- `ctx.rlm.spawn(prompt, { name?, context? })` — admit an independent child and receive a serializable handle
+- `ctx.rlm.spawn(prompt, { name?, context?, tier? })` — admit an independent child and receive a serializable handle (`tier` is `fast`, `balanced`, or `deep`; default `balanced`)
 - `ctx.rlm.waitAll(handles)` — wait for child results without treating model waiting as JavaScript stall
 - `ctx.rlm.result(handle)` and `ctx.rlm.cancel(handle)` — inspect or cancel a child
 - `ctx.console.log()` and `ctx.console.error()` — output returned to the parent model
@@ -17,9 +17,16 @@ const rlm = new RLM({ model, context: hugeString, getApiKey, thinkingLevel: "hig
 const result = await rlm.run("Find the major recurring architectural problems.");
 ```
 
-`thinkingLevel` uses Pi's normal reasoning levels, defaults to `high`, and is inherited by every
-recursive call. Pass an `AbortSignal` to cancel the root model, active recursive calls, and the
-JavaScript subprocess together:
+The root retains its configured model and thinking level. Child tiers default provider-agnostically
+to the root model with low/medium/high thinking for fast/balanced/deep. Override child profiles with
+`RLMOptions.tierProfiles`, selecting a model, thinking level, and/or request timeout per tier. Choose
+the least expensive reliable tier: fast is for mechanical, extractive work and clean summaries;
+balanced is the ordinary interpretation/review default; deep is scarce and reserved for ambiguity,
+security, architecture, conflicting evidence, consequential advice, or final synthesis. Large context
+alone is not a reason for deep. `maxDeepChildren` caps deep-child admission per top-level run (default 4).
+
+`thinkingLevel` uses Pi's normal reasoning levels and defaults to `high` for the root. Pass an
+`AbortSignal` to cancel the root model, active recursive calls, and the JavaScript subprocess together:
 
 ```ts
 await rlm.run(prompt, { signal: controller.signal });
@@ -35,7 +42,8 @@ console.log(usage.modelCalls, usage.totalTokens, usage.cost.total);
 Pass `onEvent` to observe the stable RLM lifecycle while a run is in progress. The examples render this lifecycle as append-only tree-aware progress: each line carries a branch path built from `runId`/`parentRunId` and child handle names, so interleaved parallel siblings remain distinct.
 Events include unique `runId`/`parentRunId` relationships and normalized `run_start`,
 `model_start`, `model_end`, `javascript_start`, `javascript_end`, `run_end`, and `run_error`
-records. JavaScript events expose generated code and captured console output; terminal events
+records. Child lifecycle records and serializable handles expose the selected tier, never the
+resolved model. JavaScript events expose generated code and captured console output; terminal events
 include aggregate usage. Events are queued per top-level run in admission order; asynchronous
 observer callbacks are serialized, and the queue is flushed before `runDetailed()` settles. If `onEvent` throws or rejects, the run is aborted and rejects with that
 observer error after cleanup; observer failures are never silently swallowed. Pi's internal event
@@ -46,7 +54,7 @@ Top-level `await` is supported and declarations persist between JavaScript calls
 
 ## Limits
 
-The MVP defaults to 32 model calls per top-level run, a 60-second JavaScript stall timeout, a 300-second per-model-request timeout, a 30-minute overall top-level run timeout, and 50,000 characters of tool output. `maxModelCalls`, `javascriptStallTimeoutMs`, `modelRequestTimeoutMs`, `runTimeoutMs`, and `maxOutputChars` can override those safeguards. The JavaScript watchdog only bounds stalled synchronous execution; heartbeats while `ctx.rlm.waitAll()` is waiting prevent model latency from being mistaken for a JavaScript stall. Each model request and the overall top-level run have separate host-enforced deadlines. The model-call budget is shared by all recursive
+The MVP defaults to 32 model calls per top-level run, a 60-second JavaScript stall timeout, a 300-second per-model-request timeout, a 30-minute overall top-level run timeout, 50,000 characters of tool output, and 4 deep children. `maxModelCalls`, `maxDeepChildren`, `javascriptStallTimeoutMs`, `modelRequestTimeoutMs`, `runTimeoutMs`, and `maxOutputChars` can override those safeguards. The JavaScript watchdog only bounds stalled synchronous execution; heartbeats while `ctx.rlm.waitAll()` is waiting prevent model latency from being mistaken for a JavaScript stall. Each model request and the overall top-level run have separate host-enforced deadlines. The model-call budget is shared by all recursive
 calls in one `run()`; when concurrent delegation exhausts it, active agent turns are stopped and the
 primary error remains the budget-limit error rather than a later runtime-lifecycle error.
 
@@ -69,8 +77,8 @@ isolation.
 ## Example
 
 The runtime requires `node` on `PATH`. The example loads Pi's normal model runtime and reuses
-credentials saved by Pi (normally in `~/.pi/agent/auth.json`). It defaults to
-`openai-codex`/`gpt-5.6-luna`, and RLM calls request high thinking; optionally choose
+credentials saved by Pi (normally in `~/.pi/agent/auth.json`). It defaults the root to
+`openai-codex`/`gpt-5.6-luna` and demonstrates tier-aware recursive calls; optionally choose
 `RLM_PROVIDER` and `RLM_MODEL`, then run:
 
 ```sh

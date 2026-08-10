@@ -37,6 +37,7 @@ const childHandle = (id: number, name: string, parentRunId: number, depth: numbe
   name,
   parentRunId,
   depth,
+  tier: "balanced" as const,
 });
 
 test("renders a root run with an identity-based root prefix", () => {
@@ -55,15 +56,19 @@ test("renders a root run with an identity-based root prefix", () => {
 test("uses child names and parent relationships for nested tree branches", () => {
   const renderer = new RLMEventRenderer();
   renderer.format(rootStart);
-  renderer.format({
-    type: "child_spawn",
-    runId: 0,
-    parentRunId: 0,
-    depth: 0,
-    handle: childHandle(1, "research", 0, 1),
-    prompt: "research",
-    contextLength: 12,
-  });
+  assert.equal(
+    renderer.format({
+      type: "child_spawn",
+      runId: 0,
+      parentRunId: 0,
+      depth: 0,
+      handle: childHandle(1, "research", 0, 1),
+      tier: "balanced",
+      prompt: "research",
+      contextLength: 12,
+    }),
+    "[rlm root] spawned research#1 [balanced] (context: 12 chars)",
+  );
   renderer.format({
     type: "child_start",
     runId: 1,
@@ -89,6 +94,7 @@ test("uses child names and parent relationships for nested tree branches", () =>
     parentRunId: 1,
     depth: 1,
     handle: childHandle(2, "summarize", 1, 2),
+    tier: "balanced",
     prompt: "summarize",
     contextLength: 4,
   });
@@ -115,6 +121,7 @@ test("keeps parallel sibling prefixes stable while events interleave", () => {
     parentRunId: 0,
     depth: 0,
     handle: left,
+    tier: "balanced",
     prompt: "left",
     contextLength: 1,
   });
@@ -124,6 +131,7 @@ test("keeps parallel sibling prefixes stable while events interleave", () => {
     parentRunId: 0,
     depth: 0,
     handle: right,
+    tier: "balanced",
     prompt: "right",
     contextLength: 1,
   });

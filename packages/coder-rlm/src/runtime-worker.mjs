@@ -143,6 +143,12 @@ function createRlm() {
         if (options?.context !== undefined && typeof options.context !== "string") {
           throw new TypeError("ctx.rlm.spawn() context must be a string when provided");
         }
+        if (
+          options?.tier !== undefined &&
+          (typeof options.tier !== "string" || !["fast", "balanced", "deep"].includes(options.tier))
+        ) {
+          throw new TypeError("ctx.rlm.spawn() tier must be fast, balanced, or deep");
+        }
         return createRlmCall("spawn", { prompt, options });
       }),
       enumerable: true,

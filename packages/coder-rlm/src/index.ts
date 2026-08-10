@@ -1,6 +1,7 @@
 export {
   RLM,
   type RLMEvent,
+  type RLMChildTierProfile,
   type RLMOptions,
   type RLMResult,
   type RLMRunOptions,
@@ -11,4 +12,5 @@ export type {
   RLMChildHandle,
   RLMChildResult,
   RLMChildStatus,
+  RLMChildTier,
 } from "./child-types.ts";

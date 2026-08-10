@@ -44,7 +44,7 @@ export class RLMEventRenderer {
       case "run_error":
         return `${prefix} error: ${truncate(singleLine(event.error), this.outputLimit)}`;
       case "child_spawn":
-        return `${prefix} spawned ${branchName(event.handle)} (context: ${event.contextLength} chars)`;
+        return `${prefix} spawned ${branchName(event.handle)}${event.tier ? ` [${event.tier}]` : ""} (context: ${event.contextLength} chars)`;
       case "child_start":
         return `${prefix} child started`;
       case "child_end":

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
-import type { RLMChildHandle, RLMChildResult } from "./child-types.ts";
+import type { RLMChildHandle, RLMChildResult, RLMChildTier } from "./child-types.ts";
 
 export interface JavaScriptExecutionResult {
   output: string;
@@ -11,7 +11,7 @@ export interface JavaScriptExecutionResult {
 export interface JavaScriptRuntimeRLM {
   spawn: (
     prompt: string,
-    options?: { name?: string; context?: string },
+    options?: { name?: string; context?: string; tier?: RLMChildTier },
     signal?: AbortSignal,
   ) => Promise<RLMChildHandle>;
   waitAll: (handles: RLMChildHandle[], signal?: AbortSignal) => Promise<RLMChildResult[]>;
@@ -270,6 +270,10 @@ export class JavaScriptRuntime {
                     message.options.context === undefined
                       ? undefined
                       : String(message.options.context),
+                  tier:
+                    message.options.tier === undefined
+                      ? undefined
+                      : (String(message.options.tier) as RLMChildTier),
                 },
             signal,
           );

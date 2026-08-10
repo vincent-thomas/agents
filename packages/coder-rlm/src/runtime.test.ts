@@ -7,17 +7,17 @@ import { JavaScriptRuntime, type JavaScriptRuntimeRLM } from "./runtime.ts";
 import type { RLMChildHandle, RLMChildResult } from "./child-types.ts";
 
 function testHandle(id: number, name = `child-${id}`): RLMChildHandle {
-  return { id, name, parentRunId: 0, depth: 1 };
+  return { id, name, parentRunId: 0, depth: 1, tier: "balanced" };
 }
 function testResult(handle: RLMChildHandle, text = "child result"): RLMChildResult {
-  return { handle, status: "succeeded", text };
+  return { handle, tier: handle.tier, status: "succeeded", text };
 }
 function testRlm(): JavaScriptRuntimeRLM {
   return {
     spawn: async (prompt, options) => testHandle(prompt === "one" ? 1 : 2, options?.name),
     waitAll: async (handles) => handles.map((handle) => testResult(handle)),
-    result: async (handle) => ({ handle, status: "pending" }),
-    cancel: async (handle) => ({ handle, status: "cancelled" }),
+    result: async (handle) => ({ handle, tier: handle.tier, status: "pending" }),
+    cancel: async (handle) => ({ handle, tier: handle.tier, status: "cancelled" }),
   };
 }
 
@@ -52,7 +52,7 @@ suite("JavaScriptRuntime", () => {
         waitAll: async (children) =>
           children.map((child) => testResult(child, child.name === "one" ? "one:ab" : "two:cd")),
         result: async (child) => testResult(child),
-        cancel: async (child) => ({ handle: child, status: "cancelled" }),
+        cancel: async (child) => ({ handle: child, tier: child.tier, status: "cancelled" }),
       },
     });
     try {

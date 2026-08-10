@@ -51,13 +51,31 @@ interface ResolvedOptions {
 
 class ModelCallBudget {
   used = 0;
+  private exhaustedError: Error | undefined;
+  private readonly exhaustionListeners = new Set<() => void>();
 
   constructor(readonly maximum: number) {}
 
   acquire(): boolean {
-    if (this.used >= this.maximum) return false;
+    if (this.used >= this.maximum) {
+      if (!this.exhaustedError) {
+        this.exhaustedError = new Error(`RLM exceeded its ${this.maximum} model-call limit`);
+        for (const listener of this.exhaustionListeners) listener();
+      }
+      return false;
+    }
     this.used += 1;
     return true;
+  }
+
+  get error(): Error | undefined {
+    return this.exhaustedError;
+  }
+
+  onExhausted(listener: () => void): () => void {
+    if (this.exhaustedError) listener();
+    else this.exhaustionListeners.add(listener);
+    return () => this.exhaustionListeners.delete(listener);
   }
 }
 
@@ -98,7 +116,7 @@ export class RLM {
     budget: ModelCallBudget,
   ): Promise<string> {
     if (!budget.acquire()) {
-      throw new Error(`RLM exceeded its ${budget.maximum} model-call limit`);
+      throw budget.error ?? new Error(`RLM exceeded its ${budget.maximum} model-call limit`);
     }
 
     const isLeaf = depth >= this.options.maxDepth;
@@ -142,19 +160,30 @@ export class RLM {
     const unsubscribe = agent.subscribe((event) =>
       this.emit({ type: "agent_event", depth, event }),
     );
+    const unsubscribeBudget = budget.onExhausted(() => agent.abort());
 
     try {
+      if (budget.error) throw budget.error;
       await agent.prompt(isLeaf ? buildLeafPrompt(prompt, context) : prompt);
+      if (budget.error) throw budget.error;
       if (stoppedForBudget) {
-        throw new Error(`RLM exceeded its ${budget.maximum} model-call limit before synthesis`);
+        throw (
+          budget.error ??
+          new Error(`RLM exceeded its ${budget.maximum} model-call limit before synthesis`)
+        );
       }
       const result = finalResponse(agent.state.messages);
       await this.emit({ type: "run_end", depth, result });
       return result;
     } catch (error) {
-      await this.emit({ type: "run_error", depth, error: errorMessage(error) });
-      throw error;
+      const failure =
+        stoppedForBudget && budget.error
+          ? new Error(`${budget.error.message} before synthesis`)
+          : (budget.error ?? error);
+      await this.emit({ type: "run_error", depth, error: errorMessage(failure) });
+      throw failure;
     } finally {
+      unsubscribeBudget();
       unsubscribe();
       runtime?.dispose();
     }

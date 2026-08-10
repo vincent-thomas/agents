@@ -250,6 +250,81 @@ suite("RLM", () => {
     assert.equal(faux.state.callCount, 1);
   });
 
+  test("preserves the primary budget error for concurrent recursive delegates", async () => {
+    const errors: string[] = [];
+    const toolErrors: string[] = [];
+    const faux = createFauxCore({});
+    faux.setResponses([
+      javascript(
+        'await Promise.all([ctx.llm("child one"), ctx.llm("child two"), ctx.llm("child three")])',
+      ),
+      javascript('await ctx.llm("grandchild")'),
+      javascript('await ctx.llm("grandchild")'),
+      javascript('await ctx.llm("grandchild")'),
+      fauxAssistantMessage("leaf one"),
+      fauxAssistantMessage("leaf two"),
+      fauxAssistantMessage("leaf three"),
+    ]);
+    const rlm = new RLM(
+      {
+        model: faux.getModel(),
+        context: "delegated",
+        maxDepth: 2,
+        maxModelCalls: 7,
+        onEvent: (event) => {
+          if (event.type === "run_error") errors.push(event.error);
+          if (
+            event.type === "agent_event" &&
+            event.event.type === "tool_execution_end" &&
+            event.event.isError
+          ) {
+            toolErrors.push(JSON.stringify(event.event.result));
+          }
+        },
+      },
+      { streamFn: faux.streamSimple },
+    );
+
+    await assert.rejects(rlm.run("start"), /model-call limit/);
+    assert.ok(errors.some((error) => /model-call limit/.test(error)));
+    assert.ok(errors.every((error) => !/runtime is closed/i.test(error)));
+    assert.ok(toolErrors.every((error) => !/runtime is closed/i.test(error)));
+  });
+
+  test("does not start a delayed recursive turn after sibling budget exhaustion", async () => {
+    let releaseRunStart!: () => void;
+    const runStartBarrier = new Promise<void>((resolve) => {
+      releaseRunStart = resolve;
+    });
+    const faux = createFauxCore({});
+    faux.setResponses([
+      javascript('await Promise.all([ctx.llm("delayed"), ctx.llm("exhausts budget")])'),
+    ]);
+    const rlm = new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        maxModelCalls: 2,
+        onEvent: async (event) => {
+          if (event.type === "run_start" && event.depth === 1) {
+            await runStartBarrier;
+          }
+          if (
+            event.type === "agent_event" &&
+            event.depth === 0 &&
+            event.event.type === "tool_execution_end"
+          ) {
+            releaseRunStart();
+          }
+        },
+      },
+      { streamFn: faux.streamSimple },
+    );
+
+    await assert.rejects(rlm.run("start"), /model-call limit/);
+    assert.equal(faux.state.callCount, 1);
+  });
+
   test("isolates separate top-level run invocations", async () => {
     const observations: string[] = [];
     const faux = createFauxCore({});

@@ -1,6 +1,8 @@
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { RLM, type RLMEvent } from "../src/index.ts";
 
+const DEFAULT_PROMPT_MAX_MODEL_CALLS = 64;
+
 const prompt = process.argv.slice(2).join(" ").trim();
 if (!prompt) {
   console.error('Usage: bun run --filter @vt-agent/coder-rlm example:prompt "your prompt"');
@@ -13,10 +15,10 @@ const maxDepth =
   process.env.RLM_MAX_DEPTH === undefined ? undefined : Number(process.env.RLM_MAX_DEPTH);
 const maxModelCalls =
   process.env.RLM_MAX_MODEL_CALLS === undefined
-    ? undefined
+    ? DEFAULT_PROMPT_MAX_MODEL_CALLS
     : Number(process.env.RLM_MAX_MODEL_CALLS);
 console.error(
-  `[rlm] loading ${provider}/${modelId} (max depth: ${maxDepth ?? 3}, model calls: ${maxModelCalls ?? 32})`,
+  `[rlm] loading ${provider}/${modelId} (max depth: ${maxDepth ?? 3}, model calls: ${maxModelCalls})`,
 );
 const modelRuntime = await ModelRuntime.create();
 const model = modelRuntime.getModel(provider, modelId);

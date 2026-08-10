@@ -28,7 +28,9 @@ in the leaf prompt.
 
 The MVP defaults to 32 model calls per top-level run, a 60-second timeout per JavaScript
 execution, and 50,000 characters of tool output. `maxModelCalls`, `executionTimeoutMs`, and
-`maxOutputChars` can override those safeguards.
+`maxOutputChars` can override those safeguards. The model-call budget is shared by all recursive
+calls in one `run()`; when concurrent delegation exhausts it, active agent turns are stopped and the
+primary error remains the budget-limit error rather than a later runtime-lifecycle error.
 
 The runtime is a separate Node process with only the host `PATH` retained so Node can be
 resolved. Generated code executes in
@@ -58,9 +60,11 @@ bun run --filter @vt-agent/coder-rlm example:prompt "Explain how recursive deleg
 ```
 
 The prompt example prints depth-aware progress, recursive calls, and JavaScript tool code/output to
-stderr, leaving the final answer on stdout. Configure recursion with positive-integer environment
-variables `RLM_MAX_DEPTH` (default `3`) and `RLM_MAX_MODEL_CALLS` (default `32`); invalid values
-are rejected using the same validation as `RLMOptions`:
+stderr, leaving the final answer on stdout. It uses a demo-oriented default of 64 model calls so
+several concurrent delegates can each recurse and still return their parent synthesis; the `RLM`
+library default remains the deliberate 32-call safeguard. Configure recursion with positive-integer
+environment variables `RLM_MAX_DEPTH` (default `3`) and `RLM_MAX_MODEL_CALLS` (default `64` for this
+example); invalid values are rejected using the same validation as `RLMOptions`:
 
 ```sh
 RLM_MAX_DEPTH=4 RLM_MAX_MODEL_CALLS=48 \

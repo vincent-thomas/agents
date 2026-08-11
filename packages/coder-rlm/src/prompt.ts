@@ -27,21 +27,23 @@ Do not replace required judgment with an unvalidated shortcut or proxy. Do not c
 
 When you have sufficient evidence, answer the user's request.`;
 
-/** Prompt for a caller-provided literal replacement context. */
+/** Prompt for a caller-provided read-only facade context. */
 export function buildCustomSystemPrompt(ctx: RLMContext): string {
   const inventory = rlmContextInventory(ctx)
     .map((line) => `    ${line}`)
     .join("\n");
   return `You are solving a task with caller-defined capabilities.
 
-The persistent JavaScript runtime exposes the single global \`ctx\`, which is the exact live host object supplied by the caller. It is the literal replacement for, and replaces rather than merges with, the default capabilities. The object is shared by every runtime in this RLM run, including recursive runs. Mutations, cycles, class instances, accessors, symbols, and functions retain ordinary JavaScript identity and semantics. Defaults are absent unless the caller put them on this object.
+The persistent JavaScript runtime exposes the single global \`ctx\`, a live read-only facade over the caller-supplied object. It is the replacement for, and replaces rather than merges with, the default capabilities. The facade is shared by every runtime in this RLM run, including recursive runs. Root assignments, deletion, descriptor changes, prototype changes, and freezing/sealing attempts are rejected. Root reads, symbols, reflection, cycles, and live source changes work through the facade.
 
-This custom context executes unsafely in-process and is not a security boundary: supplied host prototypes and constructor access are exposed to JavaScript. Do not use custom ctx mode for untrusted code. In-process execution cannot reliably interrupt synchronous hostile or infinite code; javascriptStallTimeoutMs and worker/process isolation do not protect this mode. An asynchronous cell can resume and mutate ctx even after its caller has timed out or aborted.
+Nested and function-returned objects are live mutable views: writes forward to the caller's originals, and references back to the supplied root resolve to the root facade. Nested preventExtensions/seal/freeze operations are rejected so the live membrane can preserve its virtual descriptors. Top-level functions remain callable with host authority and may mutate the source; arguments and return values cross the facade automatically. Accessors run with their original host receiver, but root setters are not exposed through assignment or descriptors. Keep cell-local state in mutable values reachable from \`ctx\`, not by assigning root keys.
+
+This custom context executes unsafely in-process and is not a security boundary: functions and reachable nested host prototypes/classes may authorize arbitrary host behavior. Do not use custom ctx mode for untrusted code. In-process execution cannot reliably interrupt synchronous hostile or infinite code; javascriptStallTimeoutMs and worker/process isolation do not protect this mode. An asynchronous cell can resume and mutate reachable source values even after its caller has timed out or aborted.
 
 Bounded structural inventory (escaped paths and kinds only; property values are not provided and accessors are listed without being invoked):
 ${inventory || "    ctx: object"}
 
-The inventory can be truncated; inspect the exact live \`ctx\` object from JavaScript when more structure is needed. Each cell has local declarations; store cross-call state on ctx, which remains the same live object. Top-level await is supported. A single expression returns its value, while statement cells should write results to ctx or use a caller-provided output capability. Because this is the caller's object, host recursion exists only when the caller supplies it (custom ctx replaces defaults).
+The inventory can be truncated; inspect the live \`ctx\` facade from JavaScript when more structure is needed. Each cell has local declarations. Top-level await is supported. A single expression returns its value, while statement cells should write results to mutable values reachable from \`ctx\` or use a caller-provided output capability. Because this is the caller's context, host recursion exists only when the caller supplies it (custom ctx replaces defaults).
 
 Use JavaScript for operations whose correctness can be specified mechanically, including inspection, parsing, searching, filtering, transformation, counting, and aggregation. Do not replace required judgment with an unvalidated shortcut or proxy. Do not claim information unless you have inspected or analyzed the relevant evidence.
 

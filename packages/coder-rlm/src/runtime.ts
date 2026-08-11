@@ -28,7 +28,7 @@ export interface JavaScriptRuntimeRLM {
 
 export interface JavaScriptRuntimeOptions {
   context: string;
-  /** Exact live context; its presence selects the in-process runtime factory. */
+  /** Supplied context; its presence selects the in-process read-only-facade runtime. */
   ctx?: RLMContext;
   rlm: JavaScriptRuntimeRLM;
   javascriptStallTimeoutMs?: number;
@@ -79,7 +79,7 @@ export class JavaScriptRuntime {
   constructor(options: JavaScriptRuntimeOptions) {
     if (options.ctx !== undefined) {
       throw new TypeError(
-        "JavaScriptRuntime cannot preserve custom ctx identity; use InProcessJavaScriptRuntime",
+        "JavaScriptRuntime cannot run custom ctx; use InProcessJavaScriptRuntime",
       );
     }
     this.javascriptStallTimeoutMs = positiveInteger(

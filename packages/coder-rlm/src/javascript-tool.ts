@@ -22,7 +22,7 @@ export function createJavascriptTool(
     name: "javascript",
     label: "JavaScript",
     description: options.customContext
-      ? "Execute JavaScript in a persistent runtime over the configured capabilities in the exact live host ctx object described in the system instructions. This mode is unsafe and is not a security boundary."
+      ? "Execute JavaScript in a persistent runtime over the configured capabilities through the live read-only ctx facade described in the system instructions. Nested and returned values are mutable, and configured functions may have host authority. This mode is unsafe and is not a security boundary."
       : "Execute JavaScript in a persistent, capability-constrained runtime. Capabilities are exposed under ctx: ctx.context, ctx.rlm.spawn/waitAll/result/cancel() (spawn tiers: fast, balanced, deep), ctx.console.log/error(), and the read-only ctx.fs.read(selector).",
     parameters,
     executionMode: "sequential",

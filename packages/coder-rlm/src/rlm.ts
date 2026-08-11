@@ -47,7 +47,7 @@ export interface RLMChildTierProfile {
 export interface RLMOptions {
   model: Model<any>;
   context: string;
-  /** Exact live host object; selects unsafe in-process JavaScript execution. */
+  /** Host object exposed through a live read-only root facade in unsafe in-process mode. */
   ctx?: RLMContext;
   thinkingLevel?: AgentState["thinkingLevel"];
   /** Host-side overrides for the provider-agnostic fast/balanced/deep defaults. */

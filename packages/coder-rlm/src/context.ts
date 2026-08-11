@@ -1,7 +1,6 @@
 /**
- * The exact host object supplied as a custom RLM context. Custom contexts are
- * intentionally not JSON-like: prototypes, accessors, functions, cycles, and
- * mutations remain live in the in-process runtime.
+ * The host object supplied as a custom RLM context. The in-process runtime
+ * exposes a live read-only root facade with mutable nested values.
  */
 export type RLMContext = object;
 
@@ -71,7 +70,7 @@ export function rlmContextInventory(ctx: RLMContext): string[] {
   visit(ctx, "ctx", 0);
   if (omitted) {
     if (inventory.length === MAX_INVENTORY_LINES) inventory.pop();
-    inventory.push("… additional ctx entries omitted; inspect the exact live ctx from JavaScript");
+    inventory.push("… additional ctx entries omitted; inspect the live ctx facade from JavaScript");
   }
   return inventory;
 }

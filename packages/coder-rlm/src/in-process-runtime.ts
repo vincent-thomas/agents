@@ -1,5 +1,6 @@
 import { formatWithOptions } from "node:util";
 import type { RLMContext } from "./context.ts";
+import { createReadOnlyContextFacade } from "./membrane.ts";
 import type {
   JavaScriptExecutionResult,
   JavaScriptRuntimeOptions,
@@ -8,9 +9,9 @@ import type {
 
 /**
  * An intentionally unsafe runtime for caller-owned contexts. Generated code
- * executes directly in the host realm with the supplied object as its ctx
- * argument, preserving exact identity and ordinary JavaScript semantics. This
- * is trusted-code execution, not a security boundary.
+ * executes directly in the host realm with a read-only facade over the
+ * supplied object as its ctx argument. This is a write boundary around the
+ * root context, not a security boundary.
  */
 export class InProcessJavaScriptRuntime implements JavaScriptRuntimeLike {
   private readonly ctx: RLMContext;
@@ -31,7 +32,7 @@ export class InProcessJavaScriptRuntime implements JavaScriptRuntimeLike {
       "javascriptStallTimeoutMs",
     );
     this.ownerSignal = options.signal;
-    this.ctx = options.ctx;
+    this.ctx = createReadOnlyContextFacade(options.ctx);
   }
 
   execute(code: string, signal?: AbortSignal): Promise<JavaScriptExecutionResult> {
@@ -185,7 +186,7 @@ function formatValue(value: unknown, max: number): string {
       depth: 5,
       maxArrayLength: 100,
       maxStringLength: Math.min(max, 20_000),
-      customInspect: false,
+      customInspect: true,
       getters: false,
       breakLength: 100,
     },

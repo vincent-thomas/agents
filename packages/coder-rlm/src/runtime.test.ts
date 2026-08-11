@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { suite, test } from "node:test";
 import { InProcessJavaScriptRuntime } from "./in-process-runtime.ts";
+import { createReadOnlyContextFacade } from "./membrane.ts";
 import { JavaScriptRuntime, type JavaScriptRuntimeRLM } from "./runtime.ts";
 import type { RLMChildHandle, RLMChildResult } from "./child-types.ts";
 
@@ -28,6 +29,60 @@ function testRlm(): JavaScriptRuntimeRLM {
 }
 
 suite("JavaScriptRuntime", () => {
+  test("read-only context facade membranes root traps, cycles, accessors, and returns", async () => {
+    const symbol = Symbol("secret");
+    let setterCalls = 0;
+    const source: any = {
+      nested: { value: 1 },
+      self: undefined,
+      [symbol]: "symbol",
+      get answer() {
+        return this.nested.value;
+      },
+      set answer(_value: number) {
+        setterCalls += 1;
+      },
+      method(value: any) {
+        this.nested.value += value.nested.value;
+        return this;
+      },
+      async returned() {
+        return { source: this };
+      },
+    };
+    source.self = source;
+    source.list = [{ root: source }];
+    Object.defineProperty(source, "fixed", { value: { root: source }, enumerable: true });
+    const facade = createReadOnlyContextFacade(source) as any;
+
+    assert.notEqual(facade, source);
+    assert.equal(Object.getPrototypeOf(facade), null);
+    assert.deepEqual(Reflect.ownKeys(facade), Reflect.ownKeys(source));
+    assert.equal(Reflect.get(facade, symbol), "symbol");
+    assert.equal(Reflect.getOwnPropertyDescriptor(facade, "fixed")?.configurable, true);
+    assert.equal(Reflect.getOwnPropertyDescriptor(facade, "self")?.value, facade);
+    const answerDescriptor = Reflect.getOwnPropertyDescriptor(facade, "answer")!;
+    assert.equal(answerDescriptor.get!(), 1);
+    assert.equal(answerDescriptor.set, undefined);
+    assert.throws(() => Reflect.set(facade, "answer", 4), TypeError);
+    assert.equal(setterCalls, 0);
+    assert.throws(() => Reflect.deleteProperty(facade, "nested"), TypeError);
+    assert.throws(() => Reflect.defineProperty(facade, "newKey", { value: 1 }), TypeError);
+    assert.throws(() => Reflect.setPrototypeOf(facade, {}), TypeError);
+    assert.throws(() => Reflect.preventExtensions(facade), TypeError);
+
+    facade.nested.value = 3;
+    assert.equal(source.nested.value, 3);
+    assert.equal(facade.self, facade);
+    assert.equal(facade.list.map((item: any) => item.root === facade)[0], true);
+    assert.equal(facade.method(facade), facade);
+    assert.equal(source.nested.value, 6);
+    const returned = await facade.returned();
+    assert.equal(returned.source, facade);
+    returned.extra = true;
+    assert.equal(returned.extra, true);
+  });
+
   test("inspects external context and preserves declarations", async () => {
     const runtime = new JavaScriptRuntime({
       context: "NEEDLE x NEEDLE",
@@ -524,48 +579,72 @@ suite("JavaScriptRuntime", () => {
     }
   });
 
-  test("custom in-process runtime preserves exact identity and host semantics", async () => {
+  test("custom in-process runtime exposes a live read-only root facade", async () => {
     class Widget {
       value = 4;
       get doubled() {
         return this.value * 2;
       }
     }
+    const symbol = Symbol("value");
     const ctx: any = {
       count: 1,
       self: undefined,
       widget: new Widget(),
+      nested: { value: 2 },
       callback(value: unknown) {
         this.received = value;
         return this === value;
       },
       async increment(value: number) {
         await Promise.resolve();
-        return value + 1;
+        return { value: value + 1, self: this };
       },
     };
+    ctx[symbol] = "symbol";
     ctx.self = ctx;
     const runtime = new InProcessJavaScriptRuntime({ ctx, context: "ignored", rlm: testRlm() });
     try {
       assert.equal(
         (
           await runtime.execute(
-            "ctx.self === ctx && ctx.widget.doubled === 8 && !Object.isFrozen(ctx)",
+            "Object.getPrototypeOf(ctx) === null && ctx.self === ctx && ctx.widget.doubled === 8 && Reflect.get(ctx, Reflect.ownKeys(ctx).find((key) => typeof key === 'symbol')) === 'symbol'",
           )
         ).output,
         "[result] true",
       );
+      assert.equal(
+        (await runtime.execute("ctx.self === ctx && Reflect.ownKeys(ctx).length > 0")).output,
+        "[result] true",
+      );
       assert.equal((await runtime.execute("ctx.callback(ctx)")).output, "[result] true");
       assert.equal(ctx.received, ctx);
-      ctx.count = 9;
-      assert.equal((await runtime.execute("ctx.count")).output, "[result] 9");
-      assert.equal((await runtime.execute("ctx.count = 12")).output, "[result] 12");
-      assert.equal(ctx.count, 12);
+      assert.equal(
+        (await runtime.execute("(() => { ctx.nested.value = 7; return ctx.nested.value; })()"))
+          .output,
+        "[result] 7",
+      );
+      assert.equal(ctx.nested.value, 7);
+      assert.equal((await runtime.execute("ctx.count = 12")).error?.name, "TypeError");
+      assert.equal(ctx.count, 1);
       assert.equal(
         (await runtime.execute("ctx.widget.constructor.name")).output,
         "[result] Widget",
       );
-      assert.equal((await runtime.execute("await ctx.increment(4)")).output, "[result] 5");
+      const incremented = await runtime.execute("await ctx.increment(4)");
+      assert.match(incremented.output, /value: 5/);
+      assert.match(incremented.output, /self:/);
+      assert.equal((await runtime.execute("ctx.count")).output, "[result] 1");
+      ctx.count = 9;
+      assert.equal((await runtime.execute("ctx.count")).output, "[result] 9");
+      assert.equal(
+        (
+          await runtime.execute(
+            "Reflect.get(ctx, Reflect.ownKeys(ctx).find((key) => typeof key === 'symbol'))",
+          )
+        ).output,
+        "[result] symbol",
+      );
       assert.equal(
         (await runtime.execute("const local = 5")).output,
         "JavaScript completed with no output.",
@@ -597,7 +676,8 @@ suite("JavaScriptRuntime", () => {
     const started = new Promise<void>((resolve) => {
       startedResolve = resolve;
     });
-    const ctx: { wait: () => Promise<string>; late?: boolean } = {
+    const ctx: { wait: () => Promise<string>; state: { late?: boolean } } = {
+      state: {},
       wait: async () => {
         startedResolve();
         await new Promise<void>((resolve) => {
@@ -607,13 +687,13 @@ suite("JavaScriptRuntime", () => {
       },
     };
     const runtime = new InProcessJavaScriptRuntime({ ctx, context: "", rlm: testRlm() });
-    const execution = runtime.execute("await ctx.wait(); ctx.late = true");
+    const execution = runtime.execute("await ctx.wait(); ctx.state.late = true");
     await started;
     runtime.dispose();
     await assert.rejects(execution, /disposed/);
     release();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(ctx.late, true);
+    assert.equal(ctx.state.late, true);
   });
 
   test("truncates console output", async () => {

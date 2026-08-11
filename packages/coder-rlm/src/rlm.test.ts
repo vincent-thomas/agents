@@ -20,7 +20,7 @@ function visibleText(context: Context): string {
 }
 
 suite("RLM", () => {
-  test("uses the exact custom ctx and describes its replacement semantics", async () => {
+  test("uses a live read-only custom ctx facade and describes its replacement semantics", async () => {
     const faux = createFauxCore({});
     const seen: Context[] = [];
     faux.setResponses([
@@ -33,12 +33,11 @@ suite("RLM", () => {
         return fauxAssistantMessage("custom answer");
       },
     ]);
-    let receivedExactCtx = false;
     const ctx: any = { nested: {} };
     ctx.nested.answer = (value: any) => ({ value });
     ctx.nested.same = (value: unknown) => {
-      receivedExactCtx = value === ctx;
-      return receivedExactCtx;
+      ctx.nested.sameValueIsOriginal = value === ctx;
+      return ctx.nested.sameValueIsOriginal;
     };
     const answer = await new RLM(
       {
@@ -50,8 +49,8 @@ suite("RLM", () => {
       { streamFn: faux.streamSimple },
     ).run("task");
     assert.equal(answer, "custom answer");
-    assert.equal(receivedExactCtx, true);
-    assert.match(seen[0].systemPrompt ?? "", /literal replacement/);
+    assert.equal(ctx.nested.sameValueIsOriginal, true);
+    assert.match(seen[0].systemPrompt ?? "", /read-only facade/);
     assert.match(seen[0].systemPrompt ?? "", /ctx\.nested\.answer: function/);
     assert.doesNotMatch(seen[0].systemPrompt ?? "", /host context must not be injected/);
     assert.doesNotMatch(seen[0].systemPrompt ?? "", /ctx\.fs|ctx\.rlm|ctx\.console/);

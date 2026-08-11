@@ -15,7 +15,7 @@ import { RLM } from "@vt-agent/coder-rlm";
 
 const rlm = new RLM({ model, context: hugeString, getApiKey, thinkingLevel: "high" });
 
-// A custom ctx is an exact, unsafe in-process replacement: defaults are not merged in.
+// A custom ctx is a live read-only facade over an unsafe in-process replacement; defaults are not merged in.
 const custom = new RLM({
   model,
   context: hugeString, // host/delegation context; not injected into custom ctx
@@ -59,9 +59,9 @@ observer callbacks are serialized and each callback is host-bounded by `eventObs
 types are deliberately not exposed as the public tracing contract.
 
 Top-level `await` is supported and declarations persist between JavaScript calls in default worker
-mode. Custom-`ctx` cells have local declarations and should store cross-call state on the exact `ctx`
-object. Separate `run()` calls receive separate runtimes; a supplied custom `ctx` remains the same shared host object,
-so mutations to it remain visible. At `maxDepth` (default `3`, minimum `1`), spawned children become ordinary Pi model calls without the JavaScript tool; only that delegated leaf context is placed in the leaf prompt. Child handles and terminal results are host-owned and serializable, so children continue after the JavaScript cell returns.
+mode. Custom-`ctx` cells have local declarations and should store cross-call state in mutable values
+reachable from the `ctx` facade, not by assigning root keys. Separate `run()` calls receive separate runtimes;
+a supplied custom `ctx` remains the same shared host source, so source changes remain visible through its facade. At `maxDepth` (default `3`, minimum `1`), spawned children become ordinary Pi model calls without the JavaScript tool; only that delegated leaf context is placed in the leaf prompt. Child handles and terminal results are host-owned and serializable, so children continue after the JavaScript cell returns.
 
 ## Limits
 
@@ -78,15 +78,18 @@ copied into frozen sandbox arrays or null-prototype records, and a timeout hard-
 In default worker mode, cancellation and deadlines abort in-flight recursive calls before disposing the runtime. Yielding custom-`ctx` execution can be rejected on cancellation or timeout, but synchronous custom code prevents host timers and abort handlers from running.
 
 Supplying `RLMOptions.ctx` deliberately selects a different, unsafe mode. Generated cells execute as
-host-realm functions whose `ctx` argument is the exact supplied object reference, replacing
-`{ context, fs, rlm, console }`;
-`RLMOptions.context` remains host/delegation context and is not injected. Prototypes, accessors,
-functions, classes, cycles, identity, and mutations are preserved. Consequently generated code can
-reach host constructors through supplied values. The worker boundary, hard-kill guarantee, and
-`javascriptStallTimeoutMs` protection against synchronous infinite code do not apply. An asynchronous
-execution can be rejected on timeout or abort, but already-running host callbacks cannot be forcibly
-canceled. A suspended cell may resume after its caller has been rejected and can still mutate the
-shared `ctx`; exact object identity makes such late effects unavoidable.
+host-realm functions whose `ctx` argument is a live read-only facade over the supplied object, replacing
+`{ context, fs, rlm, console }`; root writes, deletion, descriptor changes, prototype changes, and
+freezing/sealing attempts are rejected. `RLMOptions.context` remains host/delegation context and is not
+injected. Nested and function-returned objects are live mutable membrane views: writes forward to their
+originals, cycles and references back to the root resolve to the facade, and arrays/classes/accessors retain
+host-receiver behavior. Nested preventExtensions/seal/freeze operations are rejected so the live membrane can
+preserve virtual descriptors. Calling a top-level function as a `ctx` method uses the original source as `this`;
+such functions can have host authority and may mutate the source. Arguments and return values are wrapped across the membrane. The root
+facade has no prototype, but this is not a security boundary. The worker boundary, hard-kill guarantee, and
+`javascriptStallTimeoutMs` protection against synchronous infinite code do not apply. An asynchronous execution
+can be rejected on timeout or abort, but already-running host callbacks cannot be forcibly canceled. A suspended
+cell may resume after its caller has been rejected and can still mutate reachable shared source values.
 
 Default worker mode is capability reduction for an MVP, not a production security boundary because
 `node:vm` is not designed for actively hostile code and the subprocess has no OS-level sandbox.

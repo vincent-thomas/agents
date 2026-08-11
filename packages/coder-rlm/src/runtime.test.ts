@@ -523,6 +523,181 @@ suite("JavaScriptRuntime", () => {
     }
   });
 
+  test("constructs a frozen literal custom context and invokes nested callbacks", async () => {
+    const owner = { prefix: "host" };
+    const runtime = new JavaScriptRuntime({
+      context: "not injected",
+      ctx: {
+        nested: {
+          prefix: "host",
+          values: [1, true, null],
+          sync(this: typeof owner, value: any) {
+            return { text: this.prefix + value.n };
+          },
+          async: async (value: any) => [value, 2],
+        },
+        ownerFn: function (this: typeof owner) {
+          return this.prefix;
+        }.bind(owner),
+      },
+      rlm: testRlm(),
+    });
+    try {
+      const result = await runtime.execute(`
+        const a = await ctx.nested.sync({ n: 3 });
+        const b = await ctx.nested.async("ok");
+        [Object.keys(ctx).join(","), a.text, b.join("/"), typeof ctx.context,
+          Object.isFrozen(ctx), Object.isFrozen(ctx.nested), Object.isFrozen(ctx.nested.values),
+          Object.getPrototypeOf(ctx) === null, await ctx.ownerFn()].join(" ");
+      `);
+      assert.equal(
+        result.output,
+        "[result] nested,ownerFn host3 ok/2 undefined true true true true host",
+        result.error?.message,
+      );
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  test("keeps custom callback results and errors inside the sandbox realm", async () => {
+    let hostileThenCalled = false;
+    const runtime = new JavaScriptRuntime({
+      context: "",
+      ctx: {
+        result: () => ({ nested: [{ value: 7 }] }),
+        fail: () => {
+          throw new Error("host callback failed");
+        },
+        hostile: () =>
+          ({
+            then() {
+              hostileThenCalled = true;
+            },
+          }) as any,
+      },
+      rlm: testRlm(),
+    });
+    try {
+      const result = await runtime.execute(`
+        const value = await ctx.result();
+        let resultEscapeBlocked = false;
+        try { value.constructor.constructor("return process")(); } catch { resultEscapeBlocked = true; }
+        let safeError = false;
+        try { await ctx.fail(); } catch (error) {
+          safeError = error.message === "host callback failed" && error.constructor === undefined;
+        }
+        let thenableRejected = false;
+        try { await ctx.hostile(); } catch (error) {
+          thenableRejected = error.message.includes("JSON-like");
+        }
+        [resultEscapeBlocked, Array.isArray(value.nested), value.nested.map((item) => item.value),
+          Object.isFrozen(value), Object.isFrozen(value.nested), safeError, thenableRejected].join(" ");
+      `);
+      assert.equal(result.output, "[result] true true 7 true true true true");
+      assert.equal(hostileThenCalled, false);
+      assert.equal((await runtime.execute('"alive"')).output, "[result] alive");
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  test("does not treat an awaited custom callback as stalled JavaScript", async () => {
+    const runtime = new JavaScriptRuntime({
+      context: "",
+      ctx: {
+        wait: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return "done";
+        },
+      },
+      rlm: testRlm(),
+      javascriptStallTimeoutMs: 50,
+    });
+    try {
+      assert.equal((await runtime.execute("await ctx.wait()"))?.output, "[result] done");
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  test("detaches a pending custom callback when the runtime is disposed", async () => {
+    let release!: (value: number) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const runtime = new JavaScriptRuntime({
+      context: "",
+      ctx: {
+        wait: async () => {
+          markStarted();
+          return new Promise<number>((resolve) => {
+            release = resolve;
+          });
+        },
+      },
+      rlm: testRlm(),
+    });
+    const execution = runtime.execute("await ctx.wait()");
+    await started;
+    runtime.dispose();
+    await assert.rejects(execution, /disposed/);
+    release(1);
+    await Promise.resolve();
+  });
+
+  test("rejects invalid custom context shapes early", () => {
+    const invalid = [
+      [
+        "cycle",
+        (() => {
+          const value: any = {};
+          value.self = value;
+          return value;
+        })(),
+      ],
+      ["accessor", Object.defineProperty({}, "secret", { get: () => "x", enumerable: true })],
+      ["nonfinite", { value: Number.NaN }],
+      ["class", { value: new Date() }],
+    ] as const;
+    for (const [label, ctx] of invalid) {
+      assert.throws(
+        () => new JavaScriptRuntime({ context: "", ctx: ctx as any, rlm: testRlm() }),
+        new RegExp(label === "class" ? "plain record" : label === "nonfinite" ? "finite" : label),
+      );
+    }
+  });
+
+  test("rejects hostile callback arguments without invoking the callback", async () => {
+    let calls = 0;
+    const runtime = new JavaScriptRuntime({
+      context: "",
+      ctx: {
+        inspect: () => {
+          calls += 1;
+          return true;
+        },
+      },
+      rlm: testRlm(),
+    });
+    try {
+      const result = await runtime.execute(`
+        let getter = false;
+        const value = {};
+        Object.defineProperty(value, "secret", { enumerable: true, get() { getter = true; return 1; } });
+        let outcome = "";
+        try { await ctx.inspect(value); } catch (error) { outcome = [error.message.includes("data property"), getter].join(" "); }
+        outcome
+      `);
+      assert.equal(result.output, "[result] true false", result.error?.message);
+      assert.equal(calls, 0);
+      assert.equal((await runtime.execute('"alive"')).output, "[result] alive");
+    } finally {
+      runtime.dispose();
+    }
+  });
+
   test("truncates console output", async () => {
     const runtime = new JavaScriptRuntime({
       context: "",

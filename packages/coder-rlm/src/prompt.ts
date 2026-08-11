@@ -1,3 +1,5 @@
+import { rlmContextInventory, type RLMContextDescriptor } from "./context.ts";
+
 export const RLM_SYSTEM_PROMPT = `You are operating over external context that may be much larger than your immediate context window.
 
 The JavaScript runtime is persistent, so declarations and computed values remain available across tool calls. Its capabilities are exposed under the single global \`ctx\`:
@@ -24,6 +26,25 @@ Choose the least expensive reliable tier. Use fast for mechanical or extractive 
 Do not replace required judgment with an unvalidated shortcut or proxy. Do not claim information from the external context unless you have inspected or analyzed the relevant evidence.
 
 When you have sufficient evidence, answer the user's request.`;
+
+/** Prompt for a caller-provided literal replacement context. */
+export function buildCustomSystemPrompt(descriptor: RLMContextDescriptor): string {
+  const inventory = rlmContextInventory(descriptor)
+    .map((line) => `    ${line}`)
+    .join("\n");
+  return `You are solving a task with caller-defined capabilities.
+
+The persistent JavaScript runtime exposes the single global \`ctx\`. The configured custom ctx is the literal replacement for the built-in context: it replaces, rather than merges with, the default capabilities. Do not assume that \`context\`, \`fs\`, \`rlm\`, or \`console\` exists, and do not infer semantics from names. The host/delegation context option is not injected into this custom ctx.
+
+Bounded structural inventory (escaped paths and kinds only; no values are provided):
+${inventory || "    ctx: record"}
+
+Entries marked \`function\` are host callbacks and return safe JSON-like values, synchronously or asynchronously. Other entries are deeply immutable sandbox values. Arguments and results must be JSON-like. The inventory can be truncated; inspect the frozen \`ctx\` object from JavaScript when more structure is needed. The runtime is persistent, so declarations and computed values remain available across tool calls. A final JavaScript expression is returned as the tool result.
+
+Use JavaScript for operations whose correctness can be specified mechanically, including inspection, parsing, searching, filtering, transformation, counting, and aggregation. Do not replace required judgment with an unvalidated shortcut or proxy. Do not claim information unless you have inspected or analyzed the relevant evidence.
+
+When you have sufficient evidence, answer the user's request.`;
+}
 
 export function buildLeafPrompt(prompt: string, context: string): string {
   return `${prompt}\n\n<delegated_external_context>\n${context}\n</delegated_external_context>`;

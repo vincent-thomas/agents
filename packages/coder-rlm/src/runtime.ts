@@ -2,6 +2,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import type { RLMChildHandle, RLMChildResult, RLMChildTier } from "./child-types.ts";
+import {
+  registerRLMContext,
+  type RLMContext,
+  type RLMContextRegistration,
+  type RegisteredRLMContextFunction,
+} from "./context.ts";
 
 export interface JavaScriptExecutionResult {
   output: string;
@@ -21,7 +27,11 @@ export interface JavaScriptRuntimeRLM {
 
 export interface JavaScriptRuntimeOptions {
   context: string;
+  /** A literal replacement for the built-in sandbox context. */
+  ctx?: RLMContext;
   rlm: JavaScriptRuntimeRLM;
+  /** Internal snapshot reused by recursive runtimes. */
+  ctxRegistration?: RLMContextRegistration;
   javascriptStallTimeoutMs?: number;
   maxOutputChars?: number;
   /** The owning run signal; admitted children are intentionally not tied to worker disposal. */
@@ -56,6 +66,8 @@ export class JavaScriptRuntime {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly rlm: JavaScriptRuntimeRLM;
   private readonly ownerSignal: AbortSignal | undefined;
+  private readonly customFunctions: ReadonlyMap<number, RegisteredRLMContextFunction>;
+  private readonly pendingContextCalls = new Set<number>();
   private readonly javascriptStallTimeoutMs: number;
   private readonly pending = new Map<number, PendingExecution>();
   private readonly ready: Promise<void>;
@@ -83,6 +95,10 @@ export class JavaScriptRuntime {
     );
     this.rlm = options.rlm;
     this.ownerSignal = options.signal;
+    const ctxRegistration =
+      options.ctxRegistration ??
+      (options.ctx === undefined ? undefined : registerRLMContext(options.ctx));
+    this.customFunctions = ctxRegistration?.functions ?? new Map();
     this.ready = new Promise((resolve, reject) => {
       this.resolveReady = resolve;
       this.rejectReady = reject;
@@ -98,6 +114,7 @@ export class JavaScriptRuntime {
     this.send({
       type: "init",
       context: options.context,
+      customCtx: ctxRegistration?.descriptor,
       rootDirectory: process.cwd(),
       maxOutputChars,
       heartbeatIntervalMs,
@@ -119,6 +136,7 @@ export class JavaScriptRuntime {
     this.closed = true;
     this.activeExecution?.abortController.abort();
     this.activeExecution = undefined;
+    this.pendingContextCalls.clear();
     this.child.kill("SIGKILL");
     const error = new Error("JavaScript runtime was disposed");
     this.rejectReady(error);
@@ -212,6 +230,10 @@ export class JavaScriptRuntime {
         });
         return;
       }
+      if (message.type === "contextCall") {
+        void this.handleContextCall(message).catch(() => undefined);
+        return;
+      }
       if (message.type === "fatal") {
         this.disposeWithError(new Error(`JavaScript runtime failed: ${String(message.error)}`));
       }
@@ -237,7 +259,7 @@ export class JavaScriptRuntime {
     if (
       !Number.isSafeInteger(message.requestId) ||
       message.requestId < 1 ||
-      message.operation !== "waitAll" ||
+      (message.operation !== "waitAll" && message.operation !== "contextCall") ||
       !Number.isSafeInteger(message.pendingRlmCalls) ||
       message.pendingRlmCalls < 1
     ) {
@@ -251,6 +273,40 @@ export class JavaScriptRuntime {
     if (this.activeExecution?.requestId !== execution.requestId || this.closed) return;
     if (execution.watchdog !== undefined) clearTimeout(execution.watchdog);
     execution.watchdog = setTimeout(execution.onTimeout, this.javascriptStallTimeoutMs);
+  }
+
+  private async handleContextCall(message: any): Promise<void> {
+    const callId = message.callId;
+    if (!Number.isSafeInteger(callId) || callId < 1 || this.closed) return;
+    const registration = this.customFunctions.get(message.functionId);
+    if (!registration) {
+      this.send({ type: "contextResult", callId, error: "TypeError: unknown custom ctx function" });
+      return;
+    }
+    this.pendingContextCalls.add(callId);
+    try {
+      const args = copyProtocolValue(
+        message.args,
+        `ctx function ${String(message.functionId)} args`,
+      );
+      if (!Array.isArray(args))
+        throw new TypeError("custom ctx function arguments must be an array");
+      const returned = registration.fn(...args);
+      // Await only native promises. Reading or assimilating an arbitrary thenable could
+      // invoke attacker-controlled host hooks.
+      const result = isNativePromise(returned) ? await returned : returned;
+      const serialized = serializeHostValue(
+        result,
+        `ctx function ${String(message.functionId)} result`,
+      );
+      if (!this.closed) this.send({ type: "contextResult", callId, result: serialized });
+    } catch (error) {
+      if (!this.closed) {
+        this.send({ type: "contextResult", callId, error: formatContextError(error) });
+      }
+    } finally {
+      this.pendingContextCalls.delete(callId);
+    }
   }
 
   private async handleRlm(message: any): Promise<void> {
@@ -315,6 +371,7 @@ export class JavaScriptRuntime {
     this.closed = true;
     this.activeExecution?.abortController.abort();
     this.activeExecution = undefined;
+    this.pendingContextCalls.clear();
     this.child.kill("SIGKILL");
     this.rejectReady(error);
     this.failAll(error);
@@ -355,6 +412,141 @@ function formatRlmError(error: unknown): string {
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(formatRlmError(error));
+}
+
+function isNativePromise(value: unknown): value is Promise<unknown> {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    Object.getPrototypeOf(value) === Promise.prototype
+  );
+}
+
+function copyProtocolValue(value: unknown, path: string, seen = new Set<object>()): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError(`${path} must be finite`);
+    return value;
+  }
+  if (typeof value !== "object") throw new TypeError(`${path} is unsupported`);
+  if (seen.has(value)) throw new TypeError(`${path} contains a cycle`);
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const result: unknown[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+          throw new TypeError(`${path}[${index}] must be an enumerable data property`);
+        }
+        result.push(copyProtocolValue(descriptor.value, `${path}[${index}]`, seen));
+      }
+      for (const key of Reflect.ownKeys(value)) {
+        if (typeof key !== "string" || (key !== "length" && !isArrayIndexKey(key, value.length))) {
+          throw new TypeError(`${path} contains an unsupported property`);
+        }
+      }
+      return result;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== null && prototype !== Object.prototype) {
+      throw new TypeError(`${path} must be a plain record or array`);
+    }
+    const result = Object.create(null) as Record<string, unknown>;
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") throw new TypeError(`${path} contains a symbol`);
+      if (key === "__proto__" || key === "prototype" || key === "constructor") {
+        throw new TypeError(`${path}.${key} is a dangerous key`);
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+        throw new TypeError(`${path}.${key} must be an enumerable data property`);
+      }
+      Object.defineProperty(result, key, {
+        value: copyProtocolValue(descriptor.value, `${path}.${key}`, seen),
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
+    }
+    return Object.freeze(result);
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function serializeHostValue(value: unknown, path: string, seen = new Set<object>()): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError(`${path} must be finite`);
+    return value;
+  }
+  if (typeof value !== "object" || isNativePromise(value)) {
+    throw new TypeError(`${path} is unsupported (only JSON-like values are allowed)`);
+  }
+  if (seen.has(value)) throw new TypeError(`${path} contains a cycle`);
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const result: unknown[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+          throw new TypeError(`${path}[${index}] must be an enumerable data property`);
+        }
+        result.push(serializeHostValue(descriptor.value, `${path}[${index}]`, seen));
+      }
+      for (const key of Reflect.ownKeys(value)) {
+        if (typeof key !== "string" || (key !== "length" && !isArrayIndexKey(key, value.length))) {
+          throw new TypeError(`${path} contains an unsupported property`);
+        }
+      }
+      return result;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== null && prototype !== Object.prototype) {
+      throw new TypeError(`${path} must be a plain record or array`);
+    }
+    const result = Object.create(null) as Record<string, unknown>;
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") throw new TypeError(`${path} contains a symbol`);
+      if (key === "__proto__" || key === "prototype" || key === "constructor") {
+        throw new TypeError(`${path}.${key} is a dangerous key`);
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+        throw new TypeError(`${path}.${key} must be an enumerable data property`);
+      }
+      Object.defineProperty(result, key, {
+        value: serializeHostValue(descriptor.value, `${path}.${key}`, seen),
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
+    }
+    return Object.freeze(result);
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function isArrayIndexKey(key: string, length: number): boolean {
+  const index = Number(key);
+  return Number.isSafeInteger(index) && index >= 0 && index < length && String(index) === key;
+}
+
+function formatContextError(error: unknown): string {
+  if (error instanceof Error) {
+    try {
+      const name = typeof error.name === "string" && error.name ? error.name : "Error";
+      const message =
+        typeof error.message === "string" ? error.message : "Custom ctx function failed";
+      return `${name}: ${message}`;
+    } catch {
+      return "Error: Custom ctx function failed";
+    }
+  }
+  return "Error: Custom ctx function failed";
 }
 
 function abortError(): DOMException {

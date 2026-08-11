@@ -8,6 +8,12 @@ export {
   type RLMUsage,
 } from "./rlm.ts";
 export type {
+  RLMContext,
+  RLMContextFunction,
+  RLMContextJSONValue,
+  RLMContextValue,
+} from "./context.ts";
+export type {
   RLMChildError,
   RLMChildHandle,
   RLMChildResult,

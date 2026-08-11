@@ -11,6 +11,7 @@ const parameters = Type.Object({
 
 export interface JavascriptToolOptions {
   onFatalError?: (error: unknown) => void;
+  customContext?: boolean;
 }
 
 export function createJavascriptTool(
@@ -20,8 +21,9 @@ export function createJavascriptTool(
   return {
     name: "javascript",
     label: "JavaScript",
-    description:
-      "Execute JavaScript in a persistent, capability-constrained runtime. Capabilities are exposed under ctx: ctx.context, ctx.rlm.spawn/waitAll/result/cancel() (spawn tiers: fast, balanced, deep), ctx.console.log/error(), and the read-only ctx.fs.read(selector).",
+    description: options.customContext
+      ? "Execute JavaScript in a persistent, capability-constrained runtime. The configured capabilities are exposed only under the frozen ctx object described in the system instructions."
+      : "Execute JavaScript in a persistent, capability-constrained runtime. Capabilities are exposed under ctx: ctx.context, ctx.rlm.spawn/waitAll/result/cancel() (spawn tiers: fast, balanced, deep), ctx.console.log/error(), and the read-only ctx.fs.read(selector).",
     parameters,
     executionMode: "sequential",
     async execute(_toolCallId, { code }, signal) {

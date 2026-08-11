@@ -15,7 +15,14 @@ import {
 } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { createJavascriptTool } from "./javascript-tool.ts";
-import { buildLeafPrompt, RLM_SYSTEM_PROMPT } from "./prompt.ts";
+import { buildCustomSystemPrompt, buildLeafPrompt, RLM_SYSTEM_PROMPT } from "./prompt.ts";
+import { registerRLMContext, type RLMContext, type RLMContextRegistration } from "./context.ts";
+export type {
+  RLMContext,
+  RLMContextFunction,
+  RLMContextJSONValue,
+  RLMContextValue,
+} from "./context.ts";
 import {
   JavaScriptRuntime,
   type JavaScriptRuntimeOptions,
@@ -43,6 +50,8 @@ export interface RLMChildTierProfile {
 export interface RLMOptions {
   model: Model<any>;
   context: string;
+  /** Literal replacement for the built-in { context, fs, rlm, console } sandbox. */
+  ctx?: RLMContext;
   thinkingLevel?: AgentState["thinkingLevel"];
   /** Host-side overrides for the provider-agnostic fast/balanced/deep defaults. */
   tierProfiles?: Partial<Record<RLMChildTier, RLMChildTierProfile>>;
@@ -149,6 +158,8 @@ type ResolvedTierProfiles = Record<RLMChildTier, ResolvedTierProfile>;
 interface ResolvedOptions {
   model: Model<any>;
   context: string;
+  ctx?: RLMContext;
+  ctxRegistration?: RLMContextRegistration;
   thinkingLevel: AgentState["thinkingLevel"];
   tierProfiles: ResolvedTierProfiles;
   getApiKey: AgentOptions["getApiKey"];
@@ -571,9 +582,12 @@ export class RLM {
       options.modelRequestTimeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS,
       "modelRequestTimeoutMs",
     );
+    const ctxRegistration = options.ctx === undefined ? undefined : registerRLMContext(options.ctx);
     this.options = {
       model: options.model,
       context: options.context,
+      ctx: options.ctx,
+      ctxRegistration,
       thinkingLevel,
       tierProfiles: resolveTierProfiles(options.model, modelRequestTimeoutMs, options.tierProfiles),
       getApiKey: options.getApiKey,
@@ -748,6 +762,8 @@ export class RLM {
       };
       runtime = this.createRuntime({
         context,
+        ctx: this.options.ctx,
+        ctxRegistration: this.options.ctxRegistration,
         javascriptStallTimeoutMs: this.options.javascriptStallTimeoutMs,
         maxOutputChars: this.options.maxOutputChars,
         signal,
@@ -825,11 +841,18 @@ export class RLM {
       initialState: {
         systemPrompt: isLeaf
           ? "Answer the task using the delegated external context supplied by the user."
-          : RLM_SYSTEM_PROMPT,
+          : this.options.ctxRegistration
+            ? buildCustomSystemPrompt(this.options.ctxRegistration.descriptor)
+            : RLM_SYSTEM_PROMPT,
         model: tierProfile?.model ?? this.options.model,
         thinkingLevel: tierProfile?.thinkingLevel ?? this.options.thinkingLevel,
         tools: runtime
-          ? [createJavascriptTool(runtime, { onFatalError: onFatalRuntimeError })]
+          ? [
+              createJavascriptTool(runtime, {
+                onFatalError: onFatalRuntimeError,
+                customContext: this.options.ctxRegistration !== undefined,
+              }),
+            ]
           : [],
       },
       streamFn: requestStreamFn,

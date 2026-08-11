@@ -14,6 +14,16 @@ tool, `javascript({ code })`; the tool's persistent runtime exposes one capabili
 import { RLM } from "@vt-agent/coder-rlm";
 
 const rlm = new RLM({ model, context: hugeString, getApiKey, thinkingLevel: "high" });
+
+// A custom ctx is a literal replacement: defaults are not merged in.
+const custom = new RLM({
+  model,
+  context: hugeString, // host/delegation context; not injected into custom ctx
+  ctx: {
+    data: { answer: 42 },
+    lookup: async (key) => ({ key, found: key === "answer" }),
+  },
+});
 const result = await rlm.run("Find the major recurring architectural problems.");
 ```
 
@@ -60,15 +70,28 @@ primary error remains the budget-limit error rather than a later runtime-lifecyc
 The runtime is a separate Node process with only the host `PATH` retained so Node can be
 resolved. Generated code executes in a `node:vm` context with string/Wasm code generation
 disabled and no direct `process`, `require`, network, timers, or other ambient host
-capabilities. Its explicit capabilities are limited to `ctx.context`, `ctx.rlm.*`,
-`ctx.console.*`, and read-only `ctx.fs.read()`; host protocol results are copied into frozen
-sandbox arrays or null-prototype records before generated code receives them. A timeout
+capabilities. By default its explicit capabilities are limited to `ctx.context`, `ctx.rlm.*`,
+`ctx.console.*`, and read-only `ctx.fs.read()`; a supplied replacement `ctx` defines a different
+explicit boundary. Host protocol results are copied into frozen sandbox arrays or null-prototype
+records before generated code receives them. A timeout
 hard-kills the runtime process.
 
 Cancellation, model-request timeouts, overall run timeouts, and event-observer timeouts abort in-flight recursive calls before disposing the worker.
 Every run receives a fresh runtime, which is disposed on success, model failure, tool failure, or
-abort. These lifecycle guarantees do not expand the sandbox: generated JavaScript receives only
-`ctx.context`, `ctx.rlm.*`, `ctx.console.*`, and `ctx.fs.read()`.
+abort. These lifecycle guarantees do not expand the sandbox: generated JavaScript receives only the
+configured frozen `ctx` object. When `ctx` is omitted, that object exposes `ctx.context`,
+`ctx.rlm.*`, `ctx.console.*`, and `ctx.fs.read()`.
+
+`RLMOptions.ctx` accepts recursive JSON-like primitives, finite numbers, arrays, plain records,
+and synchronous or asynchronous functions. It replaces exactly `{ context, fs, rlm, console }`;
+`RLMOptions.context` remains host/delegation context and is not injected. Custom values are
+snapshotted before execution. Callback arguments and results are copied and validated; cycles, accessors, symbols, bigint, non-finite numbers, class
+instances, dangerous keys, unsupported values, and arbitrary thenables are rejected with path-
+specific errors. Records use null prototypes and arrays use sandbox-realm prototypes; both are deeply
+frozen. Callback `this` is bound to its containing host object, so callbacks remain trusted
+host code and cannot be force-canceled; pending calls detach safely when a runtime is aborted or
+disposed. Custom callback values and errors never cross the process boundary as host objects,
+constructors, promises, or functions.
 
 This is capability reduction for an MVP, not a production security boundary. `node:vm` is not
 designed to safely execute actively hostile code, and the subprocess has no OS-level sandbox.

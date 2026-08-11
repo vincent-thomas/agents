@@ -16,18 +16,15 @@ import {
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { createJavascriptTool } from "./javascript-tool.ts";
 import { buildCustomSystemPrompt, buildLeafPrompt, RLM_SYSTEM_PROMPT } from "./prompt.ts";
-import { registerRLMContext, type RLMContext, type RLMContextRegistration } from "./context.ts";
-export type {
-  RLMContext,
-  RLMContextFunction,
-  RLMContextJSONValue,
-  RLMContextValue,
-} from "./context.ts";
+import type { RLMContext } from "./context.ts";
+export type { RLMContext } from "./context.ts";
 import {
   JavaScriptRuntime,
+  type JavaScriptRuntimeLike,
   type JavaScriptRuntimeOptions,
   type JavaScriptRuntimeRLM,
 } from "./runtime.ts";
+import { InProcessJavaScriptRuntime } from "./in-process-runtime.ts";
 import type {
   RLMChildHandle,
   RLMChildResult,
@@ -50,7 +47,7 @@ export interface RLMChildTierProfile {
 export interface RLMOptions {
   model: Model<any>;
   context: string;
-  /** Literal replacement for the built-in { context, fs, rlm, console } sandbox. */
+  /** Exact live host object; selects unsafe in-process JavaScript execution. */
   ctx?: RLMContext;
   thinkingLevel?: AgentState["thinkingLevel"];
   /** Host-side overrides for the provider-agnostic fast/balanced/deep defaults. */
@@ -144,7 +141,7 @@ const DEFAULT_EVENT_OBSERVER_TIMEOUT_MS = 30_000;
 
 export interface RLMDependencies {
   streamFn?: StreamFn;
-  createRuntime?: (options: JavaScriptRuntimeOptions) => JavaScriptRuntime;
+  createRuntime?: (options: JavaScriptRuntimeOptions) => JavaScriptRuntimeLike;
 }
 
 interface ResolvedTierProfile {
@@ -159,7 +156,6 @@ interface ResolvedOptions {
   model: Model<any>;
   context: string;
   ctx?: RLMContext;
-  ctxRegistration?: RLMContextRegistration;
   thinkingLevel: AgentState["thinkingLevel"];
   tierProfiles: ResolvedTierProfiles;
   getApiKey: AgentOptions["getApiKey"];
@@ -582,12 +578,13 @@ export class RLM {
       options.modelRequestTimeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS,
       "modelRequestTimeoutMs",
     );
-    const ctxRegistration = options.ctx === undefined ? undefined : registerRLMContext(options.ctx);
+    if (options.ctx !== undefined && (typeof options.ctx !== "object" || options.ctx === null)) {
+      throw new TypeError("ctx must be a non-null object when provided");
+    }
     this.options = {
       model: options.model,
       context: options.context,
       ctx: options.ctx,
-      ctxRegistration,
       thinkingLevel,
       tierProfiles: resolveTierProfiles(options.model, modelRequestTimeoutMs, options.tierProfiles),
       getApiKey: options.getApiKey,
@@ -609,7 +606,11 @@ export class RLM {
     };
     this.streamFn = dependencies.streamFn ?? streamSimple;
     this.createRuntime =
-      dependencies.createRuntime ?? ((runtimeOptions) => new JavaScriptRuntime(runtimeOptions));
+      dependencies.createRuntime ??
+      ((runtimeOptions) =>
+        runtimeOptions.ctx === undefined
+          ? new JavaScriptRuntime(runtimeOptions)
+          : new InProcessJavaScriptRuntime({ ...runtimeOptions, ctx: runtimeOptions.ctx }));
   }
 
   async run(prompt: string, options: RLMRunOptions = {}): Promise<string> {
@@ -745,7 +746,7 @@ export class RLM {
       })
       .catch(() => undefined);
 
-    let runtime: JavaScriptRuntime | undefined;
+    let runtime: JavaScriptRuntimeLike | undefined;
     if (!isLeaf) {
       const rlm: JavaScriptRuntimeRLM = {
         spawn: async (childPrompt, childOptions, operationSignal) => {
@@ -763,7 +764,6 @@ export class RLM {
       runtime = this.createRuntime({
         context,
         ctx: this.options.ctx,
-        ctxRegistration: this.options.ctxRegistration,
         javascriptStallTimeoutMs: this.options.javascriptStallTimeoutMs,
         maxOutputChars: this.options.maxOutputChars,
         signal,
@@ -841,8 +841,8 @@ export class RLM {
       initialState: {
         systemPrompt: isLeaf
           ? "Answer the task using the delegated external context supplied by the user."
-          : this.options.ctxRegistration
-            ? buildCustomSystemPrompt(this.options.ctxRegistration.descriptor)
+          : this.options.ctx !== undefined
+            ? buildCustomSystemPrompt(this.options.ctx)
             : RLM_SYSTEM_PROMPT,
         model: tierProfile?.model ?? this.options.model,
         thinkingLevel: tierProfile?.thinkingLevel ?? this.options.thinkingLevel,
@@ -850,7 +850,7 @@ export class RLM {
           ? [
               createJavascriptTool(runtime, {
                 onFatalError: onFatalRuntimeError,
-                customContext: this.options.ctxRegistration !== undefined,
+                customContext: this.options.ctx !== undefined,
               }),
             ]
           : [],

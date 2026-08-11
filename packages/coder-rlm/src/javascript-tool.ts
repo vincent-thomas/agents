@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { JavaScriptExecutionResult, JavaScriptRuntime } from "./runtime.ts";
+import type { JavaScriptExecutionResult, JavaScriptRuntimeLike } from "./runtime.ts";
 
 const parameters = Type.Object({
   code: Type.String({
@@ -15,14 +15,14 @@ export interface JavascriptToolOptions {
 }
 
 export function createJavascriptTool(
-  runtime: JavaScriptRuntime,
+  runtime: JavaScriptRuntimeLike,
   options: JavascriptToolOptions = {},
 ): AgentTool<typeof parameters> {
   return {
     name: "javascript",
     label: "JavaScript",
     description: options.customContext
-      ? "Execute JavaScript in a persistent, capability-constrained runtime. The configured capabilities are exposed only under the frozen ctx object described in the system instructions."
+      ? "Execute JavaScript in a persistent runtime over the configured capabilities in the exact live host ctx object described in the system instructions. This mode is unsafe and is not a security boundary."
       : "Execute JavaScript in a persistent, capability-constrained runtime. Capabilities are exposed under ctx: ctx.context, ctx.rlm.spawn/waitAll/result/cancel() (spawn tiers: fast, balanced, deep), ctx.console.log/error(), and the read-only ctx.fs.read(selector).",
     parameters,
     executionMode: "sequential",

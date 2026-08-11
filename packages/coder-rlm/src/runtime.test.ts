@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { suite, test } from "node:test";
+import { InProcessJavaScriptRuntime } from "./in-process-runtime.ts";
 import { JavaScriptRuntime, type JavaScriptRuntimeRLM } from "./runtime.ts";
 import type { RLMChildHandle, RLMChildResult } from "./child-types.ts";
 
@@ -523,179 +524,96 @@ suite("JavaScriptRuntime", () => {
     }
   });
 
-  test("constructs a frozen literal custom context and invokes nested callbacks", async () => {
-    const owner = { prefix: "host" };
-    const runtime = new JavaScriptRuntime({
-      context: "not injected",
-      ctx: {
-        nested: {
-          prefix: "host",
-          values: [1, true, null],
-          sync(this: typeof owner, value: any) {
-            return { text: this.prefix + value.n };
-          },
-          async: async (value: any) => [value, 2],
-        },
-        ownerFn: function (this: typeof owner) {
-          return this.prefix;
-        }.bind(owner),
+  test("custom in-process runtime preserves exact identity and host semantics", async () => {
+    class Widget {
+      value = 4;
+      get doubled() {
+        return this.value * 2;
+      }
+    }
+    const ctx: any = {
+      count: 1,
+      self: undefined,
+      widget: new Widget(),
+      callback(value: unknown) {
+        this.received = value;
+        return this === value;
       },
-      rlm: testRlm(),
-    });
+      async increment(value: number) {
+        await Promise.resolve();
+        return value + 1;
+      },
+    };
+    ctx.self = ctx;
+    const runtime = new InProcessJavaScriptRuntime({ ctx, context: "ignored", rlm: testRlm() });
     try {
-      const result = await runtime.execute(`
-        const a = await ctx.nested.sync({ n: 3 });
-        const b = await ctx.nested.async("ok");
-        [Object.keys(ctx).join(","), a.text, b.join("/"), typeof ctx.context,
-          Object.isFrozen(ctx), Object.isFrozen(ctx.nested), Object.isFrozen(ctx.nested.values),
-          Object.getPrototypeOf(ctx) === null, await ctx.ownerFn()].join(" ");
-      `);
       assert.equal(
-        result.output,
-        "[result] nested,ownerFn host3 ok/2 undefined true true true true host",
-        result.error?.message,
+        (
+          await runtime.execute(
+            "ctx.self === ctx && ctx.widget.doubled === 8 && !Object.isFrozen(ctx)",
+          )
+        ).output,
+        "[result] true",
+      );
+      assert.equal((await runtime.execute("ctx.callback(ctx)")).output, "[result] true");
+      assert.equal(ctx.received, ctx);
+      ctx.count = 9;
+      assert.equal((await runtime.execute("ctx.count")).output, "[result] 9");
+      assert.equal((await runtime.execute("ctx.count = 12")).output, "[result] 12");
+      assert.equal(ctx.count, 12);
+      assert.equal(
+        (await runtime.execute("ctx.widget.constructor.name")).output,
+        "[result] Widget",
+      );
+      assert.equal((await runtime.execute("await ctx.increment(4)")).output, "[result] 5");
+      assert.equal(
+        (await runtime.execute("const local = 5")).output,
+        "JavaScript completed with no output.",
+      );
+      assert.equal((await runtime.execute("typeof local")).output, "[result] undefined");
+      assert.equal(
+        (await runtime.execute("typeof context + ' ' + typeof rlm + ' ' + typeof console")).output,
+        "[result] undefined undefined undefined",
       );
     } finally {
       runtime.dispose();
     }
   });
 
-  test("keeps custom callback results and errors inside the sandbox realm", async () => {
-    let hostileThenCalled = false;
-    const runtime = new JavaScriptRuntime({
-      context: "",
-      ctx: {
-        result: () => ({ nested: [{ value: 7 }] }),
-        fail: () => {
-          throw new Error("host callback failed");
-        },
-        hostile: () =>
-          ({
-            then() {
-              hostileThenCalled = true;
-            },
-          }) as any,
-      },
-      rlm: testRlm(),
-    });
+  test("in-process runtime preserves cross-realm error names and remains usable", async () => {
+    const runtime = new InProcessJavaScriptRuntime({ ctx: {}, context: "", rlm: testRlm() });
     try {
-      const result = await runtime.execute(`
-        const value = await ctx.result();
-        let resultEscapeBlocked = false;
-        try { value.constructor.constructor("return process")(); } catch { resultEscapeBlocked = true; }
-        let safeError = false;
-        try { await ctx.fail(); } catch (error) {
-          safeError = error.message === "host callback failed" && error.constructor === undefined;
-        }
-        let thenableRejected = false;
-        try { await ctx.hostile(); } catch (error) {
-          thenableRejected = error.message.includes("JSON-like");
-        }
-        [resultEscapeBlocked, Array.isArray(value.nested), value.nested.map((item) => item.value),
-          Object.isFrozen(value), Object.isFrozen(value.nested), safeError, thenableRejected].join(" ");
-      `);
-      assert.equal(result.output, "[result] true true 7 true true true true");
-      assert.equal(hostileThenCalled, false);
+      const failed = await runtime.execute('throw new TypeError("boom")');
+      assert.deepEqual(failed.error, { name: "TypeError", message: "boom" });
       assert.equal((await runtime.execute('"alive"')).output, "[result] alive");
     } finally {
       runtime.dispose();
     }
   });
 
-  test("does not treat an awaited custom callback as stalled JavaScript", async () => {
-    const runtime = new JavaScriptRuntime({
-      context: "",
-      ctx: {
-        wait: async () => {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-          return "done";
-        },
-      },
-      rlm: testRlm(),
-      javascriptStallTimeoutMs: 50,
-    });
-    try {
-      assert.equal((await runtime.execute("await ctx.wait()"))?.output, "[result] done");
-    } finally {
-      runtime.dispose();
-    }
-  });
-
-  test("detaches a pending custom callback when the runtime is disposed", async () => {
-    let release!: (value: number) => void;
-    let markStarted!: () => void;
+  test("disposing an in-process runtime rejects a pending asynchronous cell", async () => {
+    let startedResolve!: () => void;
+    let release!: () => void;
     const started = new Promise<void>((resolve) => {
-      markStarted = resolve;
+      startedResolve = resolve;
     });
-    const runtime = new JavaScriptRuntime({
-      context: "",
-      ctx: {
-        wait: async () => {
-          markStarted();
-          return new Promise<number>((resolve) => {
-            release = resolve;
-          });
-        },
+    const ctx: { wait: () => Promise<string>; late?: boolean } = {
+      wait: async () => {
+        startedResolve();
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return "late";
       },
-      rlm: testRlm(),
-    });
-    const execution = runtime.execute("await ctx.wait()");
+    };
+    const runtime = new InProcessJavaScriptRuntime({ ctx, context: "", rlm: testRlm() });
+    const execution = runtime.execute("await ctx.wait(); ctx.late = true");
     await started;
     runtime.dispose();
     await assert.rejects(execution, /disposed/);
-    release(1);
-    await Promise.resolve();
-  });
-
-  test("rejects invalid custom context shapes early", () => {
-    const invalid = [
-      [
-        "cycle",
-        (() => {
-          const value: any = {};
-          value.self = value;
-          return value;
-        })(),
-      ],
-      ["accessor", Object.defineProperty({}, "secret", { get: () => "x", enumerable: true })],
-      ["nonfinite", { value: Number.NaN }],
-      ["class", { value: new Date() }],
-    ] as const;
-    for (const [label, ctx] of invalid) {
-      assert.throws(
-        () => new JavaScriptRuntime({ context: "", ctx: ctx as any, rlm: testRlm() }),
-        new RegExp(label === "class" ? "plain record" : label === "nonfinite" ? "finite" : label),
-      );
-    }
-  });
-
-  test("rejects hostile callback arguments without invoking the callback", async () => {
-    let calls = 0;
-    const runtime = new JavaScriptRuntime({
-      context: "",
-      ctx: {
-        inspect: () => {
-          calls += 1;
-          return true;
-        },
-      },
-      rlm: testRlm(),
-    });
-    try {
-      const result = await runtime.execute(`
-        let getter = false;
-        const value = {};
-        Object.defineProperty(value, "secret", { enumerable: true, get() { getter = true; return 1; } });
-        let outcome = "";
-        try { await ctx.inspect(value); } catch (error) { outcome = [error.message.includes("data property"), getter].join(" "); }
-        outcome
-      `);
-      assert.equal(result.output, "[result] true false", result.error?.message);
-      assert.equal(calls, 0);
-      assert.equal((await runtime.execute('"alive"')).output, "[result] alive");
-    } finally {
-      runtime.dispose();
-    }
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ctx.late, true);
   });
 
   test("truncates console output", async () => {

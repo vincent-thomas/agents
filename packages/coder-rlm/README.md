@@ -15,7 +15,7 @@ import { RLM } from "@vt-agent/coder-rlm";
 
 const rlm = new RLM({ model, context: hugeString, getApiKey, thinkingLevel: "high" });
 
-// A custom ctx is a literal replacement: defaults are not merged in.
+// A custom ctx is an exact, unsafe in-process replacement: defaults are not merged in.
 const custom = new RLM({
   model,
   context: hugeString, // host/delegation context; not injected into custom ctx
@@ -36,7 +36,7 @@ security, architecture, conflicting evidence, consequential advice, or final syn
 alone is not a reason for deep. `maxDeepChildren` caps deep-child admission per top-level run (default 4).
 
 `thinkingLevel` uses Pi's normal reasoning levels and defaults to `high` for the root. Pass an
-`AbortSignal` to cancel the root model, active recursive calls, and the JavaScript subprocess together:
+`AbortSignal` to cancel the root model, active recursive calls, and the JavaScript runtime together:
 
 ```ts
 await rlm.run(prompt, { signal: controller.signal });
@@ -58,45 +58,39 @@ include aggregate usage. Events are queued per top-level run in admission order;
 observer callbacks are serialized and each callback is host-bounded by `eventObserverTimeoutMs` (default 30 seconds). The queue is flushed before `runDetailed()` settles when observers are healthy. If `onEvent` throws, rejects, or exceeds its deadline, the queue closes, queued-but-undelivered events are skipped, active work and children are aborted, and `runDetailed()` rejects with that observer error after cleanup. The callback itself cannot be canceled, but its late settlement is detached safely and cannot deliver later events. The overall `runTimeoutMs` deadline remains active through event flushing, so a flush that outlives the run deadline is closed and rejected rather than hanging. Pi's internal event
 types are deliberately not exposed as the public tracing contract.
 
-Top-level `await` is supported and declarations persist between JavaScript calls. Separate
-`run()` calls receive separate runtimes. At `maxDepth` (default `3`, minimum `1`), spawned children become ordinary Pi model calls without the JavaScript tool; only that delegated leaf context is placed in the leaf prompt. Child handles and terminal results are host-owned and serializable, so children continue after the JavaScript cell returns.
+Top-level `await` is supported and declarations persist between JavaScript calls in default worker
+mode. Custom-`ctx` cells have local declarations and should store cross-call state on the exact `ctx`
+object. Separate `run()` calls receive separate runtimes; a supplied custom `ctx` remains the same shared host object,
+so mutations to it remain visible. At `maxDepth` (default `3`, minimum `1`), spawned children become ordinary Pi model calls without the JavaScript tool; only that delegated leaf context is placed in the leaf prompt. Child handles and terminal results are host-owned and serializable, so children continue after the JavaScript cell returns.
 
 ## Limits
 
-The MVP defaults to 32 model calls per top-level run, a 60-second JavaScript stall timeout, a 300-second per-model-request timeout, a 30-minute overall top-level run timeout, a 30-second per-event-observer timeout, 50,000 characters of tool output, and 4 deep children. `maxModelCalls`, `maxDeepChildren`, `javascriptStallTimeoutMs`, `modelRequestTimeoutMs`, `runTimeoutMs`, `eventObserverTimeoutMs`, and `maxOutputChars` can override those safeguards. The JavaScript watchdog only bounds stalled synchronous execution; heartbeats while `ctx.rlm.waitAll()` is waiting prevent model latency from being mistaken for a JavaScript stall. Each model request, event observer, and the overall top-level run have separate host-enforced deadlines. The model-call budget is shared by all recursive
+The MVP defaults to 32 model calls per top-level run, a 60-second JavaScript stall timeout, a 300-second per-model-request timeout, a 30-minute overall top-level run timeout, a 30-second per-event-observer timeout, 50,000 characters of tool output, and 4 deep children. `maxModelCalls`, `maxDeepChildren`, `javascriptStallTimeoutMs`, `modelRequestTimeoutMs`, `runTimeoutMs`, `eventObserverTimeoutMs`, and `maxOutputChars` can override those safeguards. In default worker mode, the JavaScript watchdog hard-stops stalled synchronous execution; heartbeats while `ctx.rlm.waitAll()` is waiting prevent model latency from being mistaken for a JavaScript stall. Model-request, observer, and overall deadlines remain host-enforced unless unsafe custom-`ctx` code blocks the host event loop. The model-call budget is shared by all recursive
 calls in one `run()`; when concurrent delegation exhausts it, active agent turns are stopped and the
 primary error remains the budget-limit error rather than a later runtime-lifecycle error.
 
-The runtime is a separate Node process with only the host `PATH` retained so Node can be
-resolved. Generated code executes in a `node:vm` context with string/Wasm code generation
-disabled and no direct `process`, `require`, network, timers, or other ambient host
-capabilities. By default its explicit capabilities are limited to `ctx.context`, `ctx.rlm.*`,
-`ctx.console.*`, and read-only `ctx.fs.read()`; a supplied replacement `ctx` defines a different
-explicit boundary. Host protocol results are copied into frozen sandbox arrays or null-prototype
-records before generated code receives them. A timeout
-hard-kills the runtime process.
+When `ctx` is omitted, the runtime is a separate Node process with only the host `PATH` retained so
+Node can be resolved. Generated code executes in a `node:vm` context with string/Wasm code generation
+disabled and no direct `process`, `require`, network, timers, or ambient capabilities beyond
+`ctx.context`, `ctx.rlm.*`, `ctx.console.*`, and read-only `ctx.fs.read()`. Host protocol results are
+copied into frozen sandbox arrays or null-prototype records, and a timeout hard-kills the worker.
 
-Cancellation, model-request timeouts, overall run timeouts, and event-observer timeouts abort in-flight recursive calls before disposing the worker.
-Every run receives a fresh runtime, which is disposed on success, model failure, tool failure, or
-abort. These lifecycle guarantees do not expand the sandbox: generated JavaScript receives only the
-configured frozen `ctx` object. When `ctx` is omitted, that object exposes `ctx.context`,
-`ctx.rlm.*`, `ctx.console.*`, and `ctx.fs.read()`.
+In default worker mode, cancellation and deadlines abort in-flight recursive calls before disposing the runtime. Yielding custom-`ctx` execution can be rejected on cancellation or timeout, but synchronous custom code prevents host timers and abort handlers from running.
 
-`RLMOptions.ctx` accepts recursive JSON-like primitives, finite numbers, arrays, plain records,
-and synchronous or asynchronous functions. It replaces exactly `{ context, fs, rlm, console }`;
-`RLMOptions.context` remains host/delegation context and is not injected. Custom values are
-snapshotted before execution. Callback arguments and results are copied and validated; cycles, accessors, symbols, bigint, non-finite numbers, class
-instances, dangerous keys, unsupported values, and arbitrary thenables are rejected with path-
-specific errors. Records use null prototypes and arrays use sandbox-realm prototypes; both are deeply
-frozen. Callback `this` is bound to its containing host object, so callbacks remain trusted
-host code and cannot be force-canceled; pending calls detach safely when a runtime is aborted or
-disposed. Custom callback values and errors never cross the process boundary as host objects,
-constructors, promises, or functions.
+Supplying `RLMOptions.ctx` deliberately selects a different, unsafe mode. Generated cells execute as
+host-realm functions whose `ctx` argument is the exact supplied object reference, replacing
+`{ context, fs, rlm, console }`;
+`RLMOptions.context` remains host/delegation context and is not injected. Prototypes, accessors,
+functions, classes, cycles, identity, and mutations are preserved. Consequently generated code can
+reach host constructors through supplied values. The worker boundary, hard-kill guarantee, and
+`javascriptStallTimeoutMs` protection against synchronous infinite code do not apply. An asynchronous
+execution can be rejected on timeout or abort, but already-running host callbacks cannot be forcibly
+canceled. A suspended cell may resume after its caller has been rejected and can still mutate the
+shared `ctx`; exact object identity makes such late effects unavoidable.
 
-This is capability reduction for an MVP, not a production security boundary. `node:vm` is not
-designed to safely execute actively hostile code, and the subprocess has no OS-level sandbox.
-Do not expose this package to untrusted model output without stronger process/container
-isolation.
+Default worker mode is capability reduction for an MVP, not a production security boundary because
+`node:vm` is not designed for actively hostile code and the subprocess has no OS-level sandbox.
+Custom `ctx` mode provides no security boundary at all. Do not use it with untrusted model output.
 
 ## Example
 

@@ -7,12 +7,7 @@ export {
   type RLMRunOptions,
   type RLMUsage,
 } from "./rlm.ts";
-export type {
-  RLMContext,
-  RLMContextFunction,
-  RLMContextJSONValue,
-  RLMContextValue,
-} from "./context.ts";
+export type { RLMContext } from "./context.ts";
 export type {
   RLMChildError,
   RLMChildHandle,

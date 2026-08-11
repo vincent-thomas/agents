@@ -41,11 +41,7 @@ function sendHeartbeat() {
     type: "heartbeat",
     requestId: activeExecutionRequestId,
     operation:
-      pending.length > 0 && pending.every(({ op }) => op === "waitAll")
-        ? "waitAll"
-        : pending.length > 0 && pending.every(({ op }) => op === "waitAll" || op === "contextCall")
-          ? "contextCall"
-          : undefined,
+      pending.length > 0 && pending.every(({ op }) => op === "waitAll") ? "waitAll" : undefined,
     pendingRlmCalls: pending.length,
   });
 }
@@ -285,33 +281,6 @@ function isArrayIndexKey(key, length) {
   return Number.isSafeInteger(index) && index >= 0 && index < length && String(index) === key;
 }
 
-function createContextCall(functionId, args) {
-  const copiedArgs = copySandboxValue(args, "ctx function arguments");
-  const callId = nextRlmCallId++;
-  let encoded;
-  try {
-    encoded = JSON.stringify({ type: "contextCall", callId, functionId, args: copiedArgs });
-  } catch (error) {
-    throw safeError(error);
-  }
-  const promise = new Promise((resolve, reject) => {
-    pendingRlmCalls.set(callId, {
-      resolve,
-      reject,
-      requestId: activeExecutionRequestId,
-      op: "contextCall",
-    });
-    try {
-      process.stdout.write(`${encoded}\n`);
-      sendHeartbeat();
-    } catch (error) {
-      pendingRlmCalls.delete(callId);
-      reject(safeError(error));
-    }
-  });
-  return safeThenable(promise);
-}
-
 function createRlmCall(op, payload) {
   const callId = nextRlmCallId++;
   const message = { type: "rlm", op, callId, ...payload };
@@ -432,69 +401,6 @@ function createRlm() {
   return Object.freeze(rlm);
 }
 
-function createCustomCtx(descriptor, path = "ctx") {
-  if (!descriptor || typeof descriptor !== "object")
-    throw new TypeError(`${path} descriptor is invalid`);
-  if (descriptor.kind === "value") {
-    if (
-      descriptor.value !== null &&
-      typeof descriptor.value !== "string" &&
-      typeof descriptor.value !== "boolean" &&
-      (typeof descriptor.value !== "number" || !Number.isFinite(descriptor.value))
-    )
-      throw new TypeError(`${path} descriptor value is invalid`);
-    return descriptor.value;
-  }
-  if (descriptor.kind === "function") {
-    if (!Number.isSafeInteger(descriptor.functionId) || descriptor.functionId < 1) {
-      throw new TypeError(`${path} function descriptor is invalid`);
-    }
-    return safeFunction((...args) => createContextCall(descriptor.functionId, args));
-  }
-  if (descriptor.kind === "array") {
-    if (!Array.isArray(descriptor.values))
-      throw new TypeError(`${path} array descriptor is invalid`);
-    const result = vm.runInContext("[]", runtimeContext);
-    for (let index = 0; index < descriptor.values.length; index += 1) {
-      Object.defineProperty(result, String(index), {
-        value: createCustomCtx(descriptor.values[index], `${path}[${index}]`),
-        enumerable: true,
-        writable: false,
-        configurable: false,
-      });
-    }
-    return Object.freeze(result);
-  }
-  if (descriptor.kind === "record") {
-    if (!Array.isArray(descriptor.entries))
-      throw new TypeError(`${path} record descriptor is invalid`);
-    const result = Object.create(null);
-    for (const entry of descriptor.entries) {
-      if (
-        !entry ||
-        typeof entry.key !== "string" ||
-        entry.key === "__proto__" ||
-        entry.key === "prototype" ||
-        entry.key === "constructor"
-      ) {
-        throw new TypeError(`${path} record key is invalid`);
-      }
-      Object.defineProperty(result, entry.key, {
-        value: createCustomCtx(entry.value, childPath(path, entry.key)),
-        enumerable: true,
-        writable: false,
-        configurable: false,
-      });
-    }
-    return Object.freeze(result);
-  }
-  throw new TypeError(`${path} descriptor kind is invalid`);
-}
-
-function childPath(path, key) {
-  return /^[A-Za-z_$][\w$]*$/.test(key) ? `${path}.${key}` : `${path}[${JSON.stringify(key)}]`;
-}
-
 function createFs(root) {
   const fsCapability = Object.create(null);
   Object.defineProperty(fsCapability, "read", {
@@ -600,18 +506,14 @@ function initialize(message) {
   });
   sandboxObjectPrototype = vm.runInContext("Object.prototype", runtimeContext);
 
-  const ctx = message.customCtx
-    ? createCustomCtx(message.customCtx)
-    : (() => {
-        const defaultCtx = Object.create(null);
-        Object.defineProperties(defaultCtx, {
-          context: { value: message.context, enumerable: true },
-          rlm: { value: createRlm(), enumerable: true },
-          console: { value: consoleCapability, enumerable: true },
-          fs: { value: createFs(rootDirectory), enumerable: true },
-        });
-        return Object.freeze(defaultCtx);
-      })();
+  const defaultCtx = Object.create(null);
+  Object.defineProperties(defaultCtx, {
+    context: { value: message.context, enumerable: true },
+    rlm: { value: createRlm(), enumerable: true },
+    console: { value: consoleCapability, enumerable: true },
+    fs: { value: createFs(rootDirectory), enumerable: true },
+  });
+  const ctx = Object.freeze(defaultCtx);
   Object.defineProperty(runtimeContext, "ctx", {
     value: ctx,
     enumerable: true,
@@ -680,7 +582,7 @@ input.on("line", (line) => {
     const message = JSON.parse(line);
     if (message.type === "init") initialize(message);
     else if (message.type === "execute") execute(message);
-    else if (message.type === "rlmResult" || message.type === "contextResult") settleRlm(message);
+    else if (message.type === "rlmResult") settleRlm(message);
     else throw new Error(`Unknown message type: ${String(message.type)}`);
   } catch (error) {
     send({

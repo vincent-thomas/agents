@@ -39,7 +39,7 @@ const { text, usage } = await rlm.runDetailed(prompt);
 console.log(usage.modelCalls, usage.totalTokens, usage.cost.total);
 ```
 
-Pass `onEvent` to observe the stable RLM lifecycle while a run is in progress. The examples render this lifecycle as append-only tree-aware progress: each line carries a branch path built from `runId`/`parentRunId` and child handle names, so interleaved parallel siblings remain distinct.
+Pass `onEvent` to observe the stable RLM lifecycle while a run is in progress. The examples render this lifecycle as a live tree dashboard on interactive stderr (with model-call budget, active agents, depth, and elapsed time); redirected stderr uses compact append-only lines. Child names and stable tree connectors keep interleaved parallel siblings distinct, while numeric run IDs stay hidden in the dashboard.
 Events include unique `runId`/`parentRunId` relationships and normalized `run_start`,
 `model_start`, `model_end`, `javascript_start`, `javascript_end`, `run_end`, and `run_error`
 records. Child lifecycle records and serializable handles expose the selected tier, never the
@@ -92,9 +92,10 @@ To run a focused RLM request with a prompt from the command line:
 bun run --filter @vt-agent/coder-rlm example:prompt "Explain how recursive delegation can help analyze large context."
 ```
 
-The prompt example prints tree-aware progress, recursive calls, and concise JavaScript tool status to
-stderr, leaving the final answer on stdout. Successful JavaScript result bodies are intentionally
-suppressed; concise error text remains visible. It uses a demo-oriented default of 64 model calls so
+The prompt example prints a live tree dashboard on interactive stderr (or compact append-only
+progress when stderr is redirected), leaving the final answer on stdout. It shows model-call budget,
+active agents, depth, elapsed time, and concise JavaScript status; successful JavaScript result bodies
+are intentionally suppressed while errors remain prominent. It uses a demo-oriented default of 64 model calls so
 several concurrent delegates can each recurse and still return their parent synthesis; the `RLM`
 library default remains the deliberate 32-call safeguard. It uses the same 60-second JavaScript stall default as the library, while allowing generous model and overall deadlines for high-thinking delegates. Configure recursion and timeouts with positive-integer environment variables `RLM_MAX_DEPTH` (default `3`), `RLM_MAX_MODEL_CALLS` (default `64` for this example), `RLM_JAVASCRIPT_STALL_TIMEOUT_MS` (default `60000`), `RLM_MODEL_REQUEST_TIMEOUT_MS` (default `300000`), `RLM_RUN_TIMEOUT_MS` (default `1800000`), and `RLM_EVENT_OBSERVER_TIMEOUT_MS` (default `30000`); invalid values are rejected using the same validation
 as `RLMOptions`:

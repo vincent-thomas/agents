@@ -40,7 +40,7 @@ const rlm = new RLM({
   runTimeoutMs,
   eventObserverTimeoutMs,
   getApiKey: async (providerId) => (await modelRuntime.getAuth(providerId))?.auth.apiKey,
-  onEvent: createRLMEventTracer(),
+  onEvent: createRLMEventTracer({ maxModelCalls, maxDepth: maxDepth ?? 3 }),
 });
 
 const answer = await rlm.run(prompt);

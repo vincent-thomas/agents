@@ -18,7 +18,7 @@ const metrics = {
   delegatedContextSizes: [] as number[],
 };
 const startedAt = performance.now();
-const trace = createRLMEventTracer();
+const trace = createRLMEventTracer({ maxModelCalls: 32, maxDepth: 3 });
 const rlm = new RLM({
   model,
   context: corpus.context,

@@ -23,7 +23,7 @@ const rlm = new RLM({
   model,
   context: issues.join("\n\n"),
   getApiKey: async (providerId) => (await modelRuntime.getAuth(providerId))?.auth.apiKey,
-  onEvent: createRLMEventTracer(),
+  onEvent: createRLMEventTracer({ maxModelCalls: 32, maxDepth: 3 }),
 });
 console.log(
   await rlm.run(

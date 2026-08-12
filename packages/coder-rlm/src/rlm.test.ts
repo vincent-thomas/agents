@@ -7,6 +7,7 @@ import {
   fauxToolCall,
   type Context,
 } from "@earendil-works/pi-ai";
+import { JavaScriptRuntime } from "./runtime.ts";
 import { RLM, type RLMEvent } from "./rlm.ts";
 
 function javascript(code: string) {
@@ -342,6 +343,43 @@ suite("RLM", () => {
     assert.equal(seen[1].tools?.[0]?.name, "javascript");
     assert.equal(seen[2].tools?.length ?? 0, 0);
     assert.match(visibleText(seen[2]), /delegated/);
+  });
+
+  test("validates maxChildren as a non-negative integer", () => {
+    const faux = createFauxCore({});
+    assert.doesNotThrow(() => new RLM({ model: faux.getModel(), context: "", maxChildren: 0 }));
+    for (const value of [-1, 1.5]) {
+      assert.throws(
+        () => new RLM({ model: faux.getModel(), context: "", maxChildren: value }),
+        /maxChildren must be a non-negative integer/,
+      );
+    }
+  });
+
+  test("defaults child admissions to the model-call limit", async () => {
+    const events: RLMEvent[] = [];
+    const faux = createFauxCore({});
+    faux.setResponses([
+      javascript(`
+        await ctx.rlm.spawn("admitted");
+        try { await ctx.rlm.spawn("rejected"); }
+        catch (error) { ctx.console.log(error.message); }
+      `),
+    ]);
+    await assert.rejects(
+      new RLM(
+        {
+          model: faux.getModel(),
+          context: "",
+          maxDepth: 1,
+          maxModelCalls: 1,
+          onEvent: (event) => events.push(event),
+        },
+        { streamFn: faux.streamSimple },
+      ).run("task"),
+      /model-call limit/,
+    );
+    assert.equal(events.filter((event) => event.type === "child_spawn").length, 1);
   });
 
   test("enforces the shared model-call limit", async () => {
@@ -828,6 +866,126 @@ suite("RLM", () => {
     assert.ok(fastHandle);
     assert.deepEqual(JSON.parse(JSON.stringify(fastHandle)), fastHandle);
     assert.equal("model" in fastHandle, false);
+  });
+
+  test("caps concurrent child admissions before child launch or lifecycle events", async () => {
+    const events: RLMEvent[] = [];
+    let runtimeCount = 0;
+    const faux = createFauxCore({});
+    faux.setResponses([
+      javascript(`
+        const values = await Promise.all([0, 1, 2].map(async (index) => {
+          try { return await ctx.rlm.spawn("child " + index); }
+          catch (error) { return "rejected:" + error.message; }
+        }));
+        await ctx.rlm.waitAll(values.filter((value) => typeof value !== "string"));
+        ctx.console.log(values.filter((value) => typeof value === "string").join("|"));
+      `),
+      fauxAssistantMessage("child one"),
+      fauxAssistantMessage("child two"),
+      fauxAssistantMessage("root"),
+    ]);
+    const answer = await new RLM(
+      {
+        model: faux.getModel(),
+        context: "",
+        maxDepth: 2,
+        maxChildren: 2,
+        onEvent: (event) => events.push(event),
+      },
+      {
+        streamFn: faux.streamSimple,
+        createRuntime: (options) => {
+          runtimeCount += 1;
+          return new JavaScriptRuntime(options);
+        },
+      },
+    ).run("start");
+
+    assert.equal(answer, "root");
+    assert.equal(runtimeCount, 3);
+    assert.equal(events.filter((event) => event.type === "child_spawn").length, 2);
+    assert.equal(events.filter((event) => event.type === "child_end").length, 2);
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "javascript_end" &&
+          event.output.includes("rejected:RLM maximum children 2 reached"),
+      ),
+    );
+  });
+
+  test("does not replenish child admission after cancellation", async () => {
+    const events: RLMEvent[] = [];
+    const faux = createFauxCore({});
+    const childFaux = createFauxCore({ tokensPerSecond: 1 });
+    const rootModel = faux.getModel();
+    const childModel = { ...childFaux.getModel(), id: "slow-child-model" } as typeof rootModel;
+    faux.setResponses([
+      javascript(`
+        const handle = await ctx.rlm.spawn("cancelled");
+        const result = await ctx.rlm.cancel(handle);
+        let rejection = "";
+        try { await ctx.rlm.spawn("after cancellation"); }
+        catch (error) { rejection = error.message; }
+        ctx.console.log(result.status, rejection);
+      `),
+      fauxAssistantMessage("root"),
+    ]);
+    childFaux.setResponses([fauxAssistantMessage("cancelled child")]);
+    const answer = await new RLM(
+      {
+        model: rootModel,
+        context: "",
+        maxDepth: 1,
+        maxChildren: 1,
+        tierProfiles: { balanced: { model: childModel, modelRequestTimeoutMs: 2_000 } },
+        runTimeoutMs: 5_000,
+        onEvent: (event) => events.push(event),
+      },
+      {
+        streamFn: (model, context, options) =>
+          model.id === childModel.id
+            ? childFaux.streamSimple(model, context, options)
+            : faux.streamSimple(model, context, options),
+      },
+    ).run("start");
+
+    assert.equal(answer, "root");
+    assert.equal(events.filter((event) => event.type === "child_spawn").length, 1);
+    assert.equal(events.filter((event) => event.type === "child_cancel").length, 1);
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "javascript_end" &&
+          event.output.includes("cancelled RLM maximum children 1 reached"),
+      ),
+    );
+  });
+
+  test("keeps admitted children subject to the shared model-call limit", async () => {
+    const events: RLMEvent[] = [];
+    const faux = createFauxCore({});
+    faux.setResponses([
+      javascript('const handle = await ctx.rlm.spawn("child"); await ctx.rlm.waitAll([handle])'),
+      fauxAssistantMessage("child"),
+    ]);
+    await assert.rejects(
+      new RLM(
+        {
+          model: faux.getModel(),
+          context: "",
+          maxDepth: 1,
+          maxChildren: 1,
+          maxModelCalls: 2,
+          onEvent: (event) => events.push(event),
+        },
+        { streamFn: faux.streamSimple },
+      ).run("start"),
+      /model-call limit/,
+    );
+    assert.equal(events.filter((event) => event.type === "child_spawn").length, 1);
+    assert.ok(events.some((event) => event.type === "child_end" && event.result.text === "child"));
   });
 
   test("enforces the deep-child admission cap", async () => {

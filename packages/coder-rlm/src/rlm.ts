@@ -56,6 +56,8 @@ export interface RLMOptions {
   onEvent?: (event: RLMEvent) => Promise<void> | void;
   maxDepth?: number;
   maxModelCalls?: number;
+  /** Cumulative child admissions per run; defaults to maxModelCalls and never replenishes. */
+  maxChildren?: number;
   maxDeepChildren?: number;
   javascriptStallTimeoutMs?: number;
   modelRequestTimeoutMs?: number;
@@ -162,6 +164,7 @@ interface ResolvedOptions {
   onEvent: RLMOptions["onEvent"];
   maxDepth: number;
   maxModelCalls: number;
+  maxChildren: number;
   maxDeepChildren: number;
   javascriptStallTimeoutMs: number | undefined;
   modelRequestTimeoutMs: number;
@@ -335,11 +338,13 @@ interface ChildRecord {
 
 class ChildRegistry {
   private nextId = 1;
+  private childrenAdmitted = 0;
   private deepChildrenAdmitted = 0;
   private readonly records = new Map<number, ChildRecord>();
 
   constructor(
     private readonly maxDepth: number,
+    private readonly maxChildren: number,
     private readonly maxDeepChildren: number,
     private readonly emit: (event: RLMEvent) => Promise<void>,
     private readonly reserveRunId: () => number,
@@ -359,6 +364,9 @@ class ChildRegistry {
     prompt: string,
     options: { name?: string; context?: string; tier?: RLMChildTier },
   ): RLMChildHandle {
+    if (this.childrenAdmitted >= this.maxChildren) {
+      throw new Error(`RLM maximum children ${this.maxChildren} reached`);
+    }
     throwIfAborted(parent.signal);
     const tier = validateTier(options.tier ?? "balanced");
     if (parent.depth >= this.maxDepth) {
@@ -368,6 +376,7 @@ class ChildRegistry {
       throw new Error(`RLM maximum deep children ${this.maxDeepChildren} reached`);
     }
     // JavaScript admission is synchronous: reserve this before publishing the handle.
+    this.childrenAdmitted += 1;
     if (tier === "deep") this.deepChildrenAdmitted += 1;
     const id = this.nextId++;
     const handle: RLMChildHandle = {
@@ -578,6 +587,7 @@ export class RLM {
       options.modelRequestTimeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS,
       "modelRequestTimeoutMs",
     );
+    const maxModelCalls = positiveInteger(options.maxModelCalls ?? 32, "maxModelCalls");
     if (options.ctx !== undefined && (typeof options.ctx !== "object" || options.ctx === null)) {
       throw new TypeError("ctx must be a non-null object when provided");
     }
@@ -590,7 +600,8 @@ export class RLM {
       getApiKey: options.getApiKey,
       onEvent: options.onEvent,
       maxDepth: positiveInteger(options.maxDepth ?? 3, "maxDepth"),
-      maxModelCalls: positiveInteger(options.maxModelCalls ?? 32, "maxModelCalls"),
+      maxModelCalls,
+      maxChildren: nonNegativeInteger(options.maxChildren ?? maxModelCalls, "maxChildren"),
       maxDeepChildren: nonNegativeInteger(options.maxDeepChildren ?? 4, "maxDeepChildren"),
       javascriptStallTimeoutMs: optionalPositiveInteger(
         options.javascriptStallTimeoutMs,
@@ -647,6 +658,7 @@ export class RLM {
     const unlink = options.signal ? linkAbort(options.signal, topAbort) : () => undefined;
     state.registry = new ChildRegistry(
       this.options.maxDepth,
+      this.options.maxChildren,
       this.options.maxDeepChildren,
       (event) => state.events.enqueue(event),
       () => state.nextRunId++,

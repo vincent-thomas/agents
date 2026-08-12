@@ -33,7 +33,7 @@ to the root model with low/medium/high thinking for fast/balanced/deep. Override
 the least expensive reliable tier: fast is for mechanical, extractive work and clean summaries;
 balanced is the ordinary interpretation/review default; deep is scarce and reserved for ambiguity,
 security, architecture, conflicting evidence, consequential advice, or final synthesis. Large context
-alone is not a reason for deep. `maxDeepChildren` caps deep-child admission per top-level run (default 4).
+alone is not a reason for deep. `maxDeepChildren` caps deep-child admission per top-level run (default 4). `maxChildren` caps cumulative child admission per top-level run (default `maxModelCalls`); the quota is not replenished when a child completes, is canceled, or fails.
 
 `thinkingLevel` uses Pi's normal reasoning levels and defaults to `high` for the root. Pass an
 `AbortSignal` to cancel the root model, active recursive calls, and the JavaScript runtime together:
@@ -65,7 +65,7 @@ a supplied custom `ctx` remains the same shared host source, so source changes r
 
 ## Limits
 
-The MVP defaults to 32 model calls per top-level run, a 60-second JavaScript stall timeout, a 300-second per-model-request timeout, a 30-minute overall top-level run timeout, a 30-second per-event-observer timeout, 50,000 characters of tool output, and 4 deep children. `maxModelCalls`, `maxDeepChildren`, `javascriptStallTimeoutMs`, `modelRequestTimeoutMs`, `runTimeoutMs`, `eventObserverTimeoutMs`, and `maxOutputChars` can override those safeguards. In default worker mode, the JavaScript watchdog hard-stops stalled synchronous execution; heartbeats while `ctx.rlm.waitAll()` is waiting prevent model latency from being mistaken for a JavaScript stall. Model-request, observer, and overall deadlines remain host-enforced unless unsafe custom-`ctx` code blocks the host event loop. The model-call budget is shared by all recursive
+The MVP defaults to 32 model calls and 32 cumulative child admissions per top-level run, a 60-second JavaScript stall timeout, a 300-second per-model-request timeout, a 30-minute overall top-level run timeout, a 30-second per-event-observer timeout, 50,000 characters of tool output, and 4 deep children. `maxModelCalls`, `maxChildren`, `maxDeepChildren`, `javascriptStallTimeoutMs`, `modelRequestTimeoutMs`, `runTimeoutMs`, `eventObserverTimeoutMs`, and `maxOutputChars` can override those safeguards. In default worker mode, the JavaScript watchdog hard-stops stalled synchronous execution; heartbeats while `ctx.rlm.waitAll()` is waiting prevent model latency from being mistaken for a JavaScript stall. Model-request, observer, and overall deadlines remain host-enforced unless unsafe custom-`ctx` code blocks the host event loop. The model-call budget is shared by all recursive
 calls in one `run()`; when concurrent delegation exhausts it, active agent turns are stopped and the
 primary error remains the budget-limit error rather than a later runtime-lifecycle error.
 
@@ -117,7 +117,7 @@ progress when stderr is redirected), leaving the final answer on stdout. It show
 active agents, depth, elapsed time, and concise JavaScript status; successful JavaScript result bodies
 are intentionally suppressed while errors remain prominent. It uses a demo-oriented default of 64 model calls so
 several concurrent delegates can each recurse and still return their parent synthesis; the `RLM`
-library default remains the deliberate 32-call safeguard. It uses the same 60-second JavaScript stall default as the library, while allowing generous model and overall deadlines for high-thinking delegates. Configure recursion and timeouts with positive-integer environment variables `RLM_MAX_DEPTH` (default `3`), `RLM_MAX_MODEL_CALLS` (default `64` for this example), `RLM_JAVASCRIPT_STALL_TIMEOUT_MS` (default `60000`), `RLM_MODEL_REQUEST_TIMEOUT_MS` (default `300000`), `RLM_RUN_TIMEOUT_MS` (default `1800000`), and `RLM_EVENT_OBSERVER_TIMEOUT_MS` (default `30000`); invalid values are rejected using the same validation
+library default remains the deliberate 32-call safeguard. It uses the same 60-second JavaScript stall default as the library, while allowing generous model and overall deadlines for high-thinking delegates. Configure recursion and resource limits with integer environment variables `RLM_MAX_DEPTH` (default `3`), `RLM_MAX_MODEL_CALLS` (default `64` for this example), `RLM_MAX_CHILDREN` (non-negative, default `RLM_MAX_MODEL_CALLS`), `RLM_JAVASCRIPT_STALL_TIMEOUT_MS` (default `60000`), `RLM_MODEL_REQUEST_TIMEOUT_MS` (default `300000`), `RLM_RUN_TIMEOUT_MS` (default `1800000`), and `RLM_EVENT_OBSERVER_TIMEOUT_MS` (default `30000`); invalid values are rejected using the same validation
 as `RLMOptions`:
 
 ```sh

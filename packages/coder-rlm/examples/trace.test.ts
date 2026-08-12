@@ -357,11 +357,11 @@ test("dashboard keys children by runId rather than handle id and drains after ro
     result: { handle, tier: "balanced", status: "succeeded", text: "done" },
   });
   assert.equal(dashboard.isComplete(), true);
-  assert.match(dashboard.snapshot(), /✓ 1 completed/);
-  assert.doesNotMatch(dashboard.snapshot(), /#1|#99/);
+  assert.match(dashboard.snapshot(), /worker — completed/);
+  assert.doesNotMatch(dashboard.snapshot(), /✓ 1 completed|#1|#99/);
 });
 
-test("dashboard aggregates successful high-fanout siblings", () => {
+test("dashboard keeps completed high-fanout siblings visible", () => {
   const dashboard = new RLMEventDashboard();
   dashboard.render(rootStart);
   for (let id = 1; id <= 5; id++) {
@@ -386,6 +386,10 @@ test("dashboard aggregates successful high-fanout siblings", () => {
       result: { handle, tier: "fast", status: "succeeded", text: "done" },
     });
   }
+  const beforeRootCompletion = dashboard.snapshot();
+  for (let id = 1; id <= 5; id++)
+    assert.match(beforeRootCompletion, new RegExp(`worker-${id} — completed`));
+
   const snapshot = dashboard.render({
     type: "run_end",
     runId: 0,
@@ -393,8 +397,75 @@ test("dashboard aggregates successful high-fanout siblings", () => {
     result: "done",
     usage: runUsage,
   });
-  assert.match(snapshot, /✓ 5 completed/);
-  assert.doesNotMatch(snapshot, /worker-[1-5]/);
+  assert.equal(dashboard.isComplete(), true);
+  for (let id = 1; id <= 5; id++) assert.match(snapshot, new RegExp(`worker-${id} — completed`));
+  assert.doesNotMatch(snapshot, /✓ 5 completed/);
+});
+
+test("dashboard keeps completed descendant tree structure after child and root completion", () => {
+  const dashboard = new RLMEventDashboard();
+  dashboard.render(rootStart);
+  const parent = childHandle(1, "research", 0, 1);
+  const grandchild = childHandle(2, "summarize", 101, 2);
+  dashboard.render({
+    type: "child_spawn",
+    runId: 0,
+    parentRunId: 0,
+    depth: 0,
+    handle: parent,
+    tier: "balanced",
+    prompt: "research",
+    contextLength: 1,
+  });
+  dashboard.render({ type: "child_start", runId: 101, parentRunId: 0, depth: 1, handle: parent });
+  dashboard.render({
+    type: "child_spawn",
+    runId: 101,
+    parentRunId: 101,
+    depth: 1,
+    handle: grandchild,
+    tier: "fast",
+    prompt: "summarize",
+    contextLength: 1,
+  });
+  dashboard.render({
+    type: "child_start",
+    runId: 202,
+    parentRunId: 101,
+    depth: 2,
+    handle: grandchild,
+  });
+  dashboard.render({
+    type: "child_end",
+    runId: 202,
+    parentRunId: 101,
+    depth: 2,
+    result: { handle: grandchild, tier: "fast", status: "succeeded", text: "done" },
+  });
+  dashboard.render({
+    type: "child_end",
+    runId: 101,
+    parentRunId: 0,
+    depth: 1,
+    result: { handle: parent, tier: "balanced", status: "succeeded", text: "done" },
+  });
+
+  const afterChildCompletion = dashboard.snapshot();
+  assert.match(afterChildCompletion, /└─ research — completed/);
+  assert.match(afterChildCompletion, /   └─ summarize — completed/);
+  assert.equal(dashboard.isComplete(), false);
+
+  const afterRootCompletion = dashboard.render({
+    type: "run_end",
+    runId: 0,
+    depth: 0,
+    result: "done",
+    usage: runUsage,
+  });
+  assert.equal(dashboard.isComplete(), true);
+  assert.match(afterRootCompletion, /request — root — completed/);
+  assert.match(afterRootCompletion, /└─ research — completed/);
+  assert.match(afterRootCompletion, /   └─ summarize — completed/);
 });
 
 test("dashboard JavaScript errors wait for recovery without changing active count", () => {

@@ -499,37 +499,15 @@ export class RLMEventDashboard {
     lines.push(
       `${root ? "" : prefix + (isLast ? "└─ " : "├─ ")}${node.name} — ${node.status}${suffix ? ` — ${suffix}` : ""}`,
     );
+    // Keep completed branches in the TTY tree. The dashboard is a live view,
+    // but retaining the full structure makes the final state useful for
+    // understanding which subagents produced it. Redirected output remains
+    // compact through RLMEventRenderer and compactFallback.
     const children = node.children;
-    // A completed subtree with no failures is represented by its parent line;
-    // aggregate its direct successful siblings below instead of retaining each.
-    const visible: DashboardNode[] = [];
-    let completed = 0;
-    for (const child of children) {
-      if (isSuccessfulSubtree(child)) completed++;
-      else visible.push(child);
-    }
-    if (completed > 0) {
-      // The aggregate is rendered after active/failing branches so those remain
-      // prominent and stable while high-fanout work drains.
-      const aggregate = this.aggregateNode(completed);
-      visible.push(aggregate);
-    }
     const childPrefix = root ? "" : `${prefix}${isLast ? "   " : "│  "}`;
-    visible.forEach((child, index) =>
-      this.renderNode(child, childPrefix, index === visible.length - 1, lines, false),
+    children.forEach((child, index) =>
+      this.renderNode(child, childPrefix, index === children.length - 1, lines, false),
     );
-  }
-
-  private aggregateNode(count: number): DashboardNode {
-    return {
-      runId: undefined,
-      parentRunId: undefined,
-      name: `✓ ${count} completed`,
-      status: "completed",
-      error: undefined,
-      jsError: undefined,
-      children: [],
-    };
   }
 }
 
@@ -597,10 +575,6 @@ function statusForChild(status: RLMChildResult["status"]): DashboardStatus {
 
 function isTerminal(status: DashboardStatus): boolean {
   return status === "completed" || status === "failed" || status === "cancelled";
-}
-
-function isSuccessfulSubtree(node: DashboardNode): boolean {
-  return node.status === "completed" && node.children.every((child) => isSuccessfulSubtree(child));
 }
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });

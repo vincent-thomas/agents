@@ -11,6 +11,12 @@ function violation(command: string, cwd = process.cwd()) {
   return evaluateCommand(command, commandPolicyEntries, validateManagedBunCommand, cwd);
 }
 
+test("allows any cargo command", () => {
+  assert.equal(violation("cargo --version"), null);
+  assert.equal(violation("cargo test --workspace"), null);
+  assert.equal(violation("cargo install cargo-nextest"), null);
+});
+
 test("allows docker commands", () => {
   assert.equal(violation("docker --version"), null);
   assert.equal(violation("docker compose up -d"), null);

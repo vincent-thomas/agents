@@ -11,6 +11,29 @@ function violation(command: string, cwd = process.cwd()) {
   return evaluateCommand(command, commandPolicyEntries, validateManagedBunCommand, cwd);
 }
 
+test("allows any cargo command", () => {
+  assert.equal(violation("cargo --version"), null);
+  assert.equal(violation("cargo test --workspace"), null);
+  assert.equal(violation("cargo install cargo-nextest"), null);
+});
+
+test("allows docker commands", () => {
+  assert.equal(violation("docker --version"), null);
+  assert.equal(violation("docker compose up -d"), null);
+  assert.equal(violation("docker build -t app ."), null);
+});
+
+test("allows pnpm commands", () => {
+  assert.equal(violation("pnpm --version"), null);
+  assert.equal(violation("pnpm install"), null);
+  assert.equal(violation("pnpm test"), null);
+});
+
+test("allows tmux commands", () => {
+  assert.equal(violation("tmux list-sessions"), null);
+  assert.equal(violation("tmux new-session -d"), null);
+});
+
 test("allows bare make and selected targets only", () => {
   assert.equal(violation("make"), null);
   assert.equal(violation("make test"), null);

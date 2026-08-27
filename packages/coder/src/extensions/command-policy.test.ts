@@ -17,6 +17,11 @@ test("allows pnpm commands", () => {
   assert.equal(violation("pnpm test"), null);
 });
 
+test("allows tmux commands", () => {
+  assert.equal(violation("tmux list-sessions"), null);
+  assert.equal(violation("tmux new-session -d"), null);
+});
+
 test("allows bare make and selected targets only", () => {
   assert.equal(violation("make"), null);
   assert.equal(violation("make test"), null);

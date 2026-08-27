@@ -72,6 +72,7 @@ export const commandPolicyEntries: CommandPolicyEntry[] = [
   { name: "fd", status: CommandPolicyStatus.Allowed, command: "fd" },
   { name: "jq", status: CommandPolicyStatus.Allowed, command: "jq" },
   { name: "pnpm", status: CommandPolicyStatus.Allowed, command: "pnpm" },
+  { name: "tmux", status: CommandPolicyStatus.Allowed, command: "tmux" },
   { name: "true", status: CommandPolicyStatus.Allowed, command: "true" },
   { name: "false", status: CommandPolicyStatus.Allowed, command: "false" },
   { name: "test", status: CommandPolicyStatus.Allowed, command: "test" },

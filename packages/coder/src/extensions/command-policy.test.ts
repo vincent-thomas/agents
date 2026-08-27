@@ -11,6 +11,12 @@ function violation(command: string, cwd = process.cwd()) {
   return evaluateCommand(command, commandPolicyEntries, validateManagedBunCommand, cwd);
 }
 
+test("allows docker commands", () => {
+  assert.equal(violation("docker --version"), null);
+  assert.equal(violation("docker compose up -d"), null);
+  assert.equal(violation("docker build -t app ."), null);
+});
+
 test("allows pnpm commands", () => {
   assert.equal(violation("pnpm --version"), null);
   assert.equal(violation("pnpm install"), null);

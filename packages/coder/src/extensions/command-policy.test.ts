@@ -110,6 +110,57 @@ test("blocks symlink traversal outside the project", () => {
   }
 });
 
+test("allows read-only GitHub CLI commands", () => {
+  for (const command of [
+    "gh --version",
+    "gh pr view 42",
+    "gh --repo acme/repo pr checks 42",
+    "gh issue list --state open",
+    "gh codespace view",
+    "gh codespace ports",
+    "gh search users octocat",
+    "gh run view 123 --log",
+    "gh stack view --json",
+    "gh repo view --json nameWithOwner",
+    "gh repo deploy-key list",
+    "gh search code needle --owner acme",
+    "gh api repos/acme/repo/pulls/42",
+    "gh api --method GET repos/acme/repo/pulls/42",
+    "gh api --method HEAD repos/acme/repo/pulls/42",
+    "gh api graphql -f query='query { viewer { login } }'",
+  ]) {
+    assert.equal(violation(command), null, command);
+  }
+});
+
+test("keeps mutating GitHub CLI commands behind dedicated workflows", () => {
+  for (const command of [
+    "gh pr create --title test",
+    "gh --repo acme/repo pr create --title test",
+    "gh pr merge 42",
+    "gh issue close 42",
+    "gh repo edit --description test",
+    "gh repo deploy-key add ./key.pub",
+    "gh stack submit --auto",
+    "gh extension exec arbitrary-extension",
+    "gh arbitrary-extension",
+    "gh arbitrary-extension --help",
+    "gh arbitrary-extension --version",
+    "gh codespace ports visibility 3000:public",
+    "gh api --method POST repos/acme/repo/issues",
+    "gh api --method DELETE repos/acme/repo/issues/42",
+    "gh api --method 'POST' repos/acme/repo/issues",
+    "gh api --method GET --method POST repos/acme/repo/issues",
+    "gh api -XGET -XPOST repos/acme/repo/issues",
+    "gh api repos/acme/repo/issues -f title=test",
+    "gh api repos/acme/repo/issues --input payload.json",
+    "gh api graphql -f query='mutation { deleteIssue { clientMutationId } }'",
+    "gh api graphql -F query=@mutation.graphql",
+  ]) {
+    assert.ok(violation(command), command);
+  }
+});
+
 test("keeps Git branch, history, and synchronization behind dedicated workflows", () => {
   for (const command of [
     "git push",

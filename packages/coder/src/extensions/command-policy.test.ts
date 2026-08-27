@@ -11,6 +11,12 @@ function violation(command: string, cwd = process.cwd()) {
   return evaluateCommand(command, commandPolicyEntries, validateManagedBunCommand, cwd);
 }
 
+test("allows pnpm commands", () => {
+  assert.equal(violation("pnpm --version"), null);
+  assert.equal(violation("pnpm install"), null);
+  assert.equal(violation("pnpm test"), null);
+});
+
 test("allows bare make and selected targets only", () => {
   assert.equal(violation("make"), null);
   assert.equal(violation("make test"), null);

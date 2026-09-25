@@ -1,0 +1,593 @@
+import repl from "node:repl";
+import vm from "node:vm";
+import { PassThrough } from "node:stream";
+import { formatWithOptions } from "node:util";
+import { createInterface } from "node:readline";
+import { register } from "node:module";
+import { closeSync, fstatSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+
+const denyImportsSource = encodeURIComponent(
+  'export async function resolve(specifier) { throw new Error("Dynamic import is disabled: " + specifier); }',
+);
+register(`data:text/javascript,${denyImportsSource}`, import.meta.url);
+
+const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+
+let runtimeContext;
+let replServer;
+let maxOutputChars = 50_000;
+let activeOutput;
+let nextRlmCallId = 1;
+let rootDirectory;
+let activeExecutionRequestId;
+let heartbeatTimer;
+let heartbeatIntervalMs = 250;
+let sandboxObjectPrototype;
+const pendingRlmCalls = new Map();
+
+function send(message) {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+function sendHeartbeat() {
+  const pending =
+    activeExecutionRequestId === undefined
+      ? []
+      : [...pendingRlmCalls.values()].filter(
+          ({ requestId }) => requestId === activeExecutionRequestId,
+        );
+  send({
+    type: "heartbeat",
+    requestId: activeExecutionRequestId,
+    operation:
+      pending.length > 0 && pending.every(({ op }) => op === "waitAll") ? "waitAll" : undefined,
+    pendingRlmCalls: pending.length,
+  });
+}
+
+function startHeartbeats() {
+  heartbeatTimer = setInterval(sendHeartbeat, heartbeatIntervalMs);
+  heartbeatTimer.unref?.();
+}
+
+function safeError(error) {
+  let name = "Error";
+  let message;
+  try {
+    if (error && typeof error.name === "string" && error.name !== "") name = error.name;
+    message = error && typeof error.message === "string" ? error.message : String(error);
+  } catch {
+    message = "Unknown error";
+  }
+  const safe = Object.create(null);
+  Object.defineProperties(safe, {
+    name: { value: name, enumerable: true },
+    message: { value: message, enumerable: true },
+  });
+  return Object.freeze(safe);
+}
+
+function safeProtocolError(message) {
+  const text = typeof message === "string" ? message : String(message);
+  const separator = text.indexOf(": ");
+  if (separator <= 0) return safeError({ message: text });
+  return safeError({ name: text.slice(0, separator), message: text.slice(separator + 2) });
+}
+
+function safeFunction(fn) {
+  const safe = (...args) => {
+    try {
+      return fn(...args);
+    } catch (error) {
+      throw safeError(error);
+    }
+  };
+  Object.setPrototypeOf(safe, null);
+  return Object.freeze(safe);
+}
+
+function createSafeDeferred() {
+  let state = "pending";
+  let settledValue;
+  const listeners = [];
+
+  const dispatch = (listener) => {
+    queueMicrotask(() => {
+      const callback = state === "fulfilled" ? listener.onFulfilled : listener.onRejected;
+      if (typeof callback !== "function") {
+        listener.next.settle(state, settledValue);
+        return;
+      }
+      try {
+        listener.next.settle("fulfilled", callback(settledValue));
+      } catch (error) {
+        listener.next.settle("rejected", safeError(error));
+      }
+    });
+  };
+
+  const settle = (nextState, value) => {
+    if (state !== "pending") return;
+    state = nextState;
+    settledValue = nextState === "rejected" ? safeError(value) : value;
+    for (const listener of listeners.splice(0)) dispatch(listener);
+  };
+
+  const thenable = Object.create(null);
+  const then = safeFunction((onFulfilled, onRejected) => {
+    const next = createSafeDeferred();
+    const listener = { onFulfilled, onRejected, next };
+    if (state === "pending") listeners.push(listener);
+    else dispatch(listener);
+    return next.thenable;
+  });
+  Object.defineProperty(thenable, "then", {
+    value: then,
+    enumerable: true,
+  });
+
+  return { thenable: Object.freeze(thenable), settle };
+}
+
+function safeThenable(promise) {
+  const deferred = createSafeDeferred();
+  void promise
+    .then(
+      (value) => deferred.settle("fulfilled", value),
+      (error) => deferred.settle("rejected", error),
+    )
+    .catch((error) => deferred.settle("rejected", error));
+  return deferred.thenable;
+}
+
+function cloneForSandbox(value, seen = new Map()) {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
+  if (seen.has(value)) return seen.get(value);
+
+  if (Array.isArray(value)) {
+    const clone = vm.runInContext("[]", runtimeContext);
+    seen.set(value, clone);
+    for (const key of Object.keys(value)) {
+      Object.defineProperty(clone, key, {
+        value: cloneForSandbox(value[key], seen),
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
+    }
+    return Object.freeze(clone);
+  }
+
+  const clone = Object.create(null);
+  seen.set(value, clone);
+  for (const key of Object.keys(value)) {
+    Object.defineProperty(clone, key, {
+      value: cloneForSandbox(value[key], seen),
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    });
+  }
+  return Object.freeze(clone);
+}
+
+function formatValue(value) {
+  return formatWithOptions(
+    {
+      colors: false,
+      compact: 3,
+      depth: 5,
+      maxArrayLength: 100,
+      maxStringLength: Math.min(maxOutputChars, 20_000),
+      customInspect: false,
+      getters: false,
+      breakLength: 100,
+    },
+    value,
+  );
+}
+
+function appendOutputText(level, text) {
+  if (!activeOutput || activeOutput.truncated) return;
+  const prefix = level === "error" ? "[error] " : "";
+  const prefixedText = `${prefix}${text}`;
+  const separator = activeOutput.lines.length === 0 ? "" : "\n";
+  const remaining = maxOutputChars - activeOutput.length - separator.length;
+  if (remaining <= 0) {
+    activeOutput.truncated = true;
+    return;
+  }
+  activeOutput.lines.push(prefixedText.slice(0, remaining));
+  activeOutput.length += separator.length + Math.min(prefixedText.length, remaining);
+  if (prefixedText.length > remaining) activeOutput.truncated = true;
+}
+
+function appendOutput(level, values) {
+  appendOutputText(level, values.map(formatValue).join(" "));
+}
+
+function outputText(value) {
+  if (value !== undefined) appendOutputText("log", `[result] ${formatValue(value)}`);
+  const text = activeOutput.lines.join("\n");
+  if (!activeOutput.truncated) return text || "JavaScript completed with no output.";
+  const marker = `\n[output truncated at ${maxOutputChars} characters]`;
+  return `${text.slice(0, Math.max(0, maxOutputChars - marker.length))}${marker}`;
+}
+
+function copySandboxValue(value, path = "argument", seen = new Map()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError(`${path} must be finite`);
+    return value;
+  }
+  if (typeof value !== "object") {
+    throw new TypeError(
+      `${path} is unsupported (functions, symbols, bigint, and undefined are not allowed)`,
+    );
+  }
+  if (seen.has(value)) throw new TypeError(`${path} contains a cycle`);
+  seen.set(value, true);
+  try {
+    if (Array.isArray(value)) {
+      const result = [];
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+          throw new TypeError(`${path}[${index}] must be an enumerable data property`);
+        }
+        result.push(copySandboxValue(descriptor.value, `${path}[${index}]`, seen));
+      }
+      for (const key of Reflect.ownKeys(value)) {
+        if (typeof key !== "string" || (key !== "length" && !isArrayIndexKey(key, value.length))) {
+          throw new TypeError(`${path} contains an unsupported property`);
+        }
+      }
+      return result;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (
+      prototype !== null &&
+      prototype !== Object.prototype &&
+      prototype !== sandboxObjectPrototype
+    ) {
+      throw new TypeError(`${path} must be a plain record or array`);
+    }
+    const result = Object.create(null);
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") throw new TypeError(`${path} contains unsupported symbols`);
+      if (key === "__proto__" || key === "prototype" || key === "constructor") {
+        throw new TypeError(`${path}.${key} is a dangerous key`);
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+        throw new TypeError(`${path}.${key} must be an enumerable data property`);
+      }
+      Object.defineProperty(result, key, {
+        value: copySandboxValue(descriptor.value, `${path}.${key}`, seen),
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
+    }
+    return Object.freeze(result);
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function isArrayIndexKey(key, length) {
+  const index = Number(key);
+  return Number.isSafeInteger(index) && index >= 0 && index < length && String(index) === key;
+}
+
+function createRlmCall(op, payload) {
+  const callId = nextRlmCallId++;
+  const message = { type: "rlm", op, callId, ...payload };
+  let encoded;
+  try {
+    encoded = JSON.stringify(message);
+  } catch (error) {
+    throw safeError(error);
+  }
+
+  const promise = new Promise((resolve, reject) => {
+    pendingRlmCalls.set(callId, {
+      resolve,
+      reject,
+      requestId: activeExecutionRequestId,
+      op,
+    });
+    try {
+      process.stdout.write(`${encoded}\n`);
+      sendHeartbeat();
+    } catch (error) {
+      pendingRlmCalls.delete(callId);
+      reject(safeError(error));
+    }
+  });
+  return safeThenable(promise);
+}
+
+function copySpawnOptions(options) {
+  if (options === undefined) return undefined;
+  const copy = Object.create(null);
+  if (options.name !== undefined) copy.name = options.name;
+  if (options.context !== undefined) copy.context = options.context;
+  if (options.tier !== undefined) copy.tier = options.tier;
+  return Object.freeze(copy);
+}
+
+function copyHandle(handle) {
+  if (typeof handle !== "object" || handle === null || Array.isArray(handle)) {
+    throw new TypeError("RLM child handle must be an object");
+  }
+  if (!Number.isSafeInteger(handle.id) || handle.id < 1) {
+    throw new TypeError("RLM child handle id must be a positive integer");
+  }
+  if (typeof handle.name !== "string") {
+    throw new TypeError("RLM child handle name must be a string");
+  }
+  if (!Number.isSafeInteger(handle.parentRunId) || handle.parentRunId < 0) {
+    throw new TypeError("RLM child handle parentRunId must be a non-negative integer");
+  }
+  if (!Number.isSafeInteger(handle.depth) || handle.depth < 1) {
+    throw new TypeError("RLM child handle depth must be a positive integer");
+  }
+  if (handle.tier !== "fast" && handle.tier !== "balanced" && handle.tier !== "deep") {
+    throw new TypeError("RLM child handle tier must be fast, balanced, or deep");
+  }
+  const copy = Object.create(null);
+  Object.defineProperties(copy, {
+    id: { value: handle.id, enumerable: true },
+    name: { value: handle.name, enumerable: true },
+    parentRunId: { value: handle.parentRunId, enumerable: true },
+    depth: { value: handle.depth, enumerable: true },
+    tier: { value: handle.tier, enumerable: true },
+  });
+  return Object.freeze(copy);
+}
+
+function createRlm() {
+  const rlm = Object.create(null);
+  Object.defineProperties(rlm, {
+    spawn: {
+      value: safeFunction((prompt, options) => {
+        if (typeof prompt !== "string" || prompt.trim() === "") {
+          throw new TypeError("ctx.rlm.spawn() prompt must be a non-empty string");
+        }
+        if (
+          options !== undefined &&
+          (typeof options !== "object" || options === null || Array.isArray(options))
+        ) {
+          throw new TypeError("ctx.rlm.spawn() options must be an object when provided");
+        }
+        if (options?.name !== undefined && typeof options.name !== "string") {
+          throw new TypeError("ctx.rlm.spawn() name must be a string when provided");
+        }
+        if (options?.context !== undefined && typeof options.context !== "string") {
+          throw new TypeError("ctx.rlm.spawn() context must be a string when provided");
+        }
+        if (
+          options?.tier !== undefined &&
+          (typeof options.tier !== "string" || !["fast", "balanced", "deep"].includes(options.tier))
+        ) {
+          throw new TypeError("ctx.rlm.spawn() tier must be fast, balanced, or deep");
+        }
+        return createRlmCall("spawn", { prompt, options: copySpawnOptions(options) });
+      }),
+      enumerable: true,
+    },
+    waitAll: {
+      value: safeFunction((handles) => {
+        if (!Array.isArray(handles)) throw new TypeError("ctx.rlm.waitAll() expects an array");
+        const copies = [];
+        for (let index = 0; index < handles.length; index += 1) {
+          copies.push(copyHandle(handles[index]));
+        }
+        return createRlmCall("waitAll", { handles: copies });
+      }),
+      enumerable: true,
+    },
+    result: {
+      value: safeFunction((handle) => createRlmCall("result", { handle: copyHandle(handle) })),
+      enumerable: true,
+    },
+    cancel: {
+      value: safeFunction((handle) => createRlmCall("cancel", { handle: copyHandle(handle) })),
+      enumerable: true,
+    },
+  });
+  return Object.freeze(rlm);
+}
+
+function createFs(root) {
+  const fsCapability = Object.create(null);
+  Object.defineProperty(fsCapability, "read", {
+    value: safeFunction((selector) => readFile(root, selector)),
+    enumerable: true,
+  });
+  return Object.freeze(fsCapability);
+}
+
+function readFile(root, selector) {
+  if (typeof selector !== "string") {
+    throw new TypeError("ctx.fs.read() selector must be a string");
+  }
+
+  const match = /^(\.\/[^:\r\n]+?)(?::([1-9]\d*)(?:-([1-9]\d*))?)?$/.exec(selector);
+  if (!match) {
+    throw new Error(
+      "ctx.fs.read() selector must be ./file or ./file:start[-end] with positive line numbers",
+    );
+  }
+  const relativePath = match[1].slice(2);
+  const start = match[2] === undefined ? undefined : Number(match[2]);
+  const end = match[3] === undefined ? start : Number(match[3]);
+  if (
+    (start !== undefined && !Number.isSafeInteger(start)) ||
+    (end !== undefined && !Number.isSafeInteger(end)) ||
+    (start !== undefined && end !== undefined && end < start)
+  ) {
+    throw new Error("ctx.fs.read() line range must use positive safe integers in ascending order");
+  }
+
+  const requestedPath = resolve(root, relativePath);
+  if (!isInside(root, requestedPath)) {
+    throw new Error("ctx.fs.read() path is outside the working directory");
+  }
+  const descriptor = openSync(requestedPath, "r");
+  try {
+    const actualPath = realpathSync(requestedPath);
+    if (!isInside(root, actualPath)) {
+      throw new Error("ctx.fs.read() path is outside the working directory");
+    }
+    const openedFile = fstatSync(descriptor);
+    const resolvedFile = statSync(actualPath);
+    if (openedFile.dev !== resolvedFile.dev || openedFile.ino !== resolvedFile.ino) {
+      throw new Error("ctx.fs.read() path changed while it was being opened");
+    }
+
+    const contents = readFileSync(descriptor, "utf8");
+    if (start === undefined) return contents;
+    return contents
+      .split(/\r?\n/)
+      .slice(start - 1, end)
+      .join("\n");
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function isInside(root, candidate) {
+  const pathRelation = relative(root, candidate);
+  return (
+    pathRelation === "" ||
+    (pathRelation !== ".." && !pathRelation.startsWith(`..${sep}`) && !isAbsolute(pathRelation))
+  );
+}
+
+function initialize(message) {
+  if (runtimeContext) throw new Error("Runtime is already initialized");
+  if (typeof message.context !== "string") throw new TypeError("context must be a string");
+  if (typeof message.rootDirectory !== "string" || !isAbsolute(message.rootDirectory)) {
+    throw new TypeError("rootDirectory must be an absolute path");
+  }
+  if (!Number.isSafeInteger(message.maxOutputChars) || message.maxOutputChars <= 0) {
+    throw new TypeError("maxOutputChars must be a positive integer");
+  }
+  if (!Number.isSafeInteger(message.heartbeatIntervalMs) || message.heartbeatIntervalMs <= 0) {
+    throw new TypeError("heartbeatIntervalMs must be a positive integer");
+  }
+  rootDirectory = realpathSync(message.rootDirectory);
+  maxOutputChars = message.maxOutputChars;
+  heartbeatIntervalMs = message.heartbeatIntervalMs;
+
+  const consoleCapability = Object.create(null);
+  Object.defineProperties(consoleCapability, {
+    log: { value: safeFunction((...values) => appendOutput("log", values)), enumerable: true },
+    error: {
+      value: safeFunction((...values) => appendOutput("error", values)),
+      enumerable: true,
+    },
+  });
+  Object.freeze(consoleCapability);
+
+  const sandbox = Object.create(null);
+  Object.defineProperties(sandbox, {
+    ctx: { value: undefined, writable: true, enumerable: true },
+    context: { value: undefined },
+    rlm: { value: undefined },
+    console: { value: undefined },
+  });
+  runtimeContext = vm.createContext(sandbox, {
+    name: "coder-rlm",
+    codeGeneration: { strings: false, wasm: false },
+  });
+  sandboxObjectPrototype = vm.runInContext("Object.prototype", runtimeContext);
+
+  const defaultCtx = Object.create(null);
+  Object.defineProperties(defaultCtx, {
+    context: { value: message.context, enumerable: true },
+    rlm: { value: createRlm(), enumerable: true },
+    console: { value: consoleCapability, enumerable: true },
+    fs: { value: createFs(rootDirectory), enumerable: true },
+  });
+  const ctx = Object.freeze(defaultCtx);
+  Object.defineProperty(runtimeContext, "ctx", {
+    value: ctx,
+    enumerable: true,
+    writable: false,
+    configurable: false,
+  });
+
+  replServer = new repl.REPLServer({
+    input: new PassThrough(),
+    output: new PassThrough(),
+    terminal: false,
+    useGlobal: false,
+    ignoreUndefined: true,
+  });
+  send({ type: "ready" });
+  startHeartbeats();
+}
+
+function execute(message) {
+  if (!runtimeContext || !replServer) throw new Error("Runtime is not initialized");
+  if (typeof message.code !== "string") throw new TypeError("code must be a string");
+  if (activeOutput) throw new Error("Concurrent execution is not supported");
+
+  activeOutput = { lines: [], length: 0, truncated: false };
+  let finished = false;
+  activeExecutionRequestId = message.requestId;
+  const finish = (error, value) => {
+    if (finished) return;
+    finished = true;
+    activeExecutionRequestId = undefined;
+    replServer._domain.removeListener("error", onDomainError);
+    const output = outputText(error ? undefined : value);
+    activeOutput = undefined;
+    if (error) {
+      send({
+        type: "executionResult",
+        requestId: message.requestId,
+        output,
+        error: {
+          name: error.name || "Error",
+          message: error.message || String(error),
+        },
+      });
+      return;
+    }
+    send({ type: "executionResult", requestId: message.requestId, output });
+  };
+  // REPL binds evaluation to an internal domain and reports runtime/rejected-await
+  // failures there instead of invoking its callback. Capture that path so a normal
+  // generated-code exception remains a recoverable tool result.
+  const onDomainError = (error) => finish(error);
+  replServer._domain.prependOnceListener("error", onDomainError);
+  replServer.eval(message.code, runtimeContext, "coder-rlm", finish);
+}
+
+function settleRlm(message) {
+  const pending = pendingRlmCalls.get(message.callId);
+  if (!pending) return;
+  pendingRlmCalls.delete(message.callId);
+  if (message.error !== undefined) pending.reject(safeProtocolError(message.error));
+  else pending.resolve(cloneForSandbox(message.result));
+}
+
+input.on("line", (line) => {
+  try {
+    const message = JSON.parse(line);
+    if (message.type === "init") initialize(message);
+    else if (message.type === "execute") execute(message);
+    else if (message.type === "rlmResult") settleRlm(message);
+    else throw new Error(`Unknown message type: ${String(message.type)}`);
+  } catch (error) {
+    send({
+      type: "fatal",
+      error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    });
+  }
+});

@@ -119,6 +119,7 @@ CI performs `bun install` followed by `make` on Ubuntu.
 | Path                                              | Purpose                                                |
 | ------------------------------------------------- | ------------------------------------------------------ |
 | `packages/coder`                                  | Interactive application and host-specific extensions   |
+| `packages/coder-rlm`                              | Minimal recursive language model harness over Pi       |
 | `packages/coder/src/index.ts`                     | Runtime assembly and active extension registration     |
 | `packages/coder/src/workspace`                    | Agent task provisioning, registry, and TUI integration |
 | `packages/coder/src/extensions/command-policy.ts` | Allowed and banned host commands                       |

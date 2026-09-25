@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -78,6 +78,7 @@ function registeredTools(options: {
   stackBodyRunner?: GhStackCommandRunner;
   restoreBranch?: WorkspaceBranchRestorer;
   workspaceController?: WorkspaceController;
+  parentBranch?: string;
   stackReadinessRunner?: StackReadinessRunner;
   assertWorkspace?: () => void | Promise<void>;
   autoPullRequestDescriptions?: boolean;
@@ -110,6 +111,7 @@ function registeredTools(options: {
       }),
     restoreBranch: options.restoreBranch,
     workspaceController: options.workspaceController,
+    parentBranch: options.parentBranch,
     stackReadinessRunner: options.stackReadinessRunner,
   });
   extension({
@@ -1163,6 +1165,72 @@ test("create_github_stack restores the owned branch after init traverses branche
     assert.deepEqual(calls, ["stack init -- feature"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci targets an explicit parent for a new ordinary PR", async () => {
+  const cwd = createRepository();
+  const remote = addOrigin(cwd);
+  const fakeBin = mkdtempSync(join(tmpdir(), "ordinary-parent-gh-"));
+  const capturedBase = join(cwd, "captured-base");
+  const workspaceController: WorkspaceController = {
+    getParentBranch() {
+      assert.equal(this, workspaceController);
+      return "parent-feature";
+    },
+    snapshot: async () => ({ activeBranch: "feature", branches: ["feature"], baseBranch: null }),
+    validate: async () => {},
+    claim: async () => {},
+    restore: async () => {},
+  };
+  try {
+    git(cwd, ["switch", "main"]);
+    git(cwd, ["switch", "-c", "parent-feature"]);
+    git(cwd, ["push", "origin", "parent-feature"]);
+    git(cwd, ["switch", "feature"]);
+    const fakeGh = join(fakeBin, "gh");
+    writeFileSync(
+      fakeGh,
+      `#!/bin/sh
+if [ "$1" = "stack" ] && [ "$2" = "view" ]; then exit 1; fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then exit 1; fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "--base" ]; then printf "%s\\n" "$2" > ${JSON.stringify(capturedBase)}; fi
+    shift
+  done
+  printf "%s\\n" "https://example.test/pull/1"
+  exit 0
+fi
+if [ "$1" = "api" ] && printf "%s" "$3" | grep -q check-suites; then printf "%s\\n" "completed"; exit 0; fi
+if [ "$1" = "api" ] && printf "%s" "$3" | grep -q check-runs; then printf "%s\\t%s\\t%s\\t%s\\n" check completed success https://example.test/check; exit 0; fi
+exit 1
+`,
+    );
+    chmodSync(fakeGh, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+    try {
+      const tool = requireTool(
+        registeredTools({
+          stackRunner: async () => {
+            throw new Error('current branch "feature" is not part of a stack');
+          },
+          workspaceController,
+        }),
+        "push_and_check_ci",
+      );
+      await tool.execute("new-parent", {}, undefined, undefined, { cwd });
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+    assert.equal(readFileSync(capturedBase, "utf8").trim(), "parent-feature");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
   }
 });
 

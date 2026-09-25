@@ -116,6 +116,8 @@ export function createFixCiExtension(options: {
   restoreBranch?: WorkspaceBranchRestorer;
   workspaceController?: WorkspaceController;
   stackReadinessRunner?: StackReadinessRunner;
+  /** Parent recorded when the host first created the current workspace branch. */
+  parentBranch?: string;
 }) {
   return function (pi: ExtensionAPI) {
     let cycleCount = 0;
@@ -1442,6 +1444,7 @@ export function createFixCiExtension(options: {
         const stackProbe = await probeGhStack(cwd, signal, stackRunner);
         let pushedSha: string | undefined;
         let prBase: string | null = null;
+        let explicitParent: string | null = null;
         // A successful base update intentionally rewrites the PR branch. Do
         // not merge the old remote tip back into that rebased history.
         if (rebasedBranchAfterBaseUpdate && rebasedBranchAfterBaseUpdate !== branchName) {
@@ -2243,7 +2246,19 @@ export function createFixCiExtension(options: {
           // ── 2. Check if base branch is ahead — rebase if so ────────────
           // Keep the PR branch up to date with the base branch before pushing
           // and running CI. This prevents CI from testing a stale branch.
-          prBase = await getPrBaseBranch(cwd, signal);
+          // An explicit host parent is authoritative only when GitHub confirms
+          // there is no existing ordinary PR; getPrBaseBranch preserves the
+          // GitHub-recorded base otherwise.
+          const controllerParent = options.workspaceController?.getParentBranch
+            ? await options.workspaceController.getParentBranch(cwd)
+            : undefined;
+          const hasParentProvenance =
+            options.workspaceController?.getParentBranch !== undefined ||
+            options.parentBranch !== undefined;
+          explicitParent = options.workspaceController?.getParentBranch
+            ? controllerParent?.trim() || null
+            : options.parentBranch?.trim() || null;
+          prBase = await getPrBaseBranch(cwd, signal, explicitParent, !hasParentProvenance);
 
           if (prBase) {
             const baseAhead = await isBaseBranchAhead(cwd, prBase, signal);
@@ -2427,7 +2442,11 @@ export function createFixCiExtension(options: {
         if (!existingPr) {
           notify("Creating draft pull request…");
 
-          const targetBase = prBase ?? (await getPrBaseBranch(cwd, signal));
+          const hasParentProvenance =
+            options.workspaceController?.getParentBranch !== undefined ||
+            options.parentBranch !== undefined;
+          const targetBase =
+            prBase ?? (await getPrBaseBranch(cwd, signal, explicitParent, !hasParentProvenance));
           if (!targetBase) {
             return respond("Draft PR creation failed: could not determine a target branch.", {
               prCreationFailed: true,

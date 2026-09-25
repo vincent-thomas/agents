@@ -531,7 +531,7 @@ suite("findClosestBaseBranch", () => {
 
 suite("getPrBaseBranch", () => {
   test(
-    "preserves the base reported for an existing PR",
+    "preserves the base reported for an existing PR over an explicit parent",
     withGitRepos(async (local) => {
       const fakeGh =
         'if [ "$1" = "pr" ] && [ "$2" = "list" ]; then\n' +
@@ -540,7 +540,38 @@ suite("getPrBaseBranch", () => {
         "fi\n" +
         "exit 1";
       await withFakeGh(local, fakeGh, async () => {
-        assert.equal(await getPrBaseBranch(local), "feature/recorded-base");
+        assert.equal(
+          await getPrBaseBranch(local, undefined, "feature/explicit-parent"),
+          "feature/recorded-base",
+        );
+      });
+    }),
+  );
+
+  test(
+    "uses an explicit parent for a new PR before inferring a nearest branch",
+    withGitRepos(async (local) => {
+      const fakeGh = 'if [ "$1" = "pr" ] && [ "$2" = "list" ]; then exit 0; fi\n' + "exit 1";
+      await withFakeGh(local, fakeGh, async () => {
+        assert.equal(
+          await getPrBaseBranch(local, undefined, "feature/explicit-parent"),
+          "feature/explicit-parent",
+        );
+      });
+    }),
+  );
+
+  test(
+    "does not infer a base when authoritative parent provenance is missing",
+    withGitRepos(async (local) => {
+      git("git checkout -b feature/current", local);
+      writeFileSync(join(local, "feature.txt"), "feature");
+      git("git add .", local);
+      git("git commit -m 'feature commit'", local);
+
+      const fakeGh = 'if [ "$1" = "pr" ] && [ "$2" = "list" ]; then exit 0; fi\nexit 1';
+      await withFakeGh(local, fakeGh, async () => {
+        assert.equal(await getPrBaseBranch(local, undefined, null, false), null);
       });
     }),
   );

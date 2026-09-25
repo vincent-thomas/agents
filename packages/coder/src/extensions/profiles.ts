@@ -7,6 +7,7 @@ import { createwriteGuardExtension } from "./write-guard/index.ts";
 export interface CreateExtensionProfilesOptions {
   assertWorkspace(cwd: string): Promise<void>;
   workspaceController?: WorkspaceController;
+  parentBranch?: string;
 }
 
 export function createExtensionProfiles(options: CreateExtensionProfilesOptions) {
@@ -19,6 +20,7 @@ export function createExtensionProfiles(options: CreateExtensionProfilesOptions)
     createFixCiExtension({
       assertWorkspace: options.assertWorkspace,
       workspaceController: options.workspaceController,
+      parentBranch: options.parentBranch,
     }),
   ];
   const subagentExtensions: ExtensionFactory[] = [...safetyExtensions, ...workspaceExtensions];

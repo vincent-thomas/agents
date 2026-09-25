@@ -174,6 +174,7 @@ test("creates an isolated branch and worktree without moving dirty source change
     assert.equal(git(workspace.worktree, "branch", "--show-current"), workspace.branch);
     assert.equal(workspace.branch, "feature/parser");
     assert.equal(workspace.branchSetup, "created");
+    assert.equal(workspace.parentBranch, originalBranch);
     assert.equal(workspace.baseSha, git(repo, "rev-parse", "HEAD"));
     await assertOwnedWorkspace(workspace);
   } finally {
@@ -226,6 +227,22 @@ test("lists repository workspaces and persists session metadata", async () => {
     assert.equal(persisted?.sessionName, "Refactor auth");
     assert.deepEqual(persisted?.transition, updated.transition);
     assert.ok(records.some((record) => record.id === second.id));
+  } finally {
+    cleanup();
+  }
+});
+
+test("loads version-1 records without parent provenance", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const created = await createWorkspace(store, repo, "feature/legacy-parent");
+    const path = join(store.stateDir, "workspaces", "records", `${created.id}.json`);
+    const record = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    delete record.parentBranch;
+    writeFileSync(path, JSON.stringify(record));
+
+    const loaded = await loadWorkspace(store, created.id);
+    assert.equal(loaded.parentBranch, undefined);
   } finally {
     cleanup();
   }

@@ -38,12 +38,14 @@ test("controls stack ownership and restores a legacy snapshot", async () => {
   try {
     const workspace = await createWorkspace(store, repo, "feature/controller");
     const originalBranch = workspace.branch;
+    const parentBranch = git(repo, "branch", "--show-current");
     git(repo, "branch", "stack/base");
     let currentWorkspace = workspace;
     const controller = createWorkspaceStackController({
       store,
       getWorkspace: () => currentWorkspace,
     });
+    assert.equal(await controller.getParentBranch?.(workspace.worktree), parentBranch);
     const before = await controller.snapshot(workspace.worktree);
     assert.deepEqual(before, {
       activeBranch: "feature/controller",

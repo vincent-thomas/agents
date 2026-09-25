@@ -69,6 +69,18 @@ async function git(cwd: string, args: string[]): Promise<GitResult> {
   return { stdout: result.stdout, stderr: result.stderr };
 }
 
+async function currentBranch(cwd: string): Promise<string> {
+  try {
+    return (await git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"])).stdout.trim();
+  } catch (error: unknown) {
+    // symbolic-ref uses status 1 specifically when HEAD is detached. Keep all
+    // other Git failures visible to callers instead of treating them as a
+    // missing branch.
+    if ((error as { code?: number }).code === 1) return "";
+    throw error;
+  }
+}
+
 async function canonicalizeMissingPath(path: string): Promise<string> {
   let candidate = resolve(path);
   const missingSegments: string[] = [];
@@ -723,9 +735,7 @@ export async function inspectWorkspaceForRemoval(
     throw new Error(`Workspace ${workspace.id} is the primary checkout.`);
   }
 
-  const branch = (
-    await git(actualWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"])
-  ).stdout.trim();
+  const branch = await currentBranch(actualWorktree);
   if (branch !== workspace.branch) {
     throw new Error(
       `Workspace branch mismatch: expected ${workspace.branch}, found ${branch || "detached HEAD"}.`,
@@ -794,29 +804,27 @@ export async function assertManagedWorkspace(
   }
   await assertWorkspacePath(workspace.worktree, cwd);
   const actualCwd = await realpath(cwd);
-  const currentBranch = (
-    await git(actualCwd, ["symbolic-ref", "--quiet", "--short", "HEAD"])
-  ).stdout.trim();
-  if (currentBranch !== expectedBranch) {
+  const branch = await currentBranch(actualCwd);
+  if (branch !== expectedBranch) {
     throw new Error(
-      `Agent workspace branch mismatch: expected ${expectedBranch}, found ${currentBranch || "detached HEAD"}.`,
+      `Agent workspace branch mismatch: expected ${expectedBranch}, found ${branch || "detached HEAD"}.`,
     );
   }
   const repository = await resolveRepository(actualCwd);
   if (repository.repository !== workspace.repository) {
     throw new Error(`Agent workspace ${workspace.id} belongs to a different repository.`);
   }
-  return currentBranch;
+  return branch;
 }
 
 export async function assertOwnedWorkspace(
   workspace: AgentWorkspace,
   cwd = workspace.worktree,
 ): Promise<void> {
-  const currentBranch = await assertManagedWorkspace(workspace, cwd, workspace.branch);
-  if (!workspaceOwnsBranch(workspace, currentBranch)) {
+  const branch = await assertManagedWorkspace(workspace, cwd, workspace.branch);
+  if (!workspaceOwnsBranch(workspace, branch)) {
     throw new Error(
-      `Agent workspace branch mismatch: expected ${workspace.branch}, found ${currentBranch}.`,
+      `Agent workspace branch mismatch: expected ${workspace.branch}, found ${branch}.`,
     );
   }
 }

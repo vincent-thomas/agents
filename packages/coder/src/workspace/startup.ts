@@ -1,6 +1,6 @@
 import type { SessionPointerStore } from "../session-pointer.ts";
 import { LaunchError, selectWorkspace, type LaunchCommand } from "./launch.ts";
-import { resolveRegularCheckout, type WorkspaceStore } from "./logic.ts";
+import { assertOwnedWorkspace, resolveRegularCheckout, type WorkspaceStore } from "./logic.ts";
 import {
   reconcileMergedWorkspaces,
   removeWorkspaceByBranch,
@@ -13,6 +13,7 @@ interface StartupDependencies {
   reconcileMergedWorkspaces: typeof reconcileMergedWorkspaces;
   removeWorkspaceByBranch: typeof removeWorkspaceByBranch;
   selectWorkspace: typeof selectWorkspace;
+  assertOwnedWorkspace: typeof assertOwnedWorkspace;
 }
 
 const defaultDependencies: StartupDependencies = {
@@ -20,6 +21,7 @@ const defaultDependencies: StartupDependencies = {
   reconcileMergedWorkspaces,
   removeWorkspaceByBranch,
   selectWorkspace,
+  assertOwnedWorkspace,
 };
 
 export async function prepareWorkspaceStartup(options: {
@@ -69,13 +71,22 @@ export async function prepareWorkspaceStartup(options: {
     cwd: primaryCheckout,
     sessionPointers: options.sessionPointers,
   });
-  const selectedWorkspace =
-    options.launchCommand.kind === "goto"
-      ? await dependencies.selectWorkspace({
-          store: options.store,
-          cwd: primaryCheckout,
-          branch: options.launchCommand.branch,
-        })
-      : undefined;
+  let selectedWorkspace: Awaited<ReturnType<typeof selectWorkspace>> | undefined;
+  if (options.launchCommand.kind === "goto") {
+    try {
+      selectedWorkspace = await dependencies.selectWorkspace({
+        store: options.store,
+        cwd: primaryCheckout,
+        branch: options.launchCommand.branch,
+      });
+      await dependencies.assertOwnedWorkspace(selectedWorkspace.workspace);
+    } catch (error: unknown) {
+      if (error instanceof LaunchError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new LaunchError(
+        `Could not enter workspace ${options.launchCommand.branch ?? selectedWorkspace?.workspace.branch}: ${message}`,
+      );
+    }
+  }
   return { primaryCheckout, reconciliation, selectedWorkspace };
 }

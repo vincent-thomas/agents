@@ -480,13 +480,48 @@ test("validates an explicit managed checkout branch without persisted ownership"
   }
 });
 
-test("rejects a workspace checked out on a branch it does not own", async () => {
+test("reports detached HEAD as an owned workspace branch mismatch", async () => {
   const { repo, store, cleanup } = fixture();
   try {
     const workspace = await createWorkspace(store, repo, "feature/detach");
     git(workspace.worktree, "checkout", "--detach");
 
-    await assert.rejects(assertOwnedWorkspace(workspace), /branch mismatch|symbolic-ref/);
+    await assert.rejects(assertOwnedWorkspace(workspace), /branch mismatch.*detached HEAD/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("propagates a non-detached symbolic-ref failure from an unusable checkout", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/unusable");
+    rmSync(join(workspace.worktree, ".git"));
+
+    await assert.rejects(
+      assertOwnedWorkspace(workspace),
+      (error: unknown) =>
+        error instanceof Error &&
+        (error as { code?: number }).code === 128 &&
+        /not a git repository/.test(error.message) &&
+        !/detached HEAD/.test(error.message),
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("does not remove a detached workspace checkout", async () => {
+  const { repo, store, cleanup } = fixture();
+  try {
+    const workspace = await createWorkspace(store, repo, "feature/delete-detached");
+    git(workspace.worktree, "checkout", "--detach");
+
+    await assert.rejects(
+      removeWorkspaceWorktree(store, workspace, repo),
+      /branch mismatch.*detached HEAD/,
+    );
+    assert.equal(readFileSync(join(workspace.worktree, "tracked.txt"), "utf8"), "committed\n");
   } finally {
     cleanup();
   }

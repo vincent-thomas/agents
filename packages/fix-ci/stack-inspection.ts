@@ -1,7 +1,10 @@
 import { currentBranch, getBranchSha } from "./git-utils.ts";
 import {
   probeGhStackCurrentPullRequest,
+  probeGhStackPullRequest,
   probeGhStackRemote,
+  parseGhStackPullRequestRepository,
+  resolveGhStackStaleBase,
   type GhStackCommandRunner,
   type GhStackRemoteStack,
   type GhStackView,
@@ -102,21 +105,6 @@ function aggregateInspectionStatus(
   return "synchronized";
 }
 
-function parsePullRequestRepository(urlText: string): { owner: string; repository: string } | null {
-  try {
-    const url = new URL(urlText);
-    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) {
-      return null;
-    }
-    const parts = url.pathname.split("/").filter(Boolean);
-    if (parts.length !== 4 || parts[2] !== "pull" || !/^[1-9][0-9]*$/.test(parts[3])) return null;
-    if (!parts[0] || !parts[1]) return null;
-    return { owner: parts[0], repository: parts[1] };
-  } catch {
-    return null;
-  }
-}
-
 function compareRemoteStack(
   local: readonly StackInspectionMember[],
   baseBranch: string | null,
@@ -205,14 +193,40 @@ export async function inspectUnstackedStack(
     return { status: "unavailable", output: currentPrProbe.output };
   }
 
-  const repository = parsePullRequestRepository(currentPrProbe.pullRequest.url);
-  if (!repository) {
+  const repository = parseGhStackPullRequestRepository(currentPrProbe.pullRequest.url);
+  if (!repository || repository.number !== currentPrProbe.pullRequest.number) {
     return {
       status: "unavailable",
       output: "could not parse the repository from the current PR URL",
     };
   }
   const activeBranch = (await currentBranch(cwd, signal)) ?? "";
+  const activePr = await probeGhStackPullRequest(
+    cwd,
+    repository.owner,
+    repository.repository,
+    currentPrProbe.pullRequest.number,
+    signal,
+    runner,
+  );
+  if (activePr.status === "error") {
+    return { status: "unavailable", output: activePr.output };
+  }
+  const activePrRepository = activePr.pullRequest.url
+    ? parseGhStackPullRequestRepository(activePr.pullRequest.url)
+    : null;
+  if (
+    activePr.pullRequest.number !== currentPrProbe.pullRequest.number ||
+    activePr.pullRequest.headRefName !== activeBranch ||
+    activePrRepository?.owner !== repository.owner ||
+    activePrRepository?.repository !== repository.repository ||
+    activePrRepository?.number !== currentPrProbe.pullRequest.number
+  ) {
+    return {
+      status: "unavailable",
+      output: "active PR head does not match the current branch or PR number",
+    };
+  }
   const remoteProbe = await probeGhStackRemote(
     cwd,
     repository.owner,
@@ -223,14 +237,17 @@ export async function inspectUnstackedStack(
   );
   if (remoteProbe.status === "absent") return { status: "absent", output: remoteProbe.output };
   if (remoteProbe.status === "error") return { status: "unavailable", output: remoteProbe.output };
+  const remoteCurrentPr = remoteProbe.stack.pullRequests.find(
+    (pullRequest) => pullRequest.number === currentPrProbe.pullRequest.number,
+  );
   if (
-    !remoteProbe.stack.pullRequests.some(
-      (pullRequest) => pullRequest.number === currentPrProbe.pullRequest.number,
-    )
+    activePr.pullRequest.baseRefName !== remoteProbe.stack.base.ref ||
+    !remoteCurrentPr ||
+    remoteCurrentPr.head.ref !== activeBranch
   ) {
     return {
       status: "unavailable",
-      output: `remote stack response did not include current PR #${currentPrProbe.pullRequest.number}`,
+      output: `remote stack response did not validate current PR #${currentPrProbe.pullRequest.number} head/base`,
     };
   }
 
@@ -284,11 +301,15 @@ export async function inspectStackReport(
     if (!firstUrl) {
       remoteStatus = "local-only";
     } else {
-      const repository = parsePullRequestRepository(firstUrl);
+      const repository = parseGhStackPullRequestRepository(firstUrl);
       const firstPr = view.branches.find((branch) => branch.pr?.url)?.pr?.number;
-      if (!repository || !firstPr) {
+      if (!repository || !firstPr || repository.number !== firstPr) {
         remoteStatus = "unavailable";
-        remoteMismatches = ["could not parse the repository from the local PR URL"];
+        remoteMismatches = [
+          repository && firstPr && repository.number !== firstPr
+            ? `local PR URL number #${repository.number} does not match reported PR #${firstPr}`
+            : "could not parse the repository or PR number from the local PR URL",
+        ];
       } else {
         const remoteProbe = await probeGhStackRemote(
           cwd,
@@ -310,6 +331,36 @@ export async function inspectStackReport(
       }
     }
   }
+
+  const localMetadataContradicted =
+    remoteStatus === "absent" && local.some((member) => member.prNumber !== null);
+  if (localMetadataContradicted) {
+    localMismatches.push(
+      "stale local stack metadata: authoritative remote stack membership is absent",
+    );
+  }
+
+  const activeLocalMember = local.find((member) => member.branch === activeBranch);
+  const staleRepository = activeLocalMember?.prUrl
+    ? parseGhStackPullRequestRepository(activeLocalMember.prUrl)
+    : null;
+  const staleBaseResolution =
+    localMetadataContradicted &&
+    baseBranch &&
+    activeLocalMember &&
+    activeLocalMember.prNumber !== null &&
+    staleRepository &&
+    staleRepository.number === activeLocalMember.prNumber
+      ? await resolveGhStackStaleBase(
+          cwd,
+          baseBranch,
+          activeBranch,
+          activeLocalMember.prNumber,
+          staleRepository,
+          signal,
+          runner,
+        )
+      : undefined;
 
   let ownershipStatus: "synchronized" | "mismatch" | "unavailable" = "unavailable";
   let ownershipMismatches: string[] = [];
@@ -351,7 +402,12 @@ export async function inspectStackReport(
   const descendants =
     activeIndex >= 0 ? view.branches.slice(activeIndex + 1).map((branch) => branch.name) : [];
   const lines = [
-    `Base: ${baseBranch ?? "<unknown>"}`,
+    `Base: ${baseBranch ?? "<unknown>"}${localMetadataContradicted ? " (stale local metadata)" : ""}`,
+    ...(staleBaseResolution?.status === "resolved"
+      ? [
+          `Effective base should be: ${staleBaseResolution.replacementBase} (replacing stale local base ${baseBranch})`,
+        ]
+      : []),
     `Active: ${activeBranch || "<unknown>"}`,
     ...local.map((member, index) => {
       const branch = view.branches[index];
@@ -391,6 +447,23 @@ export async function inspectStackReport(
         stack: remoteStack,
         mismatches: remoteMismatches,
       },
+      ...(staleBaseResolution
+        ? {
+            effectiveBase: {
+              status: staleBaseResolution.status,
+              staleBase: staleBaseResolution.staleBase,
+              ...(staleBaseResolution.status === "resolved"
+                ? {
+                    replacementBase: staleBaseResolution.replacementBase,
+                    source: staleBaseResolution.source,
+                  }
+                : {
+                    reason: staleBaseResolution.reason,
+                    output: staleBaseResolution.output,
+                  }),
+            },
+          }
+        : {}),
       ownership: {
         status: ownershipStatus,
         snapshot: ownershipSnapshot,

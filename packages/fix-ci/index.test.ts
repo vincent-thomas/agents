@@ -172,6 +172,8 @@ function stackFixture(
   members: readonly StackFixtureMember[],
   options: {
     base?: string;
+    prBase?: string;
+    mergedBases?: string[];
     remote?: unknown;
     checkout?: (branch: string, signal: AbortSignal | undefined) => void;
   } = {},
@@ -183,6 +185,25 @@ function stackFixture(
     if (args[0] === "api") {
       assert.notEqual(options.remote, undefined, "unexpected remote API request");
       return { stdout: JSON.stringify(options.remote), stderr: "" };
+    }
+    if (args[0] === "pr" && args[1] === "view") {
+      const member = members.find((candidate) => candidate.pr);
+      const number = member?.pr?.number ?? 1;
+      return {
+        stdout: JSON.stringify({
+          number,
+          url: `https://github.com/acme/repo/pull/${number}`,
+          headRefName: member?.branch ?? "feature",
+          baseRefName: options.prBase ?? base,
+        }),
+        stderr: "",
+      };
+    }
+    if (args[0] === "pr" && args[1] === "list") {
+      return {
+        stdout: JSON.stringify((options.mergedBases ?? []).map((baseRefName) => ({ baseRefName }))),
+        stderr: "",
+      };
     }
     if (args[1] === "view") {
       const current = git(cwd, ["branch", "--show-current"]);
@@ -224,6 +245,141 @@ function stackFixture(
     throw new Error(`unexpected stack command: ${args.join(" ")}`);
   };
   return { runner, calls };
+}
+
+function staleSingletonFixture(
+  cwd: string,
+  options: {
+    activePrBase: string;
+    mergedBases?: readonly string[];
+    remote?: unknown;
+    canonicalRepository?: string;
+    failUnstack?: boolean;
+    rollbackPrUrl?: string;
+    replacementPrUrl?: string;
+  },
+): { runner: GhStackCommandRunner; calls: string[] } {
+  const calls: string[] = [];
+  let localStacked = true;
+  let prBase = options.activePrBase;
+  let prViewUrl = "https://github.com/acme/repo/pull/42";
+  let rollbackVerificationView = false;
+  const runner: GhStackCommandRunner = async (args) => {
+    calls.push(args.join(" "));
+    if (args[0] === "stack" && args[1] === "view") {
+      if (!localStacked) throw new Error('current branch "feature" is not part of a stack');
+      return {
+        stdout: JSON.stringify({
+          trunk: "former-stack",
+          currentBranch: "feature",
+          branches: [
+            {
+              name: "feature",
+              head: git(cwd, ["rev-parse", "feature"]),
+              base: "former-stack",
+              isCurrent: true,
+              isMerged: false,
+              isQueued: false,
+              needsRebase: false,
+              pr: {
+                number: 42,
+                url:
+                  rollbackVerificationView && options.rollbackPrUrl
+                    ? options.rollbackPrUrl
+                    : "https://github.com/acme/repo/pull/42",
+                state: "OPEN",
+                draft: true,
+              },
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+    if (args[0] === "api") return { stdout: JSON.stringify(options.remote ?? []), stderr: "" };
+    if (args[0] === "repo" && args[1] === "view") {
+      return {
+        stdout: JSON.stringify({ nameWithOwner: options.canonicalRepository ?? "acme/repo" }),
+        stderr: "",
+      };
+    }
+    if (args[0] === "pr" && args[1] === "view") {
+      return {
+        stdout: JSON.stringify({
+          number: 42,
+          url: prViewUrl,
+          headRefName: "feature",
+          baseRefName: prBase,
+        }),
+        stderr: "",
+      };
+    }
+    if (args[0] === "pr" && args[1] === "list") {
+      return {
+        stdout: JSON.stringify((options.mergedBases ?? []).map((baseRefName) => ({ baseRefName }))),
+        stderr: "",
+      };
+    }
+    if (args[0] === "pr" && args[1] === "edit") {
+      prBase = args.at(-1) as string;
+      if (prBase === "main" && options.replacementPrUrl) prViewUrl = options.replacementPrUrl;
+      return { stdout: "edited", stderr: "" };
+    }
+    if (args[0] === "stack" && args[1] === "unstack") {
+      if (options.failUnstack && args.includes("--local")) {
+        throw new Error("unstack failed");
+      }
+      localStacked = false;
+      return { stdout: "unstacked", stderr: "" };
+    }
+    if (args[0] === "stack" && args[1] === "init") {
+      localStacked = true;
+      rollbackVerificationView = true;
+      return { stdout: "initialized", stderr: "" };
+    }
+    throw new Error(`unexpected stack fixture command: ${args.join(" ")}`);
+  };
+  return { runner, calls };
+}
+
+function installOrdinaryGhFixture(): { fakeBin: string; restore: () => void } {
+  const fakeBin = mkdtempSync(join(tmpdir(), "github-stack-ordinary-gh-"));
+  writeFileSync(
+    join(fakeBin, "gh"),
+    `#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  case "$*" in
+    *"--json number,state"*) exit 1 ;;
+    *"--json state"*) printf 'OPEN\\n' ; exit 0 ;;
+    *"--json number"*) printf '42\\n' ; exit 0 ;;
+  esac
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  case "$*" in *"--base main"*) printf 'https://github.com/acme/repo/pull/42\\n' ; exit 0 ;; esac
+  printf 'unexpected PR base\\n' >&2
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "ready" ]; then exit 0; fi
+if [ "$1" = "api" ]; then
+  case "$*" in
+    *"check-runs"*) printf 'ci\\tcompleted\\tsuccess\\thttps://example.test/check\\n' ;;
+  esac
+  exit 0
+fi
+exit 1
+`,
+  );
+  chmodSync(join(fakeBin, "gh"), 0o755);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+  return {
+    fakeBin,
+    restore: () => {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      rmSync(fakeBin, { recursive: true, force: true });
+    },
+  };
 }
 
 function remoteStack(
@@ -1267,6 +1423,204 @@ test("push_and_check_ci claims a legacy singleton before stack sync", async () =
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci repairs a stale singleton and continues ordinary work on the replacement base", async () => {
+  const cwd = createRepository();
+  const remote = addOrigin(cwd);
+  const ordinaryGh = installOrdinaryGhFixture();
+  try {
+    const fixture = staleSingletonFixture(cwd, {
+      activePrBase: "former-stack",
+      mergedBases: ["main"],
+    });
+    const ownership = controllerFixture({
+      activeBranch: "feature",
+      branches: ["feature"],
+      baseBranch: "former-stack",
+    });
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner, workspaceController: ownership.controller }),
+      "push_and_check_ci",
+    ).execute(
+      "repair-stale-singleton",
+      {
+        pull_requests: [{ branch: "feature", title: "Feature", body: "Describe the feature." }],
+      },
+      undefined,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.staleSingletonRepaired, true, JSON.stringify(result.details));
+    assert.equal(result.details.prBaseChanged, true);
+    assert.equal(result.details.replacementBase, "main");
+    assert.equal(result.details.allPassed, true, JSON.stringify(result.details));
+    assert.deepEqual(ownership.claims, [
+      { activeBranch: "feature", branches: ["feature"], baseBranch: "main" },
+    ]);
+    assert.deepEqual(fixture.calls, [
+      "stack view --json",
+      "repo view --json nameWithOwner",
+      "api --method GET repos/acme/repo/stacks?pull_request=42",
+      "pr view 42 --repo acme/repo --json number,url,headRefName,baseRefName",
+      "pr list --state merged --repo acme/repo --head former-stack --json baseRefName --limit 1001",
+      "pr view 42 --repo acme/repo --json number,url,headRefName,baseRefName",
+      "pr edit 42 --repo acme/repo --base main",
+      "pr view 42 --repo acme/repo --json number,url,headRefName,baseRefName",
+      "stack unstack --local",
+      "stack view --json",
+    ]);
+  } finally {
+    ordinaryGh.restore();
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci rejects a post-edit PR identity mismatch", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = staleSingletonFixture(cwd, {
+      activePrBase: "former-stack",
+      mergedBases: ["main"],
+      replacementPrUrl: "https://github.com/other/repo/pull/42",
+    });
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner }),
+      "push_and_check_ci",
+    ).execute("repair-pr-identity-mismatch", {}, undefined, undefined, { cwd });
+    assert.equal(result.details.staleSingletonRepairFailed, true, JSON.stringify(result.details));
+    assert.equal(result.details.repairFailureStage, "pr-edit");
+    assert.equal((result.details.replacementVerification as { verified: boolean }).verified, false);
+    assert.equal(
+      (result.details.rollback as { prBase: { verified: boolean } }).prBase.verified,
+      false,
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci skips PR retargeting when the active PR already uses the replacement base", async () => {
+  const cwd = createRepository();
+  const remote = addOrigin(cwd);
+  const ordinaryGh = installOrdinaryGhFixture();
+  try {
+    const fixture = staleSingletonFixture(cwd, { activePrBase: "main" });
+    const ownership = controllerFixture({
+      activeBranch: "feature",
+      branches: ["feature"],
+      baseBranch: "former-stack",
+    });
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner, workspaceController: ownership.controller }),
+      "push_and_check_ci",
+    ).execute(
+      "repair-already-retargeted",
+      { pull_requests: [{ branch: "feature", title: "Feature", body: "Describe the feature." }] },
+      undefined,
+      undefined,
+      { cwd },
+    );
+
+    assert.equal(result.details.staleSingletonRepaired, true, JSON.stringify(result.details));
+    assert.equal(result.details.prBaseChanged, false);
+    assert.equal(result.details.replacementBase, "main");
+    assert.equal(result.details.allPassed, true, JSON.stringify(result.details));
+    assert.equal(
+      fixture.calls.some((call) => call.startsWith("pr edit ")),
+      false,
+    );
+    assert.deepEqual(fixture.calls, [
+      "stack view --json",
+      "repo view --json nameWithOwner",
+      "api --method GET repos/acme/repo/stacks?pull_request=42",
+      "pr view 42 --repo acme/repo --json number,url,headRefName,baseRefName",
+      "pr view 42 --repo acme/repo --json number,url,headRefName,baseRefName",
+      "stack unstack --local",
+      "stack view --json",
+    ]);
+  } finally {
+    ordinaryGh.restore();
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci stops before remote probing on canonical repository mismatch", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = staleSingletonFixture(cwd, {
+      activePrBase: "former-stack",
+      canonicalRepository: "other/repo",
+    });
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner }),
+      "push_and_check_ci",
+    ).execute("canonical-mismatch", {}, undefined, undefined, { cwd });
+    assert.equal(result.details.repairFailureStage, "canonical-repository-mismatch");
+    assert.equal(result.details.mutationAttempted, false);
+    assert.deepEqual(fixture.calls, ["stack view --json", "repo view --json nameWithOwner"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci stops on remote singleton head mismatch", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = staleSingletonFixture(cwd, {
+      activePrBase: "former-stack",
+      remote: remoteStack([{ number: 42, branch: "other", sha: "sha-other" }]),
+    });
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner }),
+      "push_and_check_ci",
+    ).execute("remote-head-mismatch", {}, undefined, undefined, { cwd });
+    assert.equal(result.details.repairFailureStage, "remote-head-mismatch");
+    assert.equal(result.details.mutationAttempted, false);
+    assert.deepEqual(fixture.calls, [
+      "stack view --json",
+      "repo view --json nameWithOwner",
+      "api --method GET repos/acme/repo/stacks?pull_request=42",
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci stops before mutation when merged stale-base destinations are ambiguous", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = staleSingletonFixture(cwd, {
+      activePrBase: "former-stack",
+      mergedBases: ["main", "release"],
+    });
+    const ownership = controllerFixture({
+      activeBranch: "feature",
+      branches: ["feature"],
+      baseBranch: "former-stack",
+    });
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner, workspaceController: ownership.controller }),
+      "push_and_check_ci",
+    ).execute("ambiguous-stale-base", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.staleSingletonRepairFailed, true, JSON.stringify(result.details));
+    assert.equal(result.details.repairFailureStage, "base-resolution");
+    assert.equal(result.details.mutationAttempted, false);
+    assert.deepEqual(ownership.calls, []);
+    assert.deepEqual(fixture.calls, [
+      "stack view --json",
+      "repo view --json nameWithOwner",
+      "api --method GET repos/acme/repo/stacks?pull_request=42",
+      "pr view 42 --repo acme/repo --json number,url,headRefName,baseRefName",
+      "pr list --state merged --repo acme/repo --head former-stack --json baseRefName --limit 1001",
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
   }
 });
 
@@ -2455,6 +2809,192 @@ test("inspect_stack enriches remote PR details without mutating local state", as
   }
 });
 
+test("inspect_stack refuses remote probing when local PR URL number mismatches", async () => {
+  const cwd = createRepository();
+  try {
+    const featureSha = git(cwd, ["rev-parse", "feature"]);
+    const fixture = stackFixture(
+      cwd,
+      [
+        {
+          branch: "feature",
+          pr: { number: 42, url: "https://github.com/acme/repo/pull/43" },
+        },
+      ],
+      { remote: remoteStack([{ number: 42, branch: "feature", sha: featureSha }]) },
+    );
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner }),
+      "inspect_stack",
+    ).execute("inspect-url-number-mismatch", {}, undefined, undefined, { cwd });
+    assert.equal((result.details.remote as { status: string }).status, "unavailable");
+    assert.match(
+      ((result.details.remote as { mismatches: string[] }).mismatches ?? []).join(" "),
+      /does not match reported PR #42/,
+    );
+    assert.deepEqual(fixture.calls, ["stack view --json"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("inspect_stack reports stale local metadata when remote stack membership is absent", async () => {
+  const cwd = createRepository();
+  try {
+    git(cwd, ["branch", "former-stack", "main"]);
+    git(cwd, ["switch", "former-stack"]);
+    writeFileSync(join(cwd, "file.txt"), "former stack\n");
+    git(cwd, ["add", "file.txt"]);
+    git(cwd, ["commit", "-m", "former stack"]);
+    git(cwd, ["switch", "main"]);
+    git(cwd, ["merge", "--no-ff", "former-stack", "-m", "merge former stack"]);
+    git(cwd, ["switch", "feature"]);
+    const fixture = stackFixture(
+      cwd,
+      [{ branch: "feature", pr: { number: 14, state: "OPEN", draft: false } }],
+      { base: "former-stack", prBase: "main", remote: [] },
+    );
+    const ownership = controllerFixture({
+      activeBranch: "feature",
+      branches: ["feature"],
+      baseBranch: "former-stack",
+    });
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner, workspaceController: ownership.controller }),
+      "inspect_stack",
+    ).execute("inspect-stale-local", {}, undefined, undefined, { cwd });
+
+    assert.equal(result.details.status, "mismatch");
+    assert.equal((result.details.remote as { status: string }).status, "absent");
+    assert.equal((result.details.ownership as { status: string }).status, "synchronized");
+    assert.equal((result.details.local as { status: string }).status, "mismatch");
+    assert.match(
+      ((result.details.local as { mismatches: string[] }).mismatches ?? []).join(" "),
+      /stale local stack metadata/,
+    );
+    assert.match(result.content?.[0]?.text ?? "", /Base: former-stack \(stale local metadata\)/);
+    assert.match(result.content?.[0]?.text ?? "", /Effective base should be: main/);
+    assert.equal(
+      (result.details.effectiveBase as { replacementBase: string }).replacementBase,
+      "main",
+    );
+    assert.deepEqual(ownership.calls, ["snapshot"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci rolls back an ambiguous PR edit before local mutation", async () => {
+  const cwd = createRepository();
+  try {
+    const calls: string[] = [];
+    let viewCount = 0;
+    let prUrl = "https://github.com/acme/repo/pull/42";
+    const runner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[0] === "stack" && args[1] === "view") {
+        viewCount++;
+        return {
+          stdout: JSON.stringify({
+            trunk: "former-stack",
+            currentBranch: "feature",
+            branches: [
+              {
+                name: "feature",
+                head: git(cwd, ["rev-parse", "feature"]),
+                base: "former-stack",
+                isCurrent: true,
+                isMerged: false,
+                isQueued: false,
+                needsRebase: false,
+                pr: {
+                  number: 42,
+                  url: "https://github.com/acme/repo/pull/42",
+                  state: "OPEN",
+                  draft: true,
+                },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "api") return { stdout: "[]", stderr: "" };
+      if (args[0] === "repo" && args[1] === "view")
+        return { stdout: '{"nameWithOwner":"acme/repo"}', stderr: "" };
+      if (args[0] === "pr" && args[1] === "list")
+        return { stdout: '[{"baseRefName":"main"}]', stderr: "" };
+      if (args[0] === "pr" && args[1] === "view") {
+        return {
+          stdout: JSON.stringify({
+            number: 42,
+            url: prUrl,
+            headRefName: "feature",
+            baseRefName: "former-stack",
+          }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "pr" && args[1] === "edit") {
+        if (args.at(-1) === "main") prUrl = "https://github.com/other/repo/pull/42";
+        if (args.at(-1) === "main") throw new Error("request timed out after applying edit");
+        return { stdout: "restored", stderr: "" };
+      }
+      throw new Error(`unexpected mutation: ${args.join(" ")}`);
+    };
+    const result = await requireTool(
+      registeredTools({ stackRunner: runner }),
+      "push_and_check_ci",
+    ).execute("ambiguous-edit", {}, undefined, undefined, { cwd });
+    assert.equal(result.details.staleSingletonRepairFailed, true);
+    assert.equal(result.details.repairFailureStage, "pr-edit");
+    assert.equal(result.details.mutationAttempted, true);
+    assert.equal(viewCount, 1);
+    assert.equal(
+      (result.details.rollback as { prBase: { verified: boolean } }).prBase.verified,
+      false,
+    );
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "repo view --json nameWithOwner",
+      "api --method GET repos/acme/repo/stacks?pull_request=42",
+      "pr view 42 --repo acme/repo --json number,url,headRefName,baseRefName",
+      "pr list --state merged --repo acme/repo --head former-stack --json baseRefName --limit 1001",
+      "pr view 42 --repo acme/repo --json number,url,headRefName,baseRefName",
+      "pr edit 42 --repo acme/repo --base main",
+      "pr edit 42 --repo acme/repo --base former-stack",
+      "pr view 42 --repo acme/repo --json number,url,headRefName,baseRefName",
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("push_and_check_ci does not verify local rollback when PR association changes", async () => {
+  const cwd = createRepository();
+  try {
+    const fixture = staleSingletonFixture(cwd, {
+      activePrBase: "former-stack",
+      mergedBases: ["main"],
+      remote: [],
+      failUnstack: true,
+      rollbackPrUrl: "https://github.com/other/repo/pull/42",
+    });
+    const result = await requireTool(
+      registeredTools({ stackRunner: fixture.runner }),
+      "push_and_check_ci",
+    ).execute("rollback-pr-metadata-mismatch", {}, undefined, undefined, { cwd });
+    assert.equal(result.details.staleSingletonRepairFailed, true, JSON.stringify(result.details));
+    assert.equal(result.details.repairFailureStage, "local-unstack");
+    assert.equal(
+      (result.details.rollback as { local: { verified: boolean } }).local.verified,
+      false,
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("inspect_stack falls back to authoritative remote membership when local metadata is unstacked", async () => {
   const cwd = createRepository();
   try {
@@ -2465,7 +3005,9 @@ test("inspect_stack falls back to authoritative remote membership when local met
       calls.push(args.join(" "));
       if (args[0] === "pr") {
         return {
-          stdout: '{"number":42,"url":"https://github.com/acme/repo/pull/42"}',
+          stdout: args.includes("--repo")
+            ? '{"number":42,"url":"https://github.com/acme/repo/pull/42","headRefName":"feature","baseRefName":"main"}'
+            : '{"number":42,"url":"https://github.com/acme/repo/pull/42"}',
           stderr: "",
         };
       }
@@ -2494,10 +3036,46 @@ test("inspect_stack falls back to authoritative remote membership when local met
     assert.deepEqual(calls, [
       "stack view --json",
       "pr view --json number,url",
+      "pr view 42 --repo acme/repo --json number,url,headRefName,baseRefName",
       "api --method GET repos/acme/repo/stacks?pull_request=42",
     ]);
     assert.equal(git(cwd, ["branch", "--show-current"]), beforeBranch);
     assert.equal(git(cwd, ["rev-parse", "HEAD"]), beforeHead);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("inspect_stack rejects recovered remote membership with the wrong head branch", async () => {
+  const cwd = createRepository();
+  try {
+    const featureSha = git(cwd, ["rev-parse", "feature"]);
+    const remote = remoteStack([{ number: 42, branch: "other", sha: featureSha }]);
+    const calls: string[] = [];
+    const runner: GhStackCommandRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[0] === "pr") {
+        return {
+          stdout: args.includes("--repo")
+            ? '{"number":42,"url":"https://github.com/acme/repo/pull/42","headRefName":"feature","baseRefName":"main"}'
+            : '{"number":42,"url":"https://github.com/acme/repo/pull/42"}',
+          stderr: "",
+        };
+      }
+      if (args[0] === "api") return { stdout: JSON.stringify(remote), stderr: "" };
+      throw new Error('current branch "feature" is not part of a stack');
+    };
+    const result = await requireTool(
+      registeredTools({ stackRunner: runner }),
+      "inspect_stack",
+    ).execute("inspect-remote-head-mismatch", {}, undefined, undefined, { cwd });
+    assert.equal((result.details.remote as { status: string }).status, "unavailable");
+    assert.deepEqual(calls, [
+      "stack view --json",
+      "pr view --json number,url",
+      "pr view 42 --repo acme/repo --json number,url,headRefName,baseRefName",
+      "api --method GET repos/acme/repo/stacks?pull_request=42",
+    ]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -2509,7 +3087,9 @@ test("inspect_stack reports remote lookup errors instead of unstacked", async ()
     const runner: GhStackCommandRunner = async (args) => {
       if (args[0] === "pr") {
         return {
-          stdout: '{"number":42,"url":"https://github.com/acme/repo/pull/42"}',
+          stdout: args.includes("--repo")
+            ? '{"number":42,"url":"https://github.com/acme/repo/pull/42","headRefName":"feature","baseRefName":"main"}'
+            : '{"number":42,"url":"https://github.com/acme/repo/pull/42"}',
           stderr: "",
         };
       }

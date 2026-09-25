@@ -53,6 +53,13 @@ import {
   runGhStackLink,
   runGhStackSync,
   runGhStackCommand,
+  probeGhStackRemote,
+  probeGhStackRepository,
+  probeGhStackPullRequest,
+  parseGhStackPullRequestRepository,
+  isGhStackPullRequestIdentity,
+  resolveGhStackStaleBase,
+  runGhStackPullRequestEdit,
   isMiddleInsertionRejectionOutput,
   restoreWorkspaceBranch,
   type GhStackCommandRunner,
@@ -147,7 +154,275 @@ export function createFixCiExtension(options: {
       return { restored, currentBranch: current, workingTreeClean: clean, restoreOutput };
     };
 
-    /** Adopt a verified local stack into the host registry without changing the checkout. */
+    /** Repair a stale singleton, probing every ambiguous boundary signal-free. */
+    const repairStaleSingletonStack = async (
+      cwd: string,
+      branch: string,
+      staleBase: string,
+      replacementBase: string,
+      pullRequest: number,
+      repository: { owner: string; repository: string },
+      originalAssociation: {
+        number: number;
+        url: string;
+        baseBranch: string | null;
+      },
+      activeBase: string,
+      signal: AbortSignal | undefined,
+    ): Promise<{ success: boolean; details: Record<string, unknown> }> => {
+      // Re-probe the exact PR immediately before any edit or local unstack.
+      // This boundary is intentionally signal-free so cancellation cannot
+      // leave a mutation based on stale resolution data.
+      const initialProbe = await probeGhStackPullRequest(
+        cwd,
+        repository.owner,
+        repository.repository,
+        pullRequest,
+        undefined,
+        stackRunner,
+      );
+      const initialVerified = isGhStackPullRequestIdentity(initialProbe, {
+        number: pullRequest,
+        owner: repository.owner,
+        repository: repository.repository,
+        headRefName: branch,
+        baseRefName: activeBase,
+      });
+      if (!initialVerified) {
+        return {
+          success: false,
+          details: {
+            staleSingletonRepairFailed: true,
+            repairFailureStage: "repair-reprobe",
+            staleBase,
+            replacementBase,
+            activeBase,
+            pullRequest,
+            repairProbe: {
+              status: initialProbe.status,
+              output: initialProbe.output,
+              verified: false,
+            },
+            mutationAttempted: false,
+            rollback: { attempted: false },
+          },
+        };
+      }
+
+      const changedPrBase = activeBase === staleBase;
+      let prEditOutput = "";
+      let replacementVerification: Record<string, unknown> | undefined;
+      const probePrBase = async (expected: string) => {
+        const probe = await probeGhStackPullRequest(
+          cwd,
+          repository.owner,
+          repository.repository,
+          pullRequest,
+          undefined,
+          stackRunner,
+        );
+        return {
+          verified: isGhStackPullRequestIdentity(probe, {
+            number: pullRequest,
+            owner: repository.owner,
+            repository: repository.repository,
+            headRefName: branch,
+            baseRefName: expected,
+          }),
+          output: probe.output,
+          base: probe.status === "found" ? probe.pullRequest.baseRefName : null,
+          status: probe.status,
+        };
+      };
+      const probeOriginalLocal = async () => {
+        const probe = await probeGhStack(cwd, undefined, stackRunner);
+        const localBranch = probe.view?.branches[0];
+        const localPr = localBranch?.pr;
+        const localRepository = localPr?.url
+          ? parseGhStackPullRequestRepository(localPr.url)
+          : null;
+        const associationVerified =
+          !!localPr &&
+          localPr.number === originalAssociation.number &&
+          localPr.url === originalAssociation.url &&
+          localRepository?.owner === repository.owner &&
+          localRepository?.repository === repository.repository &&
+          localRepository?.number === originalAssociation.number;
+        return {
+          probe,
+          verified:
+            probe.status === "stacked" &&
+            probe.branches.length === 1 &&
+            probe.branches[0] === branch &&
+            probe.baseBranch === staleBase &&
+            localBranch?.name === branch &&
+            (originalAssociation.baseBranch === null ||
+              localBranch.base === originalAssociation.baseBranch) &&
+            associationVerified,
+        };
+      };
+      const restoreOriginal = async () => {
+        const cleanup = await runGhStackUnstackLocal(cwd, undefined, stackRunner);
+        const init = await runGhStackInit(cwd, [branch], staleBase, undefined, stackRunner);
+        const verification = await probeOriginalLocal();
+        return {
+          cleanup,
+          init,
+          verification,
+          verified: verification.verified,
+        };
+      };
+      const restoreOriginalPr = async () => {
+        if (!changedPrBase) return { attempted: false, verified: true, output: "" };
+        const edit = await runGhStackPullRequestEdit(
+          cwd,
+          repository.owner,
+          repository.repository,
+          pullRequest,
+          staleBase,
+          undefined,
+          stackRunner,
+        );
+        const verification = await probePrBase(staleBase);
+        return {
+          attempted: true,
+          editSucceeded: edit.success,
+          verified: verification.verified,
+          output: edit.output,
+          verificationOutput: verification.output,
+          base: verification.base,
+        };
+      };
+      if (activeBase !== staleBase && activeBase !== replacementBase) {
+        return {
+          success: false,
+          details: {
+            staleSingletonRepairFailed: true,
+            repairFailureStage: "active-base-changed",
+            staleBase,
+            replacementBase,
+            activeBase,
+            pullRequest,
+            rollback: { attempted: false },
+          },
+        };
+      }
+
+      if (changedPrBase) {
+        const edit = await runGhStackPullRequestEdit(
+          cwd,
+          repository.owner,
+          repository.repository,
+          pullRequest,
+          replacementBase,
+          signal,
+          stackRunner,
+        );
+        prEditOutput = edit.output;
+        const replacement = edit.success ? await probePrBase(replacementBase) : null;
+        replacementVerification = replacement ?? undefined;
+        if (!edit.success || !replacement?.verified) {
+          // gh can apply an edit and still return an error (or cancellation).
+          // Always issue a signal-free edit-back and verify the stale value.
+          const rollbackPr = await restoreOriginalPr();
+          return {
+            success: false,
+            details: {
+              staleSingletonRepairFailed: true,
+              repairFailureStage: "pr-edit",
+              staleBase,
+              replacementBase,
+              activeBase,
+              pullRequest,
+              prEditOutput,
+              replacementVerification: replacement,
+              rollback: { attempted: true, prBase: rollbackPr },
+            },
+          };
+        }
+      }
+
+      const unstack = await runGhStackUnstackLocal(cwd, signal, stackRunner);
+      const unstackProbe = await probeGhStack(cwd, undefined, stackRunner);
+      if (!unstack.success || unstackProbe.status !== "unstacked") {
+        const localRollback = await restoreOriginal();
+        const prRollback = await restoreOriginalPr();
+        return {
+          success: false,
+          details: {
+            staleSingletonRepairFailed: true,
+            repairFailureStage: "local-unstack",
+            staleBase,
+            replacementBase,
+            activeBase,
+            pullRequest,
+            prEditOutput,
+            unstackOutput: unstack.output,
+            unstackProbe: {
+              status: unstackProbe.status,
+              output: unstackProbe.output,
+              branches: unstackProbe.branches,
+              baseBranch: unstackProbe.baseBranch,
+            },
+            rollback: {
+              attempted: true,
+              local: {
+                verified: localRollback.verified,
+                initSucceeded: localRollback.init.success,
+                probe: localRollback.verification.probe,
+              },
+              prBase: prRollback,
+            },
+          },
+        };
+      }
+
+      const ownership = await adoptStackOwnership(cwd, [branch], replacementBase, branch, signal);
+      if (!ownership.success) {
+        const localRollback = await restoreOriginal();
+        const prRollback = await restoreOriginalPr();
+        return {
+          success: false,
+          details: {
+            staleSingletonRepairFailed: true,
+            repairFailureStage: "workspace-ownership",
+            staleBase,
+            replacementBase,
+            activeBase,
+            pullRequest,
+            prEditOutput,
+            unstackOutput: unstack.output,
+            ...ownership.details,
+            rollback: {
+              attempted: true,
+              local: {
+                verified: localRollback.verified,
+                initSucceeded: localRollback.init.success,
+                probe: localRollback.verification.probe,
+              },
+              prBase: prRollback,
+            },
+          },
+        };
+      }
+
+      return {
+        success: true,
+        details: {
+          staleSingletonRepaired: true,
+          staleBase,
+          replacementBase,
+          pullRequest,
+          prBaseChanged: changedPrBase,
+          prEditOutput,
+          replacementVerification,
+          unstackOutput: unstack.output,
+          unstackVerified: true,
+          ...ownership.details,
+        },
+      };
+    };
+
     const adoptStackOwnership = async (
       cwd: string,
       branches: readonly string[],
@@ -1439,7 +1714,8 @@ export function createFixCiExtension(options: {
         // `gh stack sync` owns rebasing a stack. Do not run the ordinary
         // base-update/pull path afterward: that would undo stack semantics.
         const branchName = await currentBranch(cwd, signal);
-        const stackProbe = await probeGhStack(cwd, signal, stackRunner);
+        let stackProbe = await probeGhStack(cwd, signal, stackRunner);
+        let staleSingletonRepairDetails: Record<string, unknown> | undefined;
         let pushedSha: string | undefined;
         let prBase: string | null = null;
         // A successful base update intentionally rewrites the PR branch. Do
@@ -1456,6 +1732,180 @@ export function createFixCiExtension(options: {
               `### gh stack view output:\n\`\`\`\n${stackProbe.output.trim()}\n\`\`\``,
             { stackProbeFailed: true, output: stackProbe.output },
           );
+        }
+
+        if (stackProbe.status === "stacked" && branchName && stackProbe.view) {
+          const singletonBranch =
+            stackProbe.view.branches.length === 1 &&
+            stackProbe.view.branches[0].name === branchName &&
+            stackProbe.view.branches[0].pr;
+          const staleBase = stackProbe.baseBranch?.trim() || null;
+          if (singletonBranch && staleBase && staleBase !== branchName) {
+            const localPr = stackProbe.view.branches[0].pr!;
+            const repository = localPr.url ? parseGhStackPullRequestRepository(localPr.url) : null;
+            if (!repository || repository.number !== localPr.number) {
+              cycleCount = 0;
+              return respond(
+                "The singleton stack has stale local metadata, but its PR repository URL is malformed. No repair or push mutation was attempted.",
+                {
+                  staleSingletonRepairFailed: true,
+                  repairFailureStage: "repository-parse",
+                  staleBase,
+                  activeBranch: branchName,
+                  pullRequest: localPr.number,
+                  mutationAttempted: false,
+                },
+              );
+            }
+            if (repository) {
+              const checkoutRepository = await probeGhStackRepository(cwd, undefined, stackRunner);
+              const canonicalMatches =
+                checkoutRepository.status === "found" &&
+                checkoutRepository.repository.owner === repository.owner &&
+                checkoutRepository.repository.repository === repository.repository;
+              if (!canonicalMatches) {
+                cycleCount = 0;
+                return respond(
+                  "The singleton stack PR does not belong to the checkout's canonical GitHub repository. No repair or push mutation was attempted.",
+                  {
+                    staleSingletonRepairFailed: true,
+                    repairFailureStage:
+                      checkoutRepository.status === "error"
+                        ? "canonical-repository-probe"
+                        : "canonical-repository-mismatch",
+                    staleBase,
+                    activeBranch: branchName,
+                    pullRequest: localPr.number,
+                    canonicalRepository: {
+                      status: checkoutRepository.status,
+                      output: checkoutRepository.output,
+                      ...(checkoutRepository.status === "found"
+                        ? { repository: checkoutRepository.repository }
+                        : {}),
+                    },
+                    expectedRepository: {
+                      owner: repository.owner,
+                      repository: repository.repository,
+                    },
+                    mutationAttempted: false,
+                  },
+                );
+              }
+
+              const remoteProbe = await probeGhStackRemote(
+                cwd,
+                repository.owner,
+                repository.repository,
+                localPr.number,
+                signal,
+                stackRunner,
+              );
+              if (remoteProbe.status === "error") {
+                cycleCount = 0;
+                return respond(
+                  "The singleton stack has stale local metadata, but authoritative remote stack membership could not be determined. No repair or push mutation was attempted.",
+                  {
+                    staleSingletonRepairFailed: true,
+                    repairFailureStage: "remote-probe",
+                    staleBase,
+                    activeBranch: branchName,
+                    pullRequest: localPr.number,
+                    remote: { status: "error", output: remoteProbe.output },
+                    mutationAttempted: false,
+                  },
+                );
+              }
+              if (remoteProbe.status === "found") {
+                const queriedMembers = remoteProbe.stack.pullRequests.filter(
+                  (member) => member.number === localPr.number,
+                );
+                const queriedMember = queriedMembers.length === 1 ? queriedMembers[0] : undefined;
+                if (!queriedMember || queriedMember.head.ref !== branchName) {
+                  cycleCount = 0;
+                  return respond(
+                    "The singleton stack's remote membership does not point to the active branch. No repair or push mutation was attempted.",
+                    {
+                      staleSingletonRepairFailed: true,
+                      repairFailureStage: "remote-head-mismatch",
+                      staleBase,
+                      activeBranch: branchName,
+                      pullRequest: localPr.number,
+                      remote: {
+                        status: "found",
+                        output: remoteProbe.output,
+                        queriedMember: queriedMember ?? null,
+                      },
+                      mutationAttempted: false,
+                    },
+                  );
+                }
+              }
+              if (remoteProbe.status === "absent") {
+                const resolution = await resolveGhStackStaleBase(
+                  cwd,
+                  staleBase,
+                  branchName,
+                  localPr.number,
+                  repository,
+                  signal,
+                  stackRunner,
+                );
+                if (resolution.status !== "resolved") {
+                  cycleCount = 0;
+                  return respond(
+                    `The singleton stack has stale local base \`${staleBase}\`, but no unambiguous replacement was resolved: ${resolution.reason}. No repair or push mutation was attempted.`,
+                    {
+                      staleSingletonRepairFailed: true,
+                      repairFailureStage: "base-resolution",
+                      staleBase,
+                      activeBranch: branchName,
+                      pullRequest: localPr.number,
+                      replacementResolution: resolution,
+                      remote: { status: "absent", output: remoteProbe.output },
+                      mutationAttempted: false,
+                    },
+                  );
+                }
+                const repair = await repairStaleSingletonStack(
+                  cwd,
+                  branchName,
+                  staleBase,
+                  resolution.replacementBase,
+                  localPr.number,
+                  repository,
+                  {
+                    number: localPr.number,
+                    url: localPr.url!,
+                    baseBranch: stackProbe.view.branches[0].base,
+                  },
+                  resolution.activeBase,
+                  signal,
+                );
+                if (!repair.success) {
+                  cycleCount = 0;
+                  return respond(
+                    "Stale singleton-stack auto-repair did not complete safely. No ordinary push workflow was started; inspect the reported repair and rollback outcomes before retrying.",
+                    {
+                      ...repair.details,
+                      replacementResolution: resolution,
+                      remote: { status: "absent", output: remoteProbe.output },
+                      mutationAttempted: repair.details.mutationAttempted ?? true,
+                    },
+                  );
+                }
+                staleSingletonRepairDetails = repair.details;
+                // Keep the repaired PR destination through rebase, push, PR
+                // creation/readiness, and every downstream ordinary step.
+                prBase = resolution.replacementBase;
+                stackProbe = {
+                  ...stackProbe,
+                  status: "unstacked" as const,
+                  branches: [],
+                  baseBranch: null,
+                };
+              }
+            }
+          }
         }
 
         if (stackProbe.status === "stacked") {
@@ -2243,7 +2693,7 @@ export function createFixCiExtension(options: {
           // ── 2. Check if base branch is ahead — rebase if so ────────────
           // Keep the PR branch up to date with the base branch before pushing
           // and running CI. This prevents CI from testing a stale branch.
-          prBase = await getPrBaseBranch(cwd, signal);
+          if (!prBase) prBase = await getPrBaseBranch(cwd, signal);
 
           if (prBase) {
             const baseAhead = await isBaseBranchAhead(cwd, prBase, signal);
@@ -2590,6 +3040,7 @@ export function createFixCiExtension(options: {
             checks: pollResult.checks,
             mode: pollResult.mode,
             allPassed: true,
+            ...staleSingletonRepairDetails,
           });
         }
 
@@ -2612,6 +3063,7 @@ export function createFixCiExtension(options: {
               mode: pollResult.mode,
               failureLogs,
               exhausted: true,
+              ...staleSingletonRepairDetails,
             },
           );
         }
@@ -2629,6 +3081,7 @@ export function createFixCiExtension(options: {
             mode: pollResult.mode,
             failureLogs,
             cycle,
+            ...staleSingletonRepairDetails,
           },
         );
       },

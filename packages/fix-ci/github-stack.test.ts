@@ -6,9 +6,12 @@ import {
   isStackViewStacked,
   parseGhStackView,
   parseGhStackRemoteStacks,
+  parseGhStackRepository,
   probeGhStack,
+  probeGhStackRepository,
   probeGhStackCurrentPullRequest,
   probeGhStackRemote,
+  resolveGhStackStaleBase,
   resolveGhStackTarget,
   runGhStackCheckout,
   runGhStackInit,
@@ -21,7 +24,10 @@ import {
   stackBranchNames,
   stackCheckoutArgs,
   stackRemoteMembershipArgs,
+  stackRepositoryArgs,
   stackCurrentPullRequestArgs,
+  stackPullRequestBaseArgs,
+  stackPullRequestEditArgs,
   stackInitArgs,
   stackLinkArgs,
   stackSubmitArgs,
@@ -45,6 +51,15 @@ suite("GitHub stack command builders", () => {
       "--",
       "first",
       "second",
+    ]);
+    assert.deepEqual(stackPullRequestBaseArgs("acme", "repo", 42), [
+      "pr",
+      "view",
+      "42",
+      "--repo",
+      "acme/repo",
+      "--json",
+      "baseRefName",
     ]);
     assert.deepEqual(stackInitArgs(["feature/a"]), ["stack", "init", "--", "feature/a"]);
   });
@@ -473,6 +488,32 @@ suite("GitHub stack runner-driven helpers", () => {
 });
 
 suite("current pull request and remote stack probes", () => {
+  test("strictly probes the checkout's canonical repository", async () => {
+    assert.deepEqual(stackRepositoryArgs(), ["repo", "view", "--json", "nameWithOwner"]);
+    assert.deepEqual(parseGhStackRepository('{"nameWithOwner":"acme/repo"}'), {
+      owner: "acme",
+      repository: "repo",
+    });
+    for (const output of [
+      "not json",
+      '{"nameWithOwner":"acme/repo/extra"}',
+      '{"nameWithOwner":" acme/repo"}',
+      '{"nameWithOwner":"acme repo"}',
+    ]) {
+      assert.equal(parseGhStackRepository(output), null, output);
+    }
+    const calls: string[][] = [];
+    const result = await probeGhStackRepository("/workspace", undefined, async (args) => {
+      calls.push([...args]);
+      return { stdout: '{"nameWithOwner":"acme/repo"}', stderr: "" };
+    });
+    assert.deepEqual(calls, [["repo", "view", "--json", "nameWithOwner"]]);
+    assert.equal(result.status, "found");
+    if (result.status === "found") {
+      assert.deepEqual(result.repository, { owner: "acme", repository: "repo" });
+    }
+  });
+
   test("distinguishes a current PR from a missing PR and lookup errors", async () => {
     const found = await probeGhStackCurrentPullRequest("/workspace", undefined, async (args) => {
       assert.deepEqual(args, ["pr", "view", "--json", "number,url"]);
@@ -563,6 +604,28 @@ suite("remote stack membership probe", () => {
     ]);
   });
 
+  test("rejects a nonempty response that omits the queried PR", async () => {
+    const omitted = JSON.parse(response) as Record<string, unknown>[];
+    (omitted[0] as Record<string, unknown>).pull_requests = [
+      {
+        number: 41,
+        state: "OPEN",
+        draft: false,
+        merged_at: null,
+        head: { ref: "other", sha: "sha-other" },
+      },
+    ];
+    assert.equal(
+      (
+        await probeGhStackRemote("/workspace", "acme", "repo", 42, undefined, async () => ({
+          stdout: JSON.stringify(omitted),
+          stderr: "",
+        }))
+      ).status,
+      "error",
+    );
+  });
+
   test("rejects invalid stack records and multiple memberships", async () => {
     const invalid = JSON.parse(response) as Record<string, unknown>[];
     (invalid[0] as Record<string, unknown>).id = 0;
@@ -580,6 +643,104 @@ suite("remote stack membership probe", () => {
       (await probeGhStackRemote("/workspace", "acme", "repo", 42, undefined, runner)).status,
       "error",
     );
+  });
+});
+
+suite("stale singleton base resolution", () => {
+  test("uses the active PR base without mutation", async () => {
+    const calls: string[][] = [];
+    const runner: GhStackCommandRunner = async (args) => {
+      calls.push([...args]);
+      return {
+        stdout: JSON.stringify({
+          number: 42,
+          url: "https://github.com/acme/repo/pull/42",
+          headRefName: "feature",
+          baseRefName: "main",
+        }),
+        stderr: "",
+      };
+    };
+    const result = await resolveGhStackStaleBase(
+      "/workspace",
+      "former-stack",
+      "feature",
+      42,
+      { owner: "acme", repository: "repo" },
+      undefined,
+      runner,
+    );
+    assert.equal(result.status, "resolved");
+    if (result.status === "resolved") {
+      assert.equal(result.replacementBase, "main");
+      assert.equal(result.source, "active-pr");
+    }
+    assert.deepEqual(calls, [
+      ["pr", "view", "42", "--repo", "acme/repo", "--json", "number,url,headRefName,baseRefName"],
+    ]);
+    assert.deepEqual(stackPullRequestEditArgs("acme", "repo", 42, "main"), [
+      "pr",
+      "edit",
+      "42",
+      "--repo",
+      "acme/repo",
+      "--base",
+      "main",
+    ]);
+  });
+
+  test("fails closed when merged-parent lookup reaches the result cap", async () => {
+    const runner: GhStackCommandRunner = async (args) => {
+      if (args[1] === "view")
+        return {
+          stdout:
+            '{"number":42,"url":"https://github.com/acme/repo/pull/42","headRefName":"feature","baseRefName":"former-stack"}',
+          stderr: "",
+        };
+      assert.equal(args.at(-1), "1001");
+      return {
+        stdout: JSON.stringify(Array.from({ length: 1001 }, () => ({ baseRefName: "main" }))),
+        stderr: "",
+      };
+    };
+    const result = await resolveGhStackStaleBase(
+      "/workspace",
+      "former-stack",
+      "feature",
+      42,
+      { owner: "acme", repository: "repo" },
+      undefined,
+      runner,
+    );
+    assert.equal(result.status, "ambiguous");
+    if (result.status === "ambiguous") {
+      assert.match(result.reason, /not exhaustive/);
+    }
+  });
+
+  test("does not guess when merged parents are ambiguous", async () => {
+    const runner: GhStackCommandRunner = async (args) => {
+      if (args[1] === "view")
+        return {
+          stdout:
+            '{"number":42,"url":"https://github.com/acme/repo/pull/42","headRefName":"feature","baseRefName":"former-stack"}',
+          stderr: "",
+        };
+      return {
+        stdout: JSON.stringify([{ baseRefName: "main" }, { baseRefName: "release" }]),
+        stderr: "",
+      };
+    };
+    const result = await resolveGhStackStaleBase(
+      "/workspace",
+      "former-stack",
+      "feature",
+      42,
+      { owner: "acme", repository: "repo" },
+      undefined,
+      runner,
+    );
+    assert.equal(result.status, "ambiguous");
   });
 });
 

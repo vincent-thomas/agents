@@ -566,6 +566,7 @@
     hash = "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g==";
   };
   "@vt-agent/agent" = copyPathToStore ./packages/coder;
+  "@vt-agent/coderv2" = copyPathToStore ./packages/coderv2;
   "@vt-agent/command-policy" = copyPathToStore ./packages/command-policy;
   "@vt-agent/git_push" = copyPathToStore ./packages/fix-ci;
   "@vt-agent/standup" = copyPathToStore ./packages/standup;
